@@ -1,0 +1,17 @@
+fastapi==0.115.6
+uvicorn[standard]==0.32.1
+apscheduler==3.10.4
+httpx==0.28.1
+python-dotenv==1.0.1
+pydantic-settings==2.7.0
+aiosqlite==0.20.0
+google-auth==2.37.0
+google-auth-httplib2==0.2.0
+google-api-python-client==2.157.0
+python-multipart==0.0.20
+python-dateutil==2.9.0
+sqlalchemy==2.0.38
+greenlet==3.1.1
+# Конкурент-монитор
+beautifulsoup4==4.12.3
+playwright==1.49.0

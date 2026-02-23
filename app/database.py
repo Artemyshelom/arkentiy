@@ -1,0 +1,676 @@
+"""
+SQLite через aiosqlite.
+Таблицы:
+  - iiko_tokens           — кэш токенов iiko (TTL ~15 мин)
+  - job_logs              — история запусков задач
+  - stoplist_state        — хэши стоп-листов для дедупликации алертов
+  - report_updates        — флаги изменения данных (для утреннего отчёта)
+  - competitor_snapshots  — история запусков мониторинга конкурентов
+  - competitor_menu_items — позиции меню конкурентов (нормализованно)
+"""
+
+import aiosqlite
+import hashlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
+
+DB_PATH = Path("/app/data/app.db")
+
+
+async def init_db() -> None:
+    """Создаёт таблицы если не существуют."""
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS iiko_tokens (
+                city        TEXT PRIMARY KEY,
+                token       TEXT NOT NULL,
+                expires_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS job_logs (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_name    TEXT NOT NULL,
+                started_at  TEXT NOT NULL,
+                finished_at TEXT,
+                status      TEXT NOT NULL DEFAULT 'running',
+                error       TEXT,
+                details     TEXT
+            );
+
+            CREATE TABLE IF NOT EXISTS stoplist_state (
+                city        TEXT PRIMARY KEY,
+                items_hash  TEXT NOT NULL,
+                checked_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS report_updates (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                date        TEXT NOT NULL,
+                branch      TEXT NOT NULL,
+                field       TEXT NOT NULL,
+                old_value   TEXT,
+                new_value   TEXT,
+                recorded_at TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS daily_rt_snapshot (
+                branch              TEXT NOT NULL,
+                date                TEXT NOT NULL,
+                delays_late         INTEGER DEFAULT 0,
+                delays_total        INTEGER DEFAULT 0,
+                delays_avg_min      INTEGER DEFAULT 0,
+                cooks_today         INTEGER DEFAULT 0,
+                couriers_today      INTEGER DEFAULT 0,
+                saved_at            TEXT NOT NULL,
+                PRIMARY KEY (branch, date)
+            );
+        """)
+        await db.commit()
+    await init_analytics_tables()
+    await init_competitor_tables()
+
+
+async def init_competitor_tables() -> None:
+    """Создаёт таблицы мониторинга конкурентов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS competitor_snapshots (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                city            TEXT NOT NULL,
+                competitor_name TEXT NOT NULL,
+                url             TEXT NOT NULL,
+                scraped_at      TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'ok',
+                items_count     INTEGER DEFAULT 0,
+                error_msg       TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_snapshots_competitor
+                ON competitor_snapshots(city, competitor_name, scraped_at);
+
+            CREATE TABLE IF NOT EXISTS competitor_menu_items (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                snapshot_id     INTEGER NOT NULL REFERENCES competitor_snapshots(id),
+                city            TEXT NOT NULL,
+                competitor_name TEXT NOT NULL,
+                category        TEXT,
+                name            TEXT NOT NULL,
+                price           REAL NOT NULL,
+                price_old       REAL,
+                portion         TEXT,
+                scraped_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_items_competitor_date
+                ON competitor_menu_items(competitor_name, scraped_at);
+            CREATE INDEX IF NOT EXISTS idx_items_name
+                ON competitor_menu_items(name);
+        """)
+        await db.commit()
+
+
+
+# --- Токены iiko ---
+
+async def get_iiko_token(city: str) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT token, expires_at FROM iiko_tokens WHERE city = ?", (city,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            token, expires_at_str = row
+            expires_at = datetime.fromisoformat(expires_at_str)
+            if datetime.now(timezone.utc) >= expires_at:
+                return None
+            return token
+
+
+async def set_iiko_token(city: str, token: str, expires_at: datetime) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR REPLACE INTO iiko_tokens (city, token, expires_at)
+               VALUES (?, ?, ?)""",
+            (city, token, expires_at.isoformat()),
+        )
+        await db.commit()
+
+
+# --- Логи задач ---
+
+async def log_job_start(job_name: str) -> int:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "INSERT INTO job_logs (job_name, started_at, status) VALUES (?, ?, 'running')",
+            (job_name, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def log_job_finish(log_id: int, status: str, error: str | None = None, details: str | None = None) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE job_logs SET finished_at=?, status=?, error=?, details=?
+               WHERE id=?""",
+            (datetime.now(timezone.utc).isoformat(), status, error, details, log_id),
+        )
+        await db.commit()
+
+
+# --- Стоп-лист дедупликация ---
+
+def hash_stoplist(items: list) -> str:
+    serialized = json.dumps(items, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(serialized.encode()).hexdigest()
+
+
+async def get_stoplist_hash(city: str) -> str | None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT items_hash FROM stoplist_state WHERE city = ?", (city,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+
+async def set_stoplist_hash(city: str, items_hash: str) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR REPLACE INTO stoplist_state (city, items_hash, checked_at)
+               VALUES (?, ?, ?)""",
+            (city, items_hash, datetime.now(timezone.utc).isoformat()),
+        )
+        await db.commit()
+
+
+
+# --- Флаги обновления данных (для утреннего отчёта) ---
+
+async def record_data_update(date: str, branch: str, field: str, old_value, new_value) -> None:
+    """Записывает факт изменения данных — для пометки в утреннем отчёте."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO report_updates (date, branch, field, old_value, new_value, recorded_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (
+                date,
+                branch,
+                field,
+                str(old_value) if old_value is not None else None,
+                str(new_value) if new_value is not None else None,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_updates_for_date(date: str) -> list[dict]:
+    """Возвращает все записанные изменения за дату."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM report_updates WHERE date = ? ORDER BY recorded_at",
+            (date,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def clear_updates_for_date(date: str) -> None:
+    """Удаляет флаги изменений за дату (вызывается после отправки утреннего отчёта)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("DELETE FROM report_updates WHERE date = ?", (date,))
+        await db.commit()
+
+
+# --- RT Daily Snapshot (delays + staff для утреннего отчёта) ---
+
+async def save_rt_snapshot(
+    branch: str,
+    date: str,
+    delays_late: int,
+    delays_total: int,
+    delays_avg_min: int,
+    cooks_today: int,
+    couriers_today: int,
+) -> None:
+    """Сохраняет RT-итоги дня (опоздания, штат) для утреннего отчёта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT OR REPLACE INTO daily_rt_snapshot
+               (branch, date, delays_late, delays_total, delays_avg_min,
+                cooks_today, couriers_today, saved_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                branch, date,
+                delays_late, delays_total, delays_avg_min,
+                cooks_today, couriers_today,
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await db.commit()
+
+
+async def get_rt_snapshot(branch: str, date: str) -> dict | None:
+    """Возвращает сохранённый RT-снапшот или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT delays_late, delays_total, delays_avg_min,
+                      cooks_today, couriers_today
+               FROM daily_rt_snapshot WHERE branch = ? AND date = ?""",
+            (branch, date),
+        ) as cursor:
+            row = await cursor.fetchone()
+            if not row:
+                return None
+            return dict(row)
+
+
+# =============================================================================
+# Analytics: orders_raw, shifts_raw, daily_stats
+# =============================================================================
+
+async def init_analytics_tables() -> None:
+    """Создаёт аналитические таблицы (вызывается из init_db или отдельно)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Миграция: добавляем колонки если их нет (для существующих БД)
+        new_columns = [
+            ("ready_time",       "TEXT"),
+            ("comment",          "TEXT"),
+            ("operator",         "TEXT"),
+            ("opened_at",        "TEXT"),
+            ("has_problem",      "INTEGER DEFAULT 0"),
+            ("problem_comment",  "TEXT"),
+            ("payment_type",     "TEXT"),
+            ("bonus_accrued",    "REAL"),
+            ("source",           "TEXT"),
+            ("return_sum",       "REAL"),
+            ("service_charge",   "REAL"),
+            ("cancel_reason",    "TEXT"),
+            ("cancel_comment",   "TEXT"),
+            ("send_time",          "TEXT"),
+            ("service_print_time", "TEXT"),
+            ("cooking_to_send_duration", "INTEGER"),
+            ("pay_breakdown",      "TEXT"),
+        ]
+        for col_name, col_type in new_columns:
+            try:
+                await db.execute(f"ALTER TABLE orders_raw ADD COLUMN {col_name} {col_type}")
+                await db.commit()
+            except Exception:
+                pass  # Колонка уже существует
+
+        daily_stats_new_cols = [
+            ("cogs_pct",       "REAL"),
+            ("sailplay",       "REAL"),
+            ("discount_sum",   "REAL"),
+            ("discount_types", "TEXT"),
+        ]
+        for col_name, col_type in daily_stats_new_cols:
+            try:
+                await db.execute(f"ALTER TABLE daily_stats ADD COLUMN {col_name} {col_type}")
+                await db.commit()
+            except Exception:
+                pass
+
+        daily_stats_new_cols = [
+            ("cogs_pct",       "REAL"),
+            ("sailplay",       "REAL"),
+            ("discount_sum",   "REAL"),
+            ("discount_types", "TEXT"),
+        ]
+        for col_name, col_type in daily_stats_new_cols:
+            try:
+                await db.execute(f"ALTER TABLE daily_stats ADD COLUMN {col_name} {col_type}")
+                await db.commit()
+            except Exception:
+                pass
+
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS orders_raw (
+                branch_name     TEXT NOT NULL,
+                delivery_num    TEXT NOT NULL,
+                status          TEXT,
+                courier         TEXT,
+                sum             REAL,
+                planned_time    TEXT,
+                actual_time     TEXT,
+                is_self_service  INTEGER DEFAULT 0,
+                date             TEXT,
+                is_late          INTEGER DEFAULT 0,
+                late_minutes     REAL DEFAULT 0,
+                client_name      TEXT,
+                client_phone     TEXT,
+                delivery_address TEXT,
+                items            TEXT,
+                ready_time       TEXT,
+                -- Новые поля (Events API)
+                comment          TEXT,
+                operator         TEXT,
+                opened_at        TEXT,
+                has_problem      INTEGER DEFAULT 0,
+                problem_comment  TEXT,
+                -- Новые поля (OLAP, заполняются при бэкфилле)
+                payment_type     TEXT,
+                bonus_accrued    REAL,
+                source           TEXT,
+                return_sum       REAL,
+                service_charge   REAL,
+                cancel_reason    TEXT,
+                cancel_comment   TEXT,
+                updated_at       TEXT NOT NULL,
+                PRIMARY KEY (branch_name, delivery_num)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_orders_date
+                ON orders_raw(date);
+            CREATE INDEX IF NOT EXISTS idx_orders_branch_date
+                ON orders_raw(branch_name, date);
+
+            CREATE TABLE IF NOT EXISTS shifts_raw (
+                branch_name     TEXT NOT NULL,
+                employee_id     TEXT NOT NULL,
+                employee_name   TEXT,
+                role_class      TEXT,
+                date            TEXT,
+                clock_in        TEXT,
+                clock_out       TEXT,
+                updated_at      TEXT NOT NULL,
+                PRIMARY KEY (branch_name, employee_id, clock_in)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_shifts_branch_date
+                ON shifts_raw(branch_name, date);
+
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                branch_name         TEXT NOT NULL,
+                date                TEXT NOT NULL,
+                orders_count        INTEGER DEFAULT 0,
+                revenue             REAL DEFAULT 0,
+                avg_check           REAL DEFAULT 0,
+                cogs_pct            REAL,
+                sailplay            REAL,
+                discount_sum        REAL,
+                discount_types      TEXT,
+                delivery_count      INTEGER DEFAULT 0,
+                pickup_count        INTEGER DEFAULT 0,
+                late_count          INTEGER DEFAULT 0,
+                total_delivered     INTEGER DEFAULT 0,
+                late_percent        REAL DEFAULT 0,
+                avg_late_min        REAL DEFAULT 0,
+                cooks_count         INTEGER DEFAULT 0,
+                couriers_count      INTEGER DEFAULT 0,
+                updated_at          TEXT NOT NULL,
+                PRIMARY KEY (branch_name, date)
+            );
+        """)
+        await db.commit()
+
+
+async def upsert_orders_batch(rows: list[dict]) -> None:
+    """Batch UPSERT доставок в orders_raw. Ключ: (branch_name, delivery_num)."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT INTO orders_raw
+               (branch_name, delivery_num, status, courier, sum,
+                planned_time, actual_time, is_self_service,
+                date, is_late, late_minutes,
+                client_name, client_phone, delivery_address, items,
+                ready_time,
+                comment, operator, opened_at, has_problem, problem_comment,
+                payment_type, bonus_accrued, source, return_sum, service_charge,
+                cancel_reason, cancel_comment,
+                updated_at)
+               VALUES (:branch_name, :delivery_num, :status, :courier, :sum,
+                       :planned_time, :actual_time, :is_self_service,
+                       :date, :is_late, :late_minutes,
+                       :client_name, :client_phone, :delivery_address, :items,
+                       :ready_time,
+                       :comment, :operator, :opened_at, :has_problem, :problem_comment,
+                       :payment_type, :bonus_accrued, :source, :return_sum, :service_charge,
+                       :cancel_reason, :cancel_comment,
+                       :updated_at)
+               ON CONFLICT(branch_name, delivery_num) DO UPDATE SET
+                 status=excluded.status, courier=excluded.courier, sum=excluded.sum,
+                 planned_time=excluded.planned_time, actual_time=excluded.actual_time,
+                 is_self_service=excluded.is_self_service, date=excluded.date,
+                 is_late=excluded.is_late, late_minutes=excluded.late_minutes,
+                 client_name=excluded.client_name, client_phone=excluded.client_phone,
+                 delivery_address=excluded.delivery_address, items=excluded.items,
+                 ready_time=COALESCE(excluded.ready_time, orders_raw.ready_time),
+                 comment=excluded.comment, operator=excluded.operator,
+                 opened_at=excluded.opened_at, has_problem=excluded.has_problem,
+                 problem_comment=excluded.problem_comment, payment_type=excluded.payment_type,
+                 bonus_accrued=excluded.bonus_accrued, source=excluded.source,
+                 return_sum=excluded.return_sum, service_charge=excluded.service_charge,
+                 cancel_reason=excluded.cancel_reason, cancel_comment=excluded.cancel_comment,
+                 updated_at=excluded.updated_at""",
+            rows,
+        )
+        await db.commit()
+
+
+async def upsert_shifts_batch(rows: list[dict]) -> None:
+    """Batch UPSERT смен в shifts_raw. Ключ: (branch_name, employee_id, clock_in)."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT OR REPLACE INTO shifts_raw
+               (branch_name, employee_id, employee_name, role_class,
+                date, clock_in, clock_out, updated_at)
+               VALUES (:branch_name, :employee_id, :employee_name, :role_class,
+                       :date, :clock_in, :clock_out, :updated_at)""",
+            rows,
+        )
+        await db.commit()
+
+
+async def upsert_daily_stats_batch(rows: list[dict]) -> None:
+    """Batch UPSERT в daily_stats. Ключ: (branch_name, date)."""
+    if not rows:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT OR REPLACE INTO daily_stats
+               (branch_name, date, orders_count, revenue, avg_check,
+                cogs_pct, sailplay, discount_sum, discount_types,
+                delivery_count, pickup_count, late_count, total_delivered,
+                late_percent, avg_late_min, cooks_count, couriers_count, updated_at)
+               VALUES (:branch_name, :date, :orders_count, :revenue, :avg_check,
+                       :cogs_pct, :sailplay, :discount_sum, :discount_types,
+                       :delivery_count, :pickup_count, :late_count, :total_delivered,
+                       :late_percent, :avg_late_min, :cooks_count, :couriers_count,
+                       datetime('now'))""",
+            rows,
+        )
+        await db.commit()
+
+
+async def get_daily_stats(branch_name: str, date_iso: str) -> dict | None:
+    """Читает строку daily_stats для точки и даты. Возвращает dict или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM daily_stats WHERE branch_name = ? AND date = ?",
+            (branch_name, date_iso),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+
+# =============================================================================
+# Competitor monitoring
+# =============================================================================
+
+async def create_competitor_snapshot(
+    city: str,
+    competitor_name: str,
+    url: str,
+    status: str = "ok",
+    items_count: int = 0,
+    error_msg: str | None = None,
+) -> int:
+    """Создаёт запись снапшота, возвращает id."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            """INSERT INTO competitor_snapshots
+               (city, competitor_name, url, scraped_at, status, items_count, error_msg)
+               VALUES (?, ?, ?, datetime('now'), ?, ?, ?)""",
+            (city, competitor_name, url, status, items_count, error_msg),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def save_competitor_items(snapshot_id: int, city: str, competitor_name: str, items: list[dict]) -> None:
+    """Сохраняет позиции меню для снапшота."""
+    if not items:
+        return
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executemany(
+            """INSERT INTO competitor_menu_items
+               (snapshot_id, city, competitor_name, category, name, price, price_old, portion, scraped_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))""",
+            [
+                (snapshot_id, city, competitor_name,
+                 item.get("category"), item["name"], item["price"],
+                 item.get("price_old"), item.get("portion"))
+                for item in items
+            ],
+        )
+        await db.commit()
+
+
+
+async def get_second_last_competitor_items(city: str, competitor_name: str) -> list[dict]:
+    """Возвращает позиции из предпоследнего успешного снапшота (для диффа)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        # Найти два последних успешных снапшота
+        async with db.execute(
+            """SELECT id FROM competitor_snapshots
+               WHERE city = ? AND competitor_name = ? AND status = 'ok'
+               ORDER BY scraped_at DESC LIMIT 2""",
+            (city, competitor_name),
+        ) as cursor:
+            snapshot_ids = [row[0] for row in await cursor.fetchall()]
+
+        if len(snapshot_ids) < 2:
+            return []
+
+        prev_snapshot_id = snapshot_ids[1]
+        async with db.execute(
+            """SELECT name, price, price_old, portion, category
+               FROM competitor_menu_items
+               WHERE snapshot_id = ?""",
+            (prev_snapshot_id,),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(zip(["name", "price", "price_old", "portion", "category"], row)) for row in rows]
+
+
+
+async def close_stale_shifts(today_iso: str) -> int:
+    """
+    Закрывает зависшие смены предыдущих дней (clock_out IS NULL, date < today).
+    Используется при full load чтобы исключить их из fallback-сида.
+    Возвращает количество закрытых записей.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "UPDATE shifts_raw SET clock_out = clock_in WHERE date < ? AND clock_out IS NULL",
+            (today_iso,),
+        )
+        await db.commit()
+        return cursor.rowcount
+
+
+async def get_today_shifts(branch_name: str, date_iso: str) -> list[dict]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT employee_id, employee_name, role_class, clock_in, clock_out FROM shifts_raw WHERE branch_name = ? AND date = ? ORDER BY clock_in",
+            (branch_name, date_iso),
+        ) as cursor:
+            rows = await cursor.fetchall()
+            return [dict(r) for r in rows]
+
+
+async def get_client_order_count(phone: str) -> int:
+    """Количество заказов клиента по номеру телефона в orders_raw."""
+    if not phone:
+        return 0
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT COUNT(*) FROM orders_raw WHERE client_phone = ?", (phone,)
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else 0
+
+
+# ---------------------------------------------------------------------------
+# Конкуренты — функции для Sheets-экспорта
+# ---------------------------------------------------------------------------
+
+async def get_competitor_names() -> list[tuple[str, str]]:
+    """Возвращает уникальные (city, competitor_name) из успешных снапшотов."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT DISTINCT city, competitor_name
+               FROM competitor_snapshots
+               WHERE status = 'ok'
+               ORDER BY city, competitor_name"""
+        ) as cursor:
+            return [(row[0], row[1]) for row in await cursor.fetchall()]
+
+
+async def get_all_competitor_items_by_snapshot(
+    city: str, competitor_name: str
+) -> list[dict]:
+    """
+    Все позиции конкурента по всем снапшотам.
+    Возвращает [{name, price, snapshot_date}], отсортировано по дате ASC.
+    Только успешные снапшоты.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT i.name, i.price, i.price_old,
+                      date(s.scraped_at) AS snapshot_date,
+                      i.category
+               FROM competitor_menu_items i
+               JOIN competitor_snapshots s ON i.snapshot_id = s.id
+               WHERE s.city = ? AND s.competitor_name = ? AND s.status = 'ok'
+               ORDER BY s.scraped_at ASC, i.category, i.name""",
+            (city, competitor_name),
+        ) as cursor:
+            return [
+                {
+                    "name": r[0], "price": r[1], "price_old": r[2],
+                    "snapshot_date": r[3], "category": r[4] or "",
+                }
+                for r in await cursor.fetchall()
+            ]
+
+
+async def get_competitor_last_snapshot(city: str, competitor_name: str) -> dict | None:
+    """Последний успешный снапшот конкурента: {date, items_count}."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            """SELECT date(scraped_at), items_count
+               FROM competitor_snapshots
+               WHERE city = ? AND competitor_name = ? AND status = 'ok'
+               ORDER BY scraped_at DESC LIMIT 1""",
+            (city, competitor_name),
+        ) as cursor:
+            row = await cursor.fetchone()
+            return {"date": row[0], "items_count": row[1]} if row else None

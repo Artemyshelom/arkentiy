@@ -1,0 +1,27 @@
+services:
+  app:
+    build: .
+    container_name: ebidoebi-integrations
+    restart: unless-stopped
+    env_file: .env
+    ports:
+      - "8000:8000"
+    volumes:
+      # Постоянное хранилище — переживает пересборку контейнера
+      - ./data:/app/data
+      - ./logs:/app/logs
+      # Google Service Account JSON (положить рядом с docker-compose.yml)
+      - ./secrets:/app/secrets:ro
+    environment:
+      - TZ=Europe/Moscow
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"

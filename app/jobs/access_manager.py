@@ -29,6 +29,7 @@ from typing import Optional
 import httpx
 
 from app import access
+from app import database as _db
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -269,44 +270,60 @@ def _user_screen(uid_str: str) -> tuple[str, list]:
 
 
 # ---------------------------------------------------------------------------
-# Config mutations
+# Config mutations (async — пишут в БД, обновляют in-memory кэш access.py)
 # ---------------------------------------------------------------------------
 
-def _toggle_module(section: str, key_str: str, module: str) -> None:
+async def _refresh_cache() -> None:
+    """Перечитывает конфиг из БД и обновляет in-memory кэш access.py."""
+    cfg = await _db.get_access_config_from_db()
+    access.update_db_cache(cfg)
+
+
+async def _toggle_module(section: str, key_str: str, module: str) -> None:
     cfg = access.get_config()
-    entry = cfg.setdefault(section, {}).setdefault(key_str, {"modules": [], "city": None})
+    entry = cfg.get(section, {}).get(key_str, {"name": key_str, "modules": [], "city": None})
     mods = set(entry.get("modules", []))
     mods.discard(module) if module in mods else mods.add(module)
-    entry["modules"] = sorted(mods)
-    access.save_config(cfg)
+    modules = sorted(mods)
+    name = entry.get("name", key_str)
+    city = entry.get("city")
+    if section == "chats":
+        await _db.upsert_tenant_chat(int(key_str), name, modules, city)
+    else:
+        await _db.upsert_tenant_user(int(key_str), name, modules, city)
+    await _refresh_cache()
 
 
-def _set_city(section: str, key_str: str, city: str | None) -> None:
+async def _set_city(section: str, key_str: str, city: str | None) -> None:
     cfg = access.get_config()
-    entry = cfg.setdefault(section, {}).setdefault(key_str, {"modules": [], "city": None})
-    entry["city"] = city
-    access.save_config(cfg)
+    entry = cfg.get(section, {}).get(key_str, {"name": key_str, "modules": [], "city": None})
+    modules = entry.get("modules", [])
+    name = entry.get("name", key_str)
+    if section == "chats":
+        await _db.upsert_tenant_chat(int(key_str), name, modules, city)
+    else:
+        await _db.upsert_tenant_user(int(key_str), name, modules, city)
+    await _refresh_cache()
 
 
-def _delete_entry(section: str, key_str: str) -> None:
+async def _delete_entry(section: str, key_str: str) -> None:
+    if section == "chats":
+        await _db.delete_tenant_chat(int(key_str))
+    else:
+        await _db.delete_tenant_user(int(key_str))
+    await _refresh_cache()
+
+
+async def _register_chat(cid_str: str, name: str) -> None:
     cfg = access.get_config()
-    cfg.get(section, {}).pop(key_str, None)
-    access.save_config(cfg)
+    if cid_str not in cfg.get("chats", {}):
+        await _db.upsert_tenant_chat(int(cid_str), name, [], None)
+        await _refresh_cache()
 
 
-def _register_chat(cid_str: str, name: str) -> None:
-    cfg = access.get_config()
-    chats = cfg.setdefault("chats", {})
-    if cid_str not in chats:
-        chats[cid_str] = {"name": name, "modules": [], "city": None}
-    access.save_config(cfg)
-
-
-def _register_user(uid_str: str, name: str) -> None:
-    cfg = access.get_config()
-    users = cfg.setdefault("users", {})
-    users[uid_str] = {"name": name, "modules": [], "city": None}
-    access.save_config(cfg)
+async def _register_user(uid_str: str, name: str) -> None:
+    await _db.upsert_tenant_user(int(uid_str), name, [], None)
+    await _refresh_cache()
 
 
 # ---------------------------------------------------------------------------
@@ -363,7 +380,7 @@ async def handle_callback(
         await _edit(chat_id, message_id, text, kb)
 
     elif action == "tm" and len(parts) >= 4:
-        _toggle_module("chats", parts[2], parts[3])
+        await _toggle_module("chats", parts[2], parts[3])
         mod_label = dict(_MODULE_META).get(parts[3], parts[3])
         cfg = access.get_config()
         mods = set(cfg.get("chats", {}).get(parts[2], {}).get("modules", []))
@@ -375,7 +392,7 @@ async def handle_callback(
 
     elif action == "ty" and len(parts) >= 4:
         city_val = None if parts[3] == "null" else parts[3]
-        _set_city("chats", parts[2], city_val)
+        await _set_city("chats", parts[2], city_val)
         city_label = city_val or "Все города"
         await _answer_cb(cb_id, f"Город: {city_label} ✅")
         text, kb = _chat_screen(parts[2])
@@ -385,7 +402,7 @@ async def handle_callback(
     elif action == "cd" and len(parts) >= 3:
         cfg = access.get_config()
         chat_name = cfg.get("chats", {}).get(parts[2], {}).get("name", parts[2])
-        _delete_entry("chats", parts[2])
+        await _delete_entry("chats", parts[2])
         await _answer_cb(cb_id, f"«{chat_name}» удалён")
         text, kb = _main_screen()
         await _edit(chat_id, message_id, text, kb)
@@ -400,7 +417,7 @@ async def handle_callback(
         await _edit(chat_id, message_id, text, kb)
 
     elif action == "um" and len(parts) >= 4:
-        _toggle_module("users", parts[2], parts[3])
+        await _toggle_module("users", parts[2], parts[3])
         mod_label = dict(_MODULE_META).get(parts[3], parts[3])
         cfg = access.get_config()
         mods = set(cfg.get("users", {}).get(parts[2], {}).get("modules", []))
@@ -412,7 +429,7 @@ async def handle_callback(
 
     elif action == "uy" and len(parts) >= 4:
         city_val = None if parts[3] == "null" else parts[3]
-        _set_city("users", parts[2], city_val)
+        await _set_city("users", parts[2], city_val)
         city_label = city_val or "Все города"
         await _answer_cb(cb_id, f"Город: {city_label} ✅")
         text, kb = _user_screen(parts[2])
@@ -422,7 +439,7 @@ async def handle_callback(
     elif action == "ud" and len(parts) >= 3:
         cfg = access.get_config()
         user_name = cfg.get("users", {}).get(parts[2], {}).get("name", parts[2])
-        _delete_entry("users", parts[2])
+        await _delete_entry("users", parts[2])
         await _answer_cb(cb_id, f"«{user_name}» удалён")
         text, kb = _users_screen()
         await _edit(chat_id, message_id, text, kb)
@@ -450,7 +467,7 @@ async def handle_callback(
 
     elif action == "rg" and len(parts) >= 3:
         cid_str = parts[2]
-        _register_chat(cid_str, f"Чат {cid_str}")
+        await _register_chat(cid_str, f"Чат {cid_str}")
         text, kb = _chat_screen(cid_str)
         await _edit(chat_id, message_id, text, kb)
 
@@ -481,7 +498,7 @@ async def handle_text(chat_id: int, user_id: int, text: str) -> bool:
 
         if state["step"] == "await_name":
             name = text.strip()
-            _register_chat(state["chat_id"], name)
+            await _register_chat(state["chat_id"], name)
             _pending.pop(user_id, None)
             t, kb = _chat_screen(state["chat_id"])
             await _send(chat_id, f"✅ Чат «{name}» добавлен. Настрой модули:\n\n{t}", kb)
@@ -501,7 +518,7 @@ async def handle_text(chat_id: int, user_id: int, text: str) -> bool:
 
         if state["step"] == "await_name":
             name = text.strip()
-            _register_user(state["user_id"], name)
+            await _register_user(state["user_id"], name)
             _pending.pop(user_id, None)
             t, kb = _user_screen(state["user_id"])
             await _send(chat_id, f"✅ Пользователь «{name}» добавлен. Настрой модули:\n\n{t}", kb)

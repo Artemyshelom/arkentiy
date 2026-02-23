@@ -722,6 +722,7 @@ async def init_saas_tables() -> None:
             CREATE TABLE IF NOT EXISTS tenant_users (
                 tenant_id    INTEGER NOT NULL REFERENCES tenants(id),
                 user_id      INTEGER NOT NULL,
+                name         TEXT,
                 role         TEXT NOT NULL DEFAULT 'viewer',
                 modules_json TEXT,
                 city         TEXT,
@@ -733,6 +734,7 @@ async def init_saas_tables() -> None:
             CREATE TABLE IF NOT EXISTS tenant_chats (
                 tenant_id    INTEGER NOT NULL REFERENCES tenants(id),
                 chat_id      INTEGER NOT NULL,
+                name         TEXT,
                 modules_json TEXT,
                 city         TEXT,
                 is_active    INTEGER NOT NULL DEFAULT 1,
@@ -768,6 +770,17 @@ async def init_saas_tables() -> None:
             );
         """)
         await db.commit()
+
+        # Идемпотентные миграции для уже существующих таблиц (добавляем колонку name)
+        for migration in [
+            "ALTER TABLE tenant_users ADD COLUMN name TEXT",
+            "ALTER TABLE tenant_chats ADD COLUMN name TEXT",
+        ]:
+            try:
+                await db.execute(migration)
+                await db.commit()
+            except Exception:
+                pass  # колонка уже существует — всё ок
 
 
 async def seed_default_tenant() -> None:
@@ -835,3 +848,142 @@ async def get_subscription(tenant_id: int = 1) -> dict | None:
         ) as cursor:
             row = await cursor.fetchone()
             return dict(row) if row else None
+
+
+# --- Управление доступом через БД (Фаза 0.1) ---
+
+async def get_all_tenant_users(tenant_id: int = 1) -> list[dict]:
+    """Все активные пользователи тенанта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT user_id, name, role, modules_json, city
+               FROM tenant_users WHERE tenant_id = ? AND is_active = 1""",
+            (tenant_id,),
+        ) as cur:
+            return [
+                {
+                    "user_id": r["user_id"],
+                    "name": r["name"] or str(r["user_id"]),
+                    "role": r["role"],
+                    "modules": json.loads(r["modules_json"] or "[]"),
+                    "city": r["city"],
+                }
+                for r in await cur.fetchall()
+            ]
+
+
+async def get_all_tenant_chats(tenant_id: int = 1) -> list[dict]:
+    """Все активные чаты тенанта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            """SELECT chat_id, name, modules_json, city
+               FROM tenant_chats WHERE tenant_id = ? AND is_active = 1""",
+            (tenant_id,),
+        ) as cur:
+            return [
+                {
+                    "chat_id": r["chat_id"],
+                    "name": r["name"] or str(r["chat_id"]),
+                    "modules": json.loads(r["modules_json"] or "[]"),
+                    "city": r["city"],
+                }
+                for r in await cur.fetchall()
+            ]
+
+
+async def upsert_tenant_user(
+    user_id: int,
+    name: str,
+    modules: list[str] | None = None,
+    city: str | None = None,
+    role: str = "viewer",
+    tenant_id: int = 1,
+) -> None:
+    """UPSERT пользователя тенанта."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO tenant_users
+               (tenant_id, user_id, name, role, modules_json, city, is_active, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+               ON CONFLICT (tenant_id, user_id) DO UPDATE SET
+                 name         = excluded.name,
+                 role         = excluded.role,
+                 modules_json = excluded.modules_json,
+                 city         = excluded.city,
+                 is_active    = 1""",
+            (tenant_id, user_id, name, role, json.dumps(modules or []), city, now),
+        )
+        await db.commit()
+
+
+async def upsert_tenant_chat(
+    chat_id: int,
+    name: str,
+    modules: list[str] | None = None,
+    city: str | None = None,
+    tenant_id: int = 1,
+) -> None:
+    """UPSERT чата тенанта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO tenant_chats
+               (tenant_id, chat_id, name, modules_json, city, is_active)
+               VALUES (?, ?, ?, ?, ?, 1)
+               ON CONFLICT (tenant_id, chat_id) DO UPDATE SET
+                 name         = excluded.name,
+                 modules_json = excluded.modules_json,
+                 city         = excluded.city,
+                 is_active    = 1""",
+            (tenant_id, chat_id, name, json.dumps(modules or []), city),
+        )
+        await db.commit()
+
+
+async def delete_tenant_user(user_id: int, tenant_id: int = 1) -> None:
+    """Деактивирует пользователя (soft delete)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE tenant_users SET is_active = 0 WHERE tenant_id = ? AND user_id = ?",
+            (tenant_id, user_id),
+        )
+        await db.commit()
+
+
+async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
+    """Деактивирует чат (soft delete)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "UPDATE tenant_chats SET is_active = 0 WHERE tenant_id = ? AND chat_id = ?",
+            (tenant_id, chat_id),
+        )
+        await db.commit()
+
+
+async def get_access_config_from_db(tenant_id: int = 1) -> dict:
+    """
+    Возвращает конфиг доступа из БД в формате access_config.json.
+    {"chats": {str(chat_id): {...}}, "users": {str(user_id): {...}}}
+    """
+    users = await get_all_tenant_users(tenant_id)
+    chats = await get_all_tenant_chats(tenant_id)
+    return {
+        "chats": {
+            str(c["chat_id"]): {
+                "name": c["name"],
+                "modules": c["modules"],
+                "city": c["city"],
+            }
+            for c in chats
+        },
+        "users": {
+            str(u["user_id"]): {
+                "name": u["name"],
+                "modules": u["modules"],
+                "city": u["city"],
+            }
+            for u in users
+        },
+    }

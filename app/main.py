@@ -16,7 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from app.clients import telegram
 from app.config import get_settings
-from app.database import init_db
+from app.database import init_db, get_access_config_from_db
+from app import access as _access
 from app.monitoring.healthcheck import router as health_router
 from app.webhooks.bitrix import router as bitrix_router
 
@@ -188,6 +189,13 @@ async def lifespan(app: FastAPI):
     logger.info("Запуск приложения...")
     await init_db()
     logger.info("SQLite инициализирован")
+
+    _db_access = await get_access_config_from_db()
+    _access.update_db_cache(_db_access)
+    logger.info(
+        f"Access DB cache: {len(_db_access.get('chats', {}))} чатов, "
+        f"{len(_db_access.get('users', {}))} пользователей"
+    )
 
     register_jobs()
     scheduler.start()

@@ -33,8 +33,18 @@ MODULE_LABELS: dict[str, str] = {
     "admin":        "🛠 Админ",
 }
 
-# (mtime, config_dict)
+# (mtime, config_dict) — кэш JSON-файла
 _cache: tuple[float, dict] | None = None
+
+# In-memory кэш из БД: {"chats": {...}, "users": {...}}
+# Заполняется при старте (main.py) и после каждой мутации через access_manager
+_db_cfg: dict = {}
+
+
+def update_db_cache(cfg: dict) -> None:
+    """Обновляет in-memory DB-кэш. Вызывается при старте и после мутаций в access_manager."""
+    global _db_cfg
+    _db_cfg = cfg
 
 
 @dataclass
@@ -70,36 +80,44 @@ def get_permissions(chat_id: int, user_id: int) -> Permissions:
     """
     Возвращает Permissions для пары (chat_id, user_id).
 
-    Приоритет: admins > chats[chat_id] > users[user_id]
-    Hybrid: если entity не найдена в конфиге → .env fallback.
+    Приоритет: admins > DB-кэш (chats/users) > JSON-конфиг > .env fallback.
     """
     cfg = _load_config()
 
-    # Admins — проверяем через конфиг и .env
+    # Admins — через JSON-конфиг и .env (неизменно)
     if _check_admin(user_id, cfg):
         return Permissions(modules=ALL_MODULES, city=None, is_admin=True)
 
-    # Если конфига нет — полный fallback на .env
-    if not cfg:
-        return _env_fallback(chat_id, user_id)
-
-    # Проверяем чат в конфиге
-    chat_cfg = cfg.get("chats", {}).get(str(chat_id))
-    if chat_cfg is not None:
+    # DB-кэш — приоритетный источник (заполняется из tenant_chats / tenant_users)
+    db_chat = _db_cfg.get("chats", {}).get(str(chat_id))
+    if db_chat is not None:
         return Permissions(
-            modules=frozenset(chat_cfg.get("modules", [])),
-            city=chat_cfg.get("city"),
+            modules=frozenset(db_chat.get("modules", [])),
+            city=db_chat.get("city"),
+        )
+    db_user = _db_cfg.get("users", {}).get(str(user_id))
+    if db_user is not None:
+        return Permissions(
+            modules=frozenset(db_user.get("modules", [])),
+            city=db_user.get("city"),
         )
 
-    # Проверяем пользователя в конфиге
-    user_cfg = cfg.get("users", {}).get(str(user_id))
-    if user_cfg is not None:
-        return Permissions(
-            modules=frozenset(user_cfg.get("modules", [])),
-            city=user_cfg.get("city"),
-        )
+    # JSON-конфиг — legacy fallback (записи добавленные до Фазы 0.1)
+    if cfg:
+        chat_cfg = cfg.get("chats", {}).get(str(chat_id))
+        if chat_cfg is not None:
+            return Permissions(
+                modules=frozenset(chat_cfg.get("modules", [])),
+                city=chat_cfg.get("city"),
+            )
+        user_cfg = cfg.get("users", {}).get(str(user_id))
+        if user_cfg is not None:
+            return Permissions(
+                modules=frozenset(user_cfg.get("modules", [])),
+                city=user_cfg.get("city"),
+            )
 
-    # Не найдено в конфиге → hybrid fallback
+    # .env fallback — для незарегистрированных entities
     return _env_fallback(chat_id, user_id)
 
 
@@ -160,8 +178,16 @@ def is_admin(user_id: int) -> bool:
 
 
 def get_config() -> dict:
-    """Возвращает текущий конфиг (для UI)."""
-    return _load_config()
+    """
+    Возвращает конфиг для UI access_manager:
+    admins — из JSON-файла/env, chats/users — из DB-кэша.
+    """
+    cfg = _load_config()
+    return {
+        "admins": cfg.get("admins", []),
+        "chats": _db_cfg.get("chats", {}),
+        "users": _db_cfg.get("users", {}),
+    }
 
 
 def save_config(data: dict) -> None:

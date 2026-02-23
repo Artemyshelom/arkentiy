@@ -43,7 +43,7 @@ _MODULE_META: list[tuple[str, str]] = [
     ("late_queries", "📋 Запросы"),
     ("search",       "🔍 Поиск"),
     ("reports",      "📊 Отчёты"),
-    ("marketing",    "📈 Маркетинг"),
+    ("marketing",    "📈 Выгрузка данных"),
     ("finance",      "💰 Финансы"),
     ("admin",        "🛠 Админ"),
 ]

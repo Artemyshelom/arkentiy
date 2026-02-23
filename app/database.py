@@ -962,6 +962,30 @@ async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
         await db.commit()
 
 
+async def get_alert_chats_for_city(city: str, tenant_id: int = 1) -> list[int]:
+    """
+    Возвращает список chat_id, у которых включён модуль late_alerts
+    и город совпадает с city (или у чата нет ограничения по городу).
+    """
+    import json as _json
+    chats = await get_all_tenant_chats(tenant_id)
+    result: list[int] = []
+    for chat in chats:
+        if "late_alerts" not in chat.get("modules", []):
+            continue
+        city_raw: str | None = chat.get("city")
+        if city_raw is None:
+            result.append(chat["chat_id"])
+            continue
+        try:
+            cities = frozenset(_json.loads(city_raw))
+        except (ValueError, TypeError):
+            cities = frozenset({city_raw}) if city_raw else frozenset()
+        if city in cities:
+            result.append(chat["chat_id"])
+    return result
+
+
 async def get_access_config_from_db(tenant_id: int = 1) -> dict:
     """
     Возвращает конфиг доступа из БД в формате access_config.json.

@@ -868,6 +868,10 @@ async def poll_analytics_bot() -> None:
         user_id: int = message.get("from", {}).get("id", 0)
         username: str = message.get("from", {}).get("username", "unknown")
 
+        # Личка — только admin. Остальные игнорируются молча.
+        if chat_id > 0 and not access.is_admin(user_id):
+            continue
+
         # Не команда — проверяем диалог access_manager (например, ввод ID чата)
         if text and not text.startswith("/"):
             if access.is_admin(user_id) and chat_id > 0:

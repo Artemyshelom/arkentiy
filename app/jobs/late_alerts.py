@@ -16,7 +16,7 @@ from app.clients.iiko_bo_events import (
     _states,
 )
 from app.config import get_settings
-from app.database import get_client_order_count
+from app.database import get_alert_chats_for_city, get_client_order_count
 
 logger = logging.getLogger(__name__)
 
@@ -24,13 +24,8 @@ LATE_THRESHOLD_MIN = 15
 LATE_MAX_MIN = 60  # заказы >60 мин опоздания — стале/отменены, не алертим
 LOCAL_UTC_OFFSET = 7  # все 9 точек в UTC+7
 
-# Чат-ID для алертов по городу. None = ещё не настроен, алерт не отправляется.
-CITY_ALERT_CHAT: dict[str, int | None] = {
-    "Томск":      -1003726930516,
-    "Барнаул":    None,   # добавить позже
-    "Абакан":     None,   # добавить позже
-    "Черногорск": None,   # добавить позже
-}
+# Чаты для алертов теперь берутся из БД (модуль late_alerts + город).
+# Управление через /доступ → группа → включить "Алерты" + выбрать города.
 
 # Только эти статусы считаем активной доставкой (whitelist вместо blacklist)
 ACTIVE_DELIVERY_STATUSES = frozenset({
@@ -95,9 +90,9 @@ async def job_late_alerts() -> None:
         city = branch_to_city.get(branch_name)
         if not city:
             continue
-        chat_id = CITY_ALERT_CHAT.get(city)
-        if not chat_id:
-            continue  # чат для этого города ещё не настроен
+        target_chats = await get_alert_chats_for_city(city)
+        if not target_chats:
+            continue  # нет зарегистрированных чатов с алертами для этого города
 
         for num, d in list(state.deliveries.items()):
             # Только явно активные статусы (whitelist надёжнее blacklist)
@@ -173,9 +168,10 @@ async def job_late_alerts() -> None:
             ).strip()
 
             logger.info(
-                f"late_alerts: {branch_name} #{num} +{int(overdue_min)} мин → chat {chat_id}"
+                f"late_alerts: {branch_name} #{num} +{int(overdue_min)} мин → {target_chats}"
             )
-            await _send_alert(chat_id, text, token)
+            for chat_id in target_chats:
+                await _send_alert(chat_id, text, token)
             alerts_sent += 1
 
     if alerts_sent:

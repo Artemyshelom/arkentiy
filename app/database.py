@@ -5,8 +5,19 @@ SQLite через aiosqlite.
   - job_logs              — история запусков задач
   - stoplist_state        — хэши стоп-листов для дедупликации алертов
   - report_updates        — флаги изменения данных (для утреннего отчёта)
+  - daily_rt_snapshot     — RT-итоги дня (delays + staff)
+  - orders_raw            — заказы из Events API
+  - shifts_raw            — смены сотрудников
+  - daily_stats           — OLAP-итоги дня по точкам
   - competitor_snapshots  — история запусков мониторинга конкурентов
   - competitor_menu_items — позиции меню конкурентов (нормализованно)
+  --- SaaS / Фаза 0 ---
+  - tenants               — реестр клиентов (тенантов)
+  - tenant_modules        — включённые модули per тенант
+  - tenant_users          — TG-пользователи per тенант с ролями
+  - tenant_chats          — TG-чаты per тенант
+  - subscriptions         — биллинговое состояние подписки
+  - iiko_credentials      — данные подключения iiko per тенант
 """
 
 import aiosqlite
@@ -71,6 +82,8 @@ async def init_db() -> None:
         await db.commit()
     await init_analytics_tables()
     await init_competitor_tables()
+    await init_saas_tables()
+    await seed_default_tenant()
 
 
 async def init_competitor_tables() -> None:
@@ -674,3 +687,151 @@ async def get_competitor_last_snapshot(city: str, competitor_name: str) -> dict 
         ) as cursor:
             row = await cursor.fetchone()
             return {"date": row[0], "items_count": row[1]} if row else None
+
+
+# =============================================================================
+# SaaS / Фаза 0 — мультитенантная архитектура
+# =============================================================================
+
+_ALL_MODULES = ["late_alerts", "late_queries", "search", "reports", "marketing", "finance", "admin"]
+
+
+async def init_saas_tables() -> None:
+    """Создаёт таблицы мультитенантной архитектуры. Вызывается из init_db()."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS tenants (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                name        TEXT NOT NULL,
+                slug        TEXT NOT NULL UNIQUE,
+                plan        TEXT NOT NULL DEFAULT 'trial',
+                status      TEXT NOT NULL DEFAULT 'active',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS tenant_modules (
+                tenant_id   INTEGER NOT NULL REFERENCES tenants(id),
+                module      TEXT NOT NULL,
+                enabled     INTEGER NOT NULL DEFAULT 1,
+                config_json TEXT,
+                updated_at  TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, module)
+            );
+
+            CREATE TABLE IF NOT EXISTS tenant_users (
+                tenant_id    INTEGER NOT NULL REFERENCES tenants(id),
+                user_id      INTEGER NOT NULL,
+                role         TEXT NOT NULL DEFAULT 'viewer',
+                modules_json TEXT,
+                city         TEXT,
+                is_active    INTEGER NOT NULL DEFAULT 1,
+                created_at   TEXT NOT NULL,
+                PRIMARY KEY (tenant_id, user_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS tenant_chats (
+                tenant_id    INTEGER NOT NULL REFERENCES tenants(id),
+                chat_id      INTEGER NOT NULL,
+                modules_json TEXT,
+                city         TEXT,
+                is_active    INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (tenant_id, chat_id)
+            );
+
+            CREATE TABLE IF NOT EXISTS subscriptions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id       INTEGER NOT NULL UNIQUE REFERENCES tenants(id),
+                status          TEXT NOT NULL DEFAULT 'active',
+                plan            TEXT NOT NULL DEFAULT 'owner',
+                modules_json    TEXT NOT NULL DEFAULT '[]',
+                branches_count  INTEGER NOT NULL DEFAULT 9,
+                amount_monthly  INTEGER,
+                started_at      TEXT,
+                next_billing_at TEXT,
+                grace_until     TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS iiko_credentials (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                tenant_id   INTEGER NOT NULL REFERENCES tenants(id),
+                branch_name TEXT NOT NULL,
+                city        TEXT,
+                bo_url      TEXT NOT NULL,
+                dept_id     TEXT,
+                utc_offset  INTEGER NOT NULL DEFAULT 7,
+                is_active   INTEGER NOT NULL DEFAULT 1,
+                created_at  TEXT NOT NULL,
+                UNIQUE (tenant_id, branch_name)
+            );
+        """)
+        await db.commit()
+
+
+async def seed_default_tenant() -> None:
+    """
+    Создаёт дефолтный тенант id=1 (Ёбидоёби) если не существует.
+    Идемпотентно — повторный вызов безопасен.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT id FROM tenants WHERE id = 1") as cursor:
+            if await cursor.fetchone():
+                return  # уже засеяно
+
+        await db.execute(
+            """INSERT INTO tenants (id, name, slug, plan, status, created_at, updated_at)
+               VALUES (1, 'Ёбидоёби', 'ebidoebi', 'owner', 'active', ?, ?)""",
+            (now, now),
+        )
+
+        for module in _ALL_MODULES:
+            await db.execute(
+                """INSERT OR IGNORE INTO tenant_modules (tenant_id, module, enabled, updated_at)
+                   VALUES (1, ?, 1, ?)""",
+                (module, now),
+            )
+
+        await db.execute(
+            """INSERT OR IGNORE INTO subscriptions
+               (tenant_id, status, plan, modules_json, branches_count, started_at, created_at, updated_at)
+               VALUES (1, 'active', 'owner', ?, 9, ?, ?, ?)""",
+            (json.dumps(_ALL_MODULES), now, now, now),
+        )
+
+        await db.commit()
+
+
+# --- Геттеры ---
+
+async def get_tenant(tenant_id: int = 1) -> dict | None:
+    """Данные тенанта по ID."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute("SELECT * FROM tenants WHERE id = ?", (tenant_id,)) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None
+
+
+async def get_tenant_modules(tenant_id: int = 1) -> list[str]:
+    """Список включённых модулей тенанта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT module FROM tenant_modules WHERE tenant_id = ? AND enabled = 1 ORDER BY module",
+            (tenant_id,),
+        ) as cursor:
+            return [row[0] for row in await cursor.fetchall()]
+
+
+async def get_subscription(tenant_id: int = 1) -> dict | None:
+    """Подписка тенанта."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM subscriptions WHERE tenant_id = ?", (tenant_id,)
+        ) as cursor:
+            row = await cursor.fetchone()
+            return dict(row) if row else None

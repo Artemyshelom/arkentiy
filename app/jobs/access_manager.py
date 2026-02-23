@@ -48,6 +48,17 @@ _MODULE_META: list[tuple[str, str]] = [
     ("admin",        "🛠 Админ"),
 ]
 
+# Короткие метки для отображения в списке
+_MOD_SHORT: dict[str, str] = {
+    "late_alerts":  "Алерты",
+    "late_queries": "Запросы",
+    "search":       "Поиск",
+    "reports":      "Отчёты",
+    "marketing":    "Выгрузка",
+    "finance":      "Финансы",
+    "admin":        "Админ",
+}
+
 # In-memory состояния диалогов: {user_id: {action, step, ...}}
 _pending: dict[int, dict] = {}
 
@@ -137,9 +148,24 @@ def _main_screen() -> tuple[str, list]:
     by_city["_all"] = []
 
     for cid_str, cdata in chats.items():
-        city = cdata.get("city")
-        key = city if city in CITIES else "_all"
+        cities = _parse_city_raw(cdata.get("city"))
+        # Один конкретный город → в секцию этого города
+        if cities is not None and len(cities) == 1:
+            city = next(iter(cities))
+            key = city if city in CITIES else "_all"
+        else:
+            # None (все) или несколько городов → в "ВСЕ ГОРОДА / НЕСКОЛЬКО"
+            key = "_all"
         by_city[key].append((cid_str, cdata))
+
+    def _chat_line(cdata: dict, show_cities: bool = False) -> str:
+        mods = cdata.get("modules", [])
+        mod_part = ", ".join(_MOD_SHORT.get(m, m) for m in mods) if mods else "—"
+        if show_cities:
+            cities = _parse_city_raw(cdata.get("city"))
+            city_part = "все" if cities is None else ", ".join(sorted(cities))
+            return f"[{city_part}] ({mod_part})"
+        return f"({mod_part})"
 
     lines = ["📋 <b>Управление доступом</b>\n"]
     keyboard: list = []
@@ -151,7 +177,7 @@ def _main_screen() -> tuple[str, list]:
         lines.append(f"<b>{city.upper()}</b>")
         for cid, cdata in items:
             name = cdata.get("name", cid)
-            lines.append(f"  📍 {name}")
+            lines.append(f"  📍 {name} {_chat_line(cdata)}")
             keyboard.append([{"text": f"⚙️ {name}", "callback_data": f"ac:c:{cid}"}])
 
     all_items = by_city["_all"]
@@ -159,7 +185,7 @@ def _main_screen() -> tuple[str, list]:
         lines.append("<b>ВСЕ ГОРОДА</b>")
         for cid, cdata in all_items:
             name = cdata.get("name", cid)
-            lines.append(f"  📍 {name}")
+            lines.append(f"  📍 {name} {_chat_line(cdata, show_cities=True)}")
             keyboard.append([{"text": f"⚙️ {name}", "callback_data": f"ac:c:{cid}"}])
 
     users = cfg.get("users", {})

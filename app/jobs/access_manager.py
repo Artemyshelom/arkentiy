@@ -23,6 +23,7 @@ Callbacks prefix: "ac:"
 
 from __future__ import annotations
 
+import json
 import logging
 from typing import Optional
 
@@ -49,6 +50,26 @@ _MODULE_META: list[tuple[str, str]] = [
 
 # In-memory состояния диалогов: {user_id: {action, step, ...}}
 _pending: dict[int, dict] = {}
+
+
+def _parse_city_raw(city_val: str | None) -> frozenset | None:
+    """Парсит city из DB/config: null→None, JSON-массив→frozenset, строка→{строка}."""
+    if city_val is None:
+        return None
+    try:
+        parsed = json.loads(city_val)
+        if isinstance(parsed, list):
+            return frozenset(parsed) if parsed else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return frozenset({city_val})
+
+
+def _serialize_cities(cities: frozenset | None) -> str | None:
+    """Сериализует frozenset городов для хранения в DB."""
+    if cities is None:
+        return None
+    return json.dumps(sorted(cities))
 
 
 # ---------------------------------------------------------------------------
@@ -157,13 +178,14 @@ def _chat_screen(cid_str: str) -> tuple[str, list]:
     cfg = access.get_config()
     chat = cfg.get("chats", {}).get(cid_str, {})
     modules = set(chat.get("modules", []))
-    city = chat.get("city")
+    current_cities = _parse_city_raw(chat.get("city"))
     name = chat.get("name", cid_str)
 
+    city_display = "Все" if current_cities is None else ", ".join(sorted(current_cities))
     text = (
         f"⚙️ <b>{name}</b>\n"
         f"ID: <code>{cid_str}</code>\n"
-        f"Город: {city or 'Все'}\n\n"
+        f"Города: {city_display}\n\n"
         f"<b>Модули:</b>"
     )
 
@@ -178,17 +200,17 @@ def _chat_screen(cid_str: str) -> tuple[str, list]:
     if row:
         keyboard.append(row)
 
-    # Выбор города — по 2 в ряд
+    # Выбор городов — чекбоксы, по 2 в ряд
     city_row: list = []
     for c in CITIES:
-        mark = "●" if city == c else "○"
+        mark = "✅" if current_cities is not None and c in current_cities else "○"
         city_row.append({"text": f"{mark} {c}", "callback_data": f"ac:ty:{cid_str}:{c}"})
         if len(city_row) == 2:
             keyboard.append(city_row)
             city_row = []
     if city_row:
         keyboard.append(city_row)
-    all_mark = "●" if city is None else "○"
+    all_mark = "●" if current_cities is None else "○"
     keyboard.append([{"text": f"{all_mark} Все города", "callback_data": f"ac:ty:{cid_str}:null"}])
 
     keyboard.append([
@@ -229,13 +251,14 @@ def _user_screen(uid_str: str) -> tuple[str, list]:
     cfg = access.get_config()
     user = cfg.get("users", {}).get(uid_str, {})
     modules = set(user.get("modules", []))
-    city = user.get("city")
+    current_cities = _parse_city_raw(user.get("city"))
     name = user.get("name", uid_str)
 
+    city_display = "Все" if current_cities is None else ", ".join(sorted(current_cities))
     text = (
         f"⚙️ <b>{name}</b>\n"
         f"ID: <code>{uid_str}</code>\n"
-        f"Город: {city or 'Все'}\n\n"
+        f"Города: {city_display}\n\n"
         f"<b>Модули:</b>"
     )
 
@@ -250,16 +273,17 @@ def _user_screen(uid_str: str) -> tuple[str, list]:
     if row:
         keyboard.append(row)
 
+    # Чекбоксы городов, по 2 в ряд
     city_row: list = []
     for c in CITIES:
-        mark = "●" if city == c else "○"
+        mark = "✅" if current_cities is not None and c in current_cities else "○"
         city_row.append({"text": f"{mark} {c}", "callback_data": f"ac:uy:{uid_str}:{c}"})
         if len(city_row) == 2:
             keyboard.append(city_row)
             city_row = []
     if city_row:
         keyboard.append(city_row)
-    all_mark = "●" if city is None else "○"
+    all_mark = "●" if current_cities is None else "○"
     keyboard.append([{"text": f"{all_mark} Все города", "callback_data": f"ac:uy:{uid_str}:null"}])
 
     keyboard.append([
@@ -277,6 +301,7 @@ async def _refresh_cache() -> None:
     """Перечитывает конфиг из БД и обновляет in-memory кэш access.py."""
     cfg = await _db.get_access_config_from_db()
     access.update_db_cache(cfg)
+    # #region agent log
 
 
 async def _toggle_module(section: str, key_str: str, module: str) -> None:
@@ -294,15 +319,33 @@ async def _toggle_module(section: str, key_str: str, module: str) -> None:
     await _refresh_cache()
 
 
-async def _set_city(section: str, key_str: str, city: str | None) -> None:
+async def _toggle_city(section: str, key_str: str, city: str | None) -> None:
+    """Переключает город для чата/пользователя.
+    city=None → сбрасываем в «все города»
+    city=строка → добавляем если нет, убираем если есть.
+    """
     cfg = access.get_config()
     entry = cfg.get(section, {}).get(key_str, {"name": key_str, "modules": [], "city": None})
     modules = entry.get("modules", [])
     name = entry.get("name", key_str)
-    if section == "chats":
-        await _db.upsert_tenant_chat(int(key_str), name, modules, city)
+
+    if city is None:
+        new_city_db = None
     else:
-        await _db.upsert_tenant_user(int(key_str), name, modules, city)
+        current = _parse_city_raw(entry.get("city"))
+        if current is None:
+            new_cities = frozenset({city})
+        elif city in current:
+            remaining = current - {city}
+            new_cities = remaining if remaining else None
+        else:
+            new_cities = current | {city}
+        new_city_db = _serialize_cities(new_cities) if new_cities is not None else None
+
+    if section == "chats":
+        await _db.upsert_tenant_chat(int(key_str), name, modules, new_city_db)
+    else:
+        await _db.upsert_tenant_user(int(key_str), name, modules, new_city_db)
     await _refresh_cache()
 
 
@@ -365,11 +408,15 @@ async def handle_callback(
         await _answer_cb(cb_id, "🚫 Нет доступа", alert=True)
         return
 
-    await _answer_cb(cb_id)
-
     # Формат: "ac:action:arg1:arg2" — split с лимитом 4 части
     parts = data.split(":", 3)
     action = parts[1] if len(parts) > 1 else ""
+
+    # Для действий с переключением — _answer_cb вызывается внутри с осмысленным текстом.
+    # Для навигационных действий — вызываем здесь с пустым текстом (снимает "часики").
+    _nav_actions = {"main", "c", "users", "u", "addchat", "adduser", "rg", "ig"}
+    if action in _nav_actions:
+        await _answer_cb(cb_id)
 
     if action == "main":
         text, kb = _main_screen()
@@ -385,16 +432,19 @@ async def handle_callback(
         cfg = access.get_config()
         mods = set(cfg.get("chats", {}).get(parts[2], {}).get("modules", []))
         state = "включён ✅" if parts[3] in mods else "выключен ❌"
-        await _answer_cb(cb_id, f"{mod_label} {state}")
+        await _answer_cb(cb_id, f"{mod_label} {state}", alert=True)
         text, kb = _chat_screen(parts[2])
         await _edit(chat_id, message_id, text, kb)
-        return  # уже ответили на callback
+        return
 
     elif action == "ty" and len(parts) >= 4:
         city_val = None if parts[3] == "null" else parts[3]
-        await _set_city("chats", parts[2], city_val)
-        city_label = city_val or "Все города"
-        await _answer_cb(cb_id, f"Город: {city_label} ✅")
+        await _toggle_city("chats", parts[2], city_val)
+        cfg = access.get_config()
+        raw = cfg.get("chats", {}).get(parts[2], {}).get("city")
+        cur = _parse_city_raw(raw)
+        city_label = "Все города" if cur is None else ", ".join(sorted(cur))
+        await _answer_cb(cb_id, f"Город: {city_label} ✅", alert=True)
         text, kb = _chat_screen(parts[2])
         await _edit(chat_id, message_id, text, kb)
         return
@@ -403,7 +453,7 @@ async def handle_callback(
         cfg = access.get_config()
         chat_name = cfg.get("chats", {}).get(parts[2], {}).get("name", parts[2])
         await _delete_entry("chats", parts[2])
-        await _answer_cb(cb_id, f"«{chat_name}» удалён")
+        await _answer_cb(cb_id, f"«{chat_name}» удалён", alert=True)
         text, kb = _main_screen()
         await _edit(chat_id, message_id, text, kb)
         return
@@ -422,16 +472,19 @@ async def handle_callback(
         cfg = access.get_config()
         mods = set(cfg.get("users", {}).get(parts[2], {}).get("modules", []))
         state = "включён ✅" if parts[3] in mods else "выключен ❌"
-        await _answer_cb(cb_id, f"{mod_label} {state}")
+        await _answer_cb(cb_id, f"{mod_label} {state}", alert=True)
         text, kb = _user_screen(parts[2])
         await _edit(chat_id, message_id, text, kb)
         return
 
     elif action == "uy" and len(parts) >= 4:
         city_val = None if parts[3] == "null" else parts[3]
-        await _set_city("users", parts[2], city_val)
-        city_label = city_val or "Все города"
-        await _answer_cb(cb_id, f"Город: {city_label} ✅")
+        await _toggle_city("users", parts[2], city_val)
+        cfg = access.get_config()
+        raw = cfg.get("users", {}).get(parts[2], {}).get("city")
+        cur = _parse_city_raw(raw)
+        city_label = "Все города" if cur is None else ", ".join(sorted(cur))
+        await _answer_cb(cb_id, f"Город: {city_label} ✅", alert=True)
         text, kb = _user_screen(parts[2])
         await _edit(chat_id, message_id, text, kb)
         return
@@ -440,7 +493,7 @@ async def handle_callback(
         cfg = access.get_config()
         user_name = cfg.get("users", {}).get(parts[2], {}).get("name", parts[2])
         await _delete_entry("users", parts[2])
-        await _answer_cb(cb_id, f"«{user_name}» удалён")
+        await _answer_cb(cb_id, f"«{user_name}» удалён", alert=True)
         text, kb = _users_screen()
         await _edit(chat_id, message_id, text, kb)
         return

@@ -12,7 +12,7 @@ import json
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 logger = logging.getLogger(__name__)
 
@@ -47,15 +47,37 @@ def update_db_cache(cfg: dict) -> None:
     _db_cfg = cfg
 
 
+def _parse_city_val(city_val: Union[str, None]) -> Optional[frozenset]:
+    """
+    Парсит значение city из БД:
+      None → None (все города)
+      '["Барнаул","Абакан"]' → frozenset({"Барнаул","Абакан"})
+      "Барнаул" → frozenset({"Барнаул"})
+    """
+    if city_val is None:
+        return None
+    try:
+        parsed = json.loads(city_val)
+        if isinstance(parsed, list):
+            return frozenset(parsed) if parsed else None
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return frozenset({city_val})
+
+
 @dataclass
 class Permissions:
     modules: frozenset[str] = field(default_factory=frozenset)
-    city: Optional[str] = None  # None = все города
+    city: Optional[frozenset] = None  # None = все города; frozenset = конкретные города
     is_admin: bool = False
 
     def has(self, module: str) -> bool:
         """Проверяет доступ к модулю (admin проходит всё)."""
         return self.is_admin or module in self.modules
+
+    def has_city(self, city_name: str) -> bool:
+        """Проверяет доступ к городу (admin и city=None — всё)."""
+        return self.is_admin or self.city is None or city_name in self.city
 
 
 def _load_config() -> dict:
@@ -93,13 +115,13 @@ def get_permissions(chat_id: int, user_id: int) -> Permissions:
     if db_chat is not None:
         return Permissions(
             modules=frozenset(db_chat.get("modules", [])),
-            city=db_chat.get("city"),
+            city=_parse_city_val(db_chat.get("city")),
         )
     db_user = _db_cfg.get("users", {}).get(str(user_id))
     if db_user is not None:
         return Permissions(
             modules=frozenset(db_user.get("modules", [])),
-            city=db_user.get("city"),
+            city=_parse_city_val(db_user.get("city")),
         )
 
     # JSON-конфиг — legacy fallback (записи добавленные до Фазы 0.1)
@@ -108,13 +130,13 @@ def get_permissions(chat_id: int, user_id: int) -> Permissions:
         if chat_cfg is not None:
             return Permissions(
                 modules=frozenset(chat_cfg.get("modules", [])),
-                city=chat_cfg.get("city"),
+                city=_parse_city_val(chat_cfg.get("city")),
             )
         user_cfg = cfg.get("users", {}).get(str(user_id))
         if user_cfg is not None:
             return Permissions(
                 modules=frozenset(user_cfg.get("modules", [])),
-                city=user_cfg.get("city"),
+                city=_parse_city_val(user_cfg.get("city")),
             )
 
     # .env fallback — для незарегистрированных entities

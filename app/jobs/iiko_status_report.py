@@ -231,14 +231,18 @@ def format_branch_status(data: dict) -> str:
     return "\n".join(lines)
 
 
-def get_available_branches(query: str = "") -> list[dict]:
+def get_available_branches(query: str | frozenset | None = None) -> list[dict]:
     """
     Возвращает список точек из конфига.
-    query — фильтрация по названию точки или городу.
+    query=None/"" → все точки
+    query=str      → фильтрация по подстроке в названии или городе
+    query=frozenset → фильтрация по множеству городов (точное совпадение city)
     """
     branches = settings.branches
     if not query:
         return branches
+    if isinstance(query, frozenset):
+        return [b for b in branches if b.get("city") in query]
     q = query.lower()
     return [
         b for b in branches

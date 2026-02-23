@@ -252,8 +252,9 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
     effective_arg = arg or city_filter or ""
     filtered = get_available_branches(effective_arg) if effective_arg else all_branches
     if effective_arg and not filtered:
+        display = "/".join(sorted(effective_arg)) if isinstance(effective_arg, frozenset) else effective_arg
         names = "\n".join(f"• {b['name']}" for b in all_branches)
-        await _send(chat_id, f"❌ «{effective_arg}» не найдено.\n\nДоступные точки:\n{names}")
+        await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
     if len(filtered) > 1:
@@ -273,7 +274,8 @@ async def _handle_staff(chat_id: int, arg: str, role: str, city_filter: str | No
     effective_arg = arg or city_filter or ""
     filtered = get_available_branches(effective_arg) if effective_arg else all_branches
     if effective_arg and not filtered:
-        await _send(chat_id, f"❌ Точка «{effective_arg}» не найдена.")
+        display = "/".join(sorted(effective_arg)) if isinstance(effective_arg, frozenset) else effective_arg
+        await _send(chat_id, f"❌ Точка «{display}» не найдена.")
         return
 
     all_staff = get_all_branches_staff(role)

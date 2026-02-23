@@ -16,7 +16,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from app.clients import telegram
 from app.config import get_settings
-from app.database import init_db, get_access_config_from_db
+from app.database import (
+    init_db, get_access_config_from_db,
+    get_all_tenant_users, get_all_tenant_chats,
+    upsert_tenant_user, upsert_tenant_chat,
+)
 from app import access as _access
 from app.monitoring.healthcheck import router as health_router
 from app.webhooks.bitrix import router as bitrix_router
@@ -189,6 +193,34 @@ async def lifespan(app: FastAPI):
     logger.info("Запуск приложения...")
     await init_db()
     logger.info("SQLite инициализирован")
+
+    # Seed .env users/chats into DB if tables are empty (Issue 1a: first-run migration)
+    _existing_users = await get_all_tenant_users()
+    _existing_chats = await get_all_tenant_chats()
+    if not _existing_users and not _existing_chats:
+        from app.config import get_settings as _gs
+        _s = _gs()
+        _default_mods = ["late_alerts", "late_queries", "search", "reports"]
+        _admin_mods = ["late_alerts", "late_queries", "search", "reports", "marketing", "finance", "admin"]
+
+        # Seed admin
+        if _s.telegram_admin_id:
+            await upsert_tenant_user(_s.telegram_admin_id, "Артемий (admin)", _admin_mods, None, role="admin")
+
+        # Seed TELEGRAM_ALLOWED_IDS
+        for _raw_id in (_s.telegram_allowed_ids or "").split(","):
+            _raw_id = _raw_id.strip()
+            if not _raw_id.lstrip("-").isdigit():
+                continue
+            _tid = int(_raw_id)
+            if _tid == _s.telegram_admin_id:
+                continue  # уже добавлен
+            if _tid < 0:
+                await upsert_tenant_chat(_tid, f"Чат {abs(_tid)}", _default_mods, None)
+            else:
+                await upsert_tenant_user(_tid, f"User {_tid}", _default_mods, None)
+
+        logger.info("[main] Seed from .env: users/chats added to DB")
 
     _db_access = await get_access_config_from_db()
     _access.update_db_cache(_db_access)

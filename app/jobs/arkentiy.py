@@ -28,14 +28,26 @@ import aiosqlite
 import httpx
 
 from app import access
-from app.clients.iiko_bo_events import get_all_branches_staff
+from app.clients.iiko_bo_events import (
+    get_all_branches_staff,
+    _states,
+    _parse_customer_name,
+    _parse_customer_phone,
+)
 from app.config import get_settings
-from app.database import DB_PATH, get_client_order_count
+from app.database import DB_PATH, get_client_order_count, log_silence
 from app.jobs import access_manager
 from app.jobs.iiko_status_report import (
     format_branch_status,
     get_available_branches,
     get_branch_status,
+)
+from app.jobs.late_alerts import (
+    ACTIVE_DELIVERY_STATUSES,
+    LOCAL_UTC_OFFSET as _LATE_UTC_OFFSET,
+    set_silence as _set_silence,
+    is_silenced as _is_silenced,
+    get_silence_until as _get_silence_until,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +63,8 @@ _CMD_MODULE: dict[str, str] = {
     "поиск": "search", "search": "search",
     "день": "late_queries", "day": "late_queries",
     "опоздания": "late_queries", "late": "late_queries",
+    "самовывоз": "late_queries", "pickup": "late_queries",
+    "тишина": "late_alerts", "mute": "late_alerts",
     "выгрузка": "marketing", "export": "marketing",
     "конкуренты": "admin", "competitors": "admin",
     "доступ": "admin", "access": "admin",
@@ -508,88 +522,9 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
 
 
 
-async def _handle_day(chat_id: int, arg: str, city_filter: str | None = None) -> None:
-    """/день [дата] — сводка за день по всем точкам из orders_raw."""
-    date = _parse_date_arg(arg)
-    date_display = datetime.fromisoformat(date).strftime("%d.%m.%Y")
-
-    city_branches: list[str] = []
-    if city_filter:
-        city_branches = [b["name"] for b in get_available_branches(city_filter)]
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-        if city_branches:
-            placeholders = ",".join("?" * len(city_branches))
-            sql = f"""SELECT branch_name,
-                COUNT(*) AS cnt,
-                ROUND(SUM(CAST(sum AS REAL)), 0) AS revenue,
-                ROUND(AVG(CAST(sum AS REAL)), 0) AS avg_check,
-                SUM(is_late) AS late_cnt,
-                COUNT(CASE WHEN status IN ('Доставлена','Закрыта') THEN 1 END) AS delivered,
-                COUNT(CASE WHEN is_self_service = 1 THEN 1 END) AS pickup_cnt
-               FROM orders_raw
-               WHERE date = ? AND branch_name IN ({placeholders})
-               GROUP BY branch_name ORDER BY branch_name"""
-            params: tuple = (date, *city_branches)
-        else:
-            sql = """SELECT branch_name,
-                COUNT(*) AS cnt,
-                ROUND(SUM(CAST(sum AS REAL)), 0) AS revenue,
-                ROUND(AVG(CAST(sum AS REAL)), 0) AS avg_check,
-                SUM(is_late) AS late_cnt,
-                COUNT(CASE WHEN status IN ('Доставлена','Закрыта') THEN 1 END) AS delivered,
-                COUNT(CASE WHEN is_self_service = 1 THEN 1 END) AS pickup_cnt
-               FROM orders_raw WHERE date = ?
-               GROUP BY branch_name ORDER BY branch_name"""
-            params = (date,)
-        async with db.execute(sql, params) as cur:
-            rows = [dict(r) for r in await cur.fetchall()]
-
-    if not rows:
-        await _send(
-            chat_id,
-            f"📅 <b>{date_display}</b> — данных нет.\n\n"
-            f"<i>БД заполняется с момента деплоя (21.02.2026). Для истории нужен бэкфилл.</i>"
-        )
-        return
-
-    total_rev = sum(r["revenue"] or 0 for r in rows)
-    total_cnt = sum(r["cnt"] for r in rows)
-    total_late = sum(r["late_cnt"] or 0 for r in rows)
-    total_del = sum(r["delivered"] or 0 for r in rows)
-    late_pct = total_late / total_del * 100 if total_del else 0
-
-    lines = [
-        f"📅 <b>{date_display} — сводка по всем точкам</b>\n",
-        f"💰 Итого выручка: <b>{int(total_rev):,} ₽</b>".replace(",", " "),
-        f"🧾 Заказов: {total_cnt} | Доставлено: {total_del}",
-        f"🔴 Опозданий: {total_late} ({late_pct:.1f}%)\n",
-        "─" * 20,
-    ]
-
-    for r in rows:
-        rev = int(r["revenue"] or 0)
-        avg = int(r["avg_check"] or 0)
-        late = r["late_cnt"] or 0
-        delivered = r["delivered"] or 0
-        late_p = late / delivered * 100 if delivered else 0
-        pickup = r["pickup_cnt"] or 0
-        late_icon = "🔴" if late_p > 20 else "🟡" if late_p > 10 else "✅"
-        lines.append(
-            f"\n📍 <b>{html.escape(r['branch_name'])}</b>\n"
-            f"   💰 {rev:,} ₽ | чеков: {r['cnt']} | ср. чек: {avg:,} ₽\n"
-            f"   {late_icon} опоздания: {late}/{delivered} ({late_p:.0f}%) | самовывоз: {pickup}"
-            .replace(",", " ")
-        )
-
-    await _send(chat_id, "\n".join(lines))
-
-
-async def _handle_late(chat_id: int, arg: str, city_filter: str | None = None) -> None:
+async def _handle_day(chat_id: int, arg: str, city_filter=None) -> None:
     """
-    /опоздания [фильтр] [дата] — опоздания по филиалам.
-    Доставка и самовывоз с разной логикой расчёта опоздания.
+    /день [фильтр] [дата] — исторические опоздания за день из БД (группировка по точкам).
     """
     import re
     from collections import defaultdict
@@ -771,39 +706,268 @@ async def _handle_late(chat_id: int, arg: str, city_filter: str | None = None) -
 
 
 # ------------------------------------------------------------------
+# Real-time опоздания из in-memory _states
+# ------------------------------------------------------------------
+
+def _human_status_rt(status: str, cooking_status: str | None) -> str:
+    """Человекочитаемый статус для реалтайм-запросов."""
+    if status == "В пути к клиенту":
+        return "в пути"
+    if status in ("Новая", "Не подтверждена", "Ждет отправки"):
+        if cooking_status == "Собран":
+            return "приготовлен, ждёт"
+        if cooking_status == "Приготовлено":
+            return "готовится"
+        return "ожидает кухни"
+    if status == "В процессе приготовления":
+        return "готовится"
+    return status or "—"
+
+
+async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
+    """/опоздания [фильтр] — активные опоздавшие доставки прямо сейчас."""
+    now_local = (
+        datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
+    ).replace(tzinfo=None)
+
+    filter_q = arg.strip() or None
+    if filter_q is None and city_filter is not None:
+        filter_q = city_filter
+
+    branch_names_set = {b["name"] for b in (
+        get_available_branches(filter_q) if filter_q else get_available_branches()
+    )}
+
+    results = []
+    for branch_name, state in _states.items():
+        if branch_name not in branch_names_set:
+            continue
+        for num, d in list(state.deliveries.items()):
+            if d.get("is_self_service"):
+                continue
+            if d.get("status") not in ACTIVE_DELIVERY_STATUSES:
+                continue
+            planned_raw = d.get("planned_time")
+            if not planned_raw:
+                continue
+            try:
+                clean = planned_raw.replace("T", " ").split(".")[0]
+                planned_dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            overdue_min = (now_local - planned_dt).total_seconds() / 60
+            if overdue_min <= 0:
+                continue
+            results.append({
+                "branch": branch_name,
+                "num": num,
+                "overdue_min": overdue_min,
+                "planned_dt": planned_dt,
+                "status": d.get("status", ""),
+                "cooking": state._cooking_status(str(num)),
+                "courier": (d.get("courier") or "").strip(),
+                "customer_raw": d.get("customer_raw"),
+            })
+
+    results.sort(key=lambda x: -x["overdue_min"])
+
+    filter_label = ""
+    if isinstance(filter_q, str):
+        filter_label = f" · {html.escape(filter_q)}"
+
+    if not results:
+        await _send(chat_id, f"✅ Активных опозданий нет{filter_label}")
+        return
+
+    lines = [f"🚨 <b>Активные опоздания{filter_label}</b> — {len(results)} зак.\n"]
+    for r in results:
+        name = html.escape(_parse_customer_name(r["customer_raw"]) or "—")
+        phone = html.escape(_parse_customer_phone(r["customer_raw"]) or "—")
+        status_str = _human_status_rt(r["status"], r["cooking"])
+        courier_part = ""
+        if r["status"] == "В пути к клиенту" and r["courier"]:
+            courier_part = f"\n  🛵 {html.escape(r['courier'])}"
+        lines.append(
+            f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
+            f" | {html.escape(r['branch'])}\n"
+            f"  👤 {name} | 📞 <code>{phone}</code>\n"
+            f"  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"
+            + courier_part
+        )
+
+    await _send(chat_id, "\n\n".join(lines))
+
+
+async def _handle_pickup(chat_id: int, arg: str, city_filter=None) -> None:
+    """/самовывоз [фильтр] — активные опоздавшие самовывозы прямо сейчас."""
+    now_local = (
+        datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
+    ).replace(tzinfo=None)
+
+    filter_q = arg.strip() or None
+    if filter_q is None and city_filter is not None:
+        filter_q = city_filter
+
+    branch_names_set = {b["name"] for b in (
+        get_available_branches(filter_q) if filter_q else get_available_branches()
+    )}
+
+    # Самовывоз считается опоздавшим если сейчас > planned_time (заказ ещё не выдан)
+    ACTIVE_PICKUP_STATUSES = frozenset({
+        "Новая", "Не подтверждена", "Ждет отправки",
+        "В процессе приготовления",
+    })
+
+    results = []
+    for branch_name, state in _states.items():
+        if branch_name not in branch_names_set:
+            continue
+        for num, d in list(state.deliveries.items()):
+            if not d.get("is_self_service"):
+                continue
+            if d.get("status") not in ACTIVE_PICKUP_STATUSES:
+                continue
+            planned_raw = d.get("planned_time")
+            if not planned_raw:
+                continue
+            try:
+                clean = planned_raw.replace("T", " ").split(".")[0]
+                planned_dt = datetime.strptime(clean, "%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                continue
+            overdue_min = (now_local - planned_dt).total_seconds() / 60
+            if overdue_min <= 0:
+                continue
+            results.append({
+                "branch": branch_name,
+                "num": num,
+                "overdue_min": overdue_min,
+                "planned_dt": planned_dt,
+                "status": d.get("status", ""),
+                "cooking": state._cooking_status(str(num)),
+                "customer_raw": d.get("customer_raw"),
+            })
+
+    results.sort(key=lambda x: -x["overdue_min"])
+
+    filter_label = ""
+    if isinstance(filter_q, str):
+        filter_label = f" · {html.escape(filter_q)}"
+
+    if not results:
+        await _send(chat_id, f"✅ Активных опозданий самовывоза нет{filter_label}")
+        return
+
+    lines = [f"🏪 <b>Самовывоз{filter_label}</b> — {len(results)} опоздавших\n"]
+    for r in results:
+        name = html.escape(_parse_customer_name(r["customer_raw"]) or "—")
+        phone = html.escape(_parse_customer_phone(r["customer_raw"]) or "—")
+        status_str = _human_status_rt(r["status"], r["cooking"])
+        lines.append(
+            f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
+            f" | {html.escape(r['branch'])}\n"
+            f"  👤 {name} | 📞 <code>{phone}</code>\n"
+            f"  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"
+        )
+
+    await _send(chat_id, "\n\n".join(lines))
+
+
+def _parse_mute_duration(s: str) -> int | None:
+    """Парсим строку длительности в минуты (макс 120). None если не распознано."""
+    s = s.strip().lower()
+    # "2ч", "2 часа", "1 час", "2h", "2hour"
+    m = re.match(r"^(\d+\.?\d*)\s*(?:ч|час(?:а|ов)?|h(?:our)?s?)$", s)
+    if m:
+        return min(120, int(float(m.group(1)) * 60))
+    # "30м", "30 мин", "45 минут", "30min"
+    m = re.match(r"^(\d+)\s*(?:м|мин(?:ут(?:а|ы)?)?|min(?:ute)?s?)$", s)
+    if m:
+        return min(120, int(m.group(1)))
+    # Просто число = минуты
+    m = re.match(r"^(\d+)$", s)
+    if m:
+        return min(120, int(m.group(1)))
+    return None
+
+
+async def _handle_mute(chat_id: int, arg: str, user_id: int) -> None:
+    """/тишина [длительность] — выключить алерты в этом чате (макс 2 ч)."""
+    now_local = (
+        datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
+    ).replace(tzinfo=None)
+
+    if not arg.strip():
+        # Показать текущий статус
+        until = _get_silence_until(chat_id)
+        if until:
+            remaining = int((until - now_local).total_seconds() / 60)
+            await _send(chat_id, f"🔕 Тишина активна ещё ~{remaining} мин (до {until.strftime('%H:%M')})")
+        else:
+            await _send(chat_id, "🔔 Алерты включены. Напиши /тишина 30 чтобы выключить на 30 мин.")
+        return
+
+    minutes = _parse_mute_duration(arg.strip())
+    if minutes is None:
+        await _send(
+            chat_id,
+            "❌ Не понял формат. Примеры: <code>/тишина 30</code>, "
+            "<code>/тишина 1ч</code>, <code>/тишина 2 часа</code>"
+        )
+        return
+
+    until_dt = now_local + timedelta(minutes=minutes)
+    _set_silence(chat_id, until_dt)
+    try:
+        await log_silence(chat_id, minutes, user_id)
+    except Exception as e:
+        logger.warning(f"[/тишина] log_silence error: {e}")
+
+    h = minutes // 60
+    m = minutes % 60
+    dur_str = (f"{h} ч " if h else "") + (f"{m} мин" if m else "")
+    await _send(
+        chat_id,
+        f"🔕 Режим тишины включён на {dur_str.strip()} (до {until_dt.strftime('%H:%M')}).\n"
+        f"Алерты об опозданиях в этом чате не будут отправляться."
+    )
+
+
+# ------------------------------------------------------------------
 # Help text
 # ------------------------------------------------------------------
 
 HELP_TEXT = (
     "<b>Аналитический бот — команды:</b>\n\n"
     "<b>Real-time (текущий момент):</b>\n"
-    "/статус — состояние всех точек\n"
-    "/статус <i>город/название</i> — фильтр по точке\n"
-    "/повара [название] — повара на смене\n"
-    "/курьеры [название] — курьеры со статистикой\n\n"
+    "/статус [фильтр] — состояние всех точек\n"
+    "/повара [фильтр] — повара на смене\n"
+    "/курьеры [фильтр] — курьеры со статистикой\n"
+    "/опоздания [фильтр] — активные опоздавшие доставки прямо сейчас\n"
+    "/самовывоз [фильтр] — активные опоздавшие самовывозы\n\n"
     "<b>История (из БД):</b>\n"
     "/поиск <i>запрос</i> — по номеру, телефону, адресу или блюду\n"
-    "/день — сводка за сегодня по всем точкам\n"
-    "/день <i>дата</i> — сводка за конкретный день\n"
-    "/опоздания — все точки, сегодня (сгруппировано по филиалам)\n"
-    "/опоздания <i>фильтр</i> — Барнаул / конкретная точка\n"
-    "/опоздания <i>дата</i> — за конкретный день\n"
-    "/опоздания <i>фильтр дата</i> — точка + день\n\n"
-    "<b>Маркетинг:</b>\n"
-    "/выгрузка <i>запрос</i> — выгрузка базы клиентов в CSV по свободному запросу\n"
-    "   Порог опоздания по умолчанию: 5 мин\n\n"
+    "/день [фильтр] [дата] — опоздания за день (группировка по точкам)\n"
+    "/день <i>вчера</i> / <i>21.02.2026</i> — за конкретный день\n\n"
+    "<b>Алерты:</b>\n"
+    "/тишина [длительность] — выключить алерты в этом чате (макс 2 ч)\n"
+    "/тишина — показать текущий статус тишины\n\n"
+    "<b>Выгрузка данных:</b>\n"
+    "/выгрузка <i>запрос</i> — выгрузка базы клиентов в CSV\n\n"
     "<b>Конкуренты:</b>\n"
     "/конкуренты — обновить таблицы конкурентов в Google Sheets\n\n"
     "<b>Администратор:</b>\n"
     "/доступ — управление доступом чатов и пользователей\n\n"
-    "<i>Форматы даты: 21.02.2026 / 2026-02-21 / вчера</i>\n\n"
+    "<i>Форматы даты: 21.02.2026 / 2026-02-21 / вчера</i>\n"
+    "<i>Фильтр: город (Барнаул) или точка (Барнаул 2)</i>\n\n"
     "<i>Примеры:</i>\n"
     "<code>/статус Барнаул</code>\n"
+    "<code>/опоздания Томск</code>\n"
     "<code>/день вчера</code>\n"
-    "<code>/опоздания Барнаул вчера</code>\n"
-    "<code>/поиск Филадельфия</code>\n"
-    "<code>/выгрузка новые клиенты 14.02 опоздание &gt;15 минут</code>\n"
-    "<code>/выгрузка старые клиенты Барнаул февраль</code>"
+    "<code>/день Барнаул вчера</code>\n"
+    "<code>/тишина 30</code>\n"
+    "<code>/тишина 1ч</code>\n"
+    "<code>/поиск Филадельфия</code>"
 )
 
 
@@ -935,6 +1099,10 @@ async def poll_analytics_bot() -> None:
             await _handle_day(chat_id, arg, city_filter=city)
         elif cmd in ("опоздания", "late"):
             await _handle_late(chat_id, arg, city_filter=city)
+        elif cmd in ("самовывоз", "pickup"):
+            await _handle_pickup(chat_id, arg, city_filter=city)
+        elif cmd in ("тишина", "mute"):
+            await _handle_mute(chat_id, arg, user_id=user_id)
         elif cmd in ("выгрузка", "export"):
             from app.jobs.marketing_export import run_export
             await run_export(chat_id, arg, _bot_url())

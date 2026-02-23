@@ -40,7 +40,7 @@ CITIES = access.CITIES
 
 _MODULE_META: list[tuple[str, str]] = [
     ("late_alerts",  "🔴 Алерты"),
-    ("late_queries", "📋 Запросы"),
+    ("late_queries", "📋 Опоздания"),
     ("search",       "🔍 Поиск"),
     ("reports",      "📊 Отчёты"),
     ("marketing",    "📈 Выгрузка данных"),
@@ -51,7 +51,7 @@ _MODULE_META: list[tuple[str, str]] = [
 # Короткие метки для отображения в списке
 _MOD_SHORT: dict[str, str] = {
     "late_alerts":  "Алерты",
-    "late_queries": "Запросы",
+    "late_queries": "Опоздания",
     "search":       "Поиск",
     "reports":      "Отчёты",
     "marketing":    "Выгрузка",

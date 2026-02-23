@@ -11,6 +11,7 @@ SQLite через aiosqlite.
   - daily_stats           — OLAP-итоги дня по точкам
   - competitor_snapshots  — история запусков мониторинга конкурентов
   - competitor_menu_items — позиции меню конкурентов (нормализованно)
+  - silence_log           — история активации режима тишины по чатам
   --- SaaS / Фаза 0 ---
   - tenants               — реестр клиентов (тенантов)
   - tenant_modules        — включённые модули per тенант
@@ -77,6 +78,14 @@ async def init_db() -> None:
                 couriers_today      INTEGER DEFAULT 0,
                 saved_at            TEXT NOT NULL,
                 PRIMARY KEY (branch, date)
+            );
+
+            CREATE TABLE IF NOT EXISTS silence_log (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id      INTEGER NOT NULL,
+                activated_at TEXT NOT NULL,
+                duration_min INTEGER NOT NULL,
+                user_id      INTEGER
             );
         """)
         await db.commit()
@@ -958,6 +967,17 @@ async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
         await db.execute(
             "UPDATE tenant_chats SET is_active = 0 WHERE tenant_id = ? AND chat_id = ?",
             (tenant_id, chat_id),
+        )
+        await db.commit()
+
+
+async def log_silence(chat_id: int, duration_min: int, user_id: int) -> None:
+    """Логируем активацию режима тишины в чате."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO silence_log (chat_id, activated_at, duration_min, user_id) VALUES (?,?,?,?)",
+            (chat_id, now, duration_min, user_id),
         )
         await db.commit()
 

@@ -39,6 +39,7 @@ from app.jobs.daily_report import (
     job_save_rt_snapshot,
 )
 from app.jobs.audit import job_audit_report
+from app.jobs.cancel_sync import job_cancel_sync
 
 settings = get_settings()
 
@@ -197,6 +198,16 @@ def register_jobs() -> None:
         name="Аудит опасных операций UTC+7 → Telegram",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # Синхронизация отменённых заказов из OLAP v2: каждые 3 минуты
+    scheduler.add_job(
+        job_cancel_sync,
+        trigger=IntervalTrigger(minutes=3),
+        id="cancel_sync",
+        name="Синхронизация отмен (OLAP v2)",
+        replace_existing=True,
+        misfire_grace_time=120,
     )
 
 

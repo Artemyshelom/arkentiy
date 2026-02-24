@@ -399,18 +399,6 @@ def _process_events(state: BranchState, events_xml: list) -> None:
         attrs = {a.findtext("name"): a.findtext("value") for a in ev.findall("attribute")}
         ev_date = ev.findtext("date", "")
 
-        # #region agent log — debug 77d7c9: log all unknown delivery event types
-        _DBG_LOG = "/app/data/debug-77d7c9.log"
-        if ev_type and "delivery" in ev_type.lower() and ev_type not in ("deliveryOrderCreated", "deliveryOrderEdited"):
-            import json as _json, time as _time
-            try:
-                with open(_DBG_LOG, "a") as _f:
-                    _f.write(_json.dumps({"sessionId":"77d7c9","hypothesisId":"B","location":"iiko_bo_events.py:395","message":"unknown delivery event type","data":{"ev_type":ev_type,"attrs":attrs,"branch":state.branch_name},"timestamp":int(_time.time()*1000)})+"\n")
-            except Exception:
-                pass
-            logger.info(f"[DEBUG77d7c9-B] unknown delivery event: type={ev_type!r} attrs={attrs} branch={state.branch_name}")
-        # #endregion
-
         if ev_type in ("deliveryOrderCreated", "deliveryOrderEdited"):
             num = attrs.get("deliveryNumber", "")
             if not num:
@@ -419,18 +407,6 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             # Время создания заказа — фиксируем только при первом событии
             if ev_type == "deliveryOrderCreated" and not existing.get("opened_at"):
                 existing["opened_at"] = ev_date
-
-            # #region agent log — debug 77d7c9: log deliveryStatus field presence in edits
-            _ds = attrs.get("deliveryStatus")
-            if ev_type == "deliveryOrderEdited":
-                import json as _json, time as _time
-                try:
-                    with open(_DBG_LOG, "a") as _f:
-                        _f.write(_json.dumps({"sessionId":"77d7c9","hypothesisId":"AC","location":"iiko_bo_events.py:411","message":"deliveryOrderEdited attrs","data":{"num":num,"deliveryStatus":_ds,"deliveryStatus_in_attrs":"deliveryStatus" in attrs,"all_attr_keys":list(attrs.keys()),"branch":state.branch_name},"timestamp":int(_time.time()*1000)})+"\n")
-                except Exception:
-                    pass
-                logger.info(f"[DEBUG77d7c9-AC] deliveryOrderEdited #{num} branch={state.branch_name} deliveryStatus={_ds!r} in_attrs={'deliveryStatus' in attrs}")
-            # #endregion
 
             if attrs.get("deliveryStatus"):
                 existing["status"] = attrs["deliveryStatus"]

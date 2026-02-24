@@ -324,7 +324,7 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
             try:
                 from datetime import timezone, timedelta
                 LOCAL_TZ = timezone(timedelta(hours=7))
-                planned_dt = datetime.strptime(r["planned_time"].replace("T", " ").split(".")[0], "%Y-%m-%d %H:%M:%S")
+                planned_dt = datetime.strptime(r["planned_time"], "%Y-%m-%d %H:%M:%S")
                 now_local = datetime.now(tz=timezone.utc).astimezone(LOCAL_TZ).replace(tzinfo=None)
                 if now_local > planned_dt:
                     overdue_min = int((now_local - planned_dt).total_seconds() / 60)
@@ -375,8 +375,7 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
     if r.get("status") in ("Новая", "Не подтверждена", "Ждет отправки") and r.get("planned_time"):
         try:
             from datetime import timezone, timedelta as _td
-            clean_pt = r["planned_time"].replace("T", " ").split(".")[0]
-            planned_dt = datetime.strptime(clean_pt, "%Y-%m-%d %H:%M:%S")
+            planned_dt = datetime.strptime(r["planned_time"], "%Y-%m-%d %H:%M:%S")
             now_local = (datetime.now(tz=timezone.utc) + _td(hours=7)).replace(tzinfo=None)
             if (now_local - planned_dt).total_seconds() > 3600:  # >1 час прошло
                 stale_note = "\n   ⚠️ <i>статус может быть устарел — iiko не прислала обновление</i>"

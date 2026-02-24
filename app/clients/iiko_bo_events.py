@@ -404,6 +404,9 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             if not num:
                 continue
             existing = state.deliveries.get(num, {})
+            # Время создания заказа — фиксируем только при первом событии
+            if ev_type == "deliveryOrderCreated" and not existing.get("opened_at"):
+                existing["opened_at"] = ev_date
             if attrs.get("deliveryStatus"):
                 existing["status"] = attrs["deliveryStatus"]
             if attrs.get("deliveryCourier") is not None:

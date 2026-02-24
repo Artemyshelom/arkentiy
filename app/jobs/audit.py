@@ -2,13 +2,16 @@
 audit.py — Аудитор опасных операций.
 
 Запускается ежедневно в 05:30 МСК (09:30 по UTC+7).
-Анализирует данные вчерашнего дня из orders_raw:
-  1. Аномально быстрые доставки (< 10 мин от создания до доставки)
-  2. Отменённые заказы с суммой > 500₽
-  3. Отменённые заказы с указанной причиной и суммой > 200₽
+Анализирует данные вчерашнего дня:
 
-Phase A1: тест BO API /api/v2/cashShifts (сторно и изъятия).
-Если эндпоинт отвечает — данные логируются для дальнейшего парсинга.
+orders_raw:
+  1. fast_delivery    — доставка закрыта < FAST_DELIVERY_MIN мин после создания
+  2. cancellation     — отменённый заказ ≥ CANCEL_HIGH_SUM₽
+  3. early_closure    — заказ закрыт на EARLY_CLOSURE_MIN+ мин раньше плана
+  4. unclosed_in_transit — заказ «В пути» из прошлых дней
+
+OLAP (PRESET_DISCOUNTS):
+  5. discount_manual  — скидки без типа (ручные/неавторизованные) > DISCOUNT_MANUAL_MIN₽
 
 Команда /аудит [город|точка] [дата] — читает из audit_events в БД.
 Подключается к чату через модуль "audit" в /доступ.
@@ -21,6 +24,7 @@ import html
 import json
 import logging
 import time
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
@@ -36,6 +40,7 @@ from app.database import (
     save_audit_events_batch,
 )
 from app.clients import telegram as tg
+from app.clients.iiko_bo_olap import fetch_preset, get_session_cookie, IIKO_BO_BASE
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -44,10 +49,13 @@ settings = get_settings()
 # Настройки порогов
 # ---------------------------------------------------------------------------
 
+FAST_DELIVERY_MIN = 15             # доставка за N мин от создания = подозрительно
 CANCEL_HIGH_SUM = 500              # отмена ≥ N₽ без причины = warning
 CANCEL_WITH_REASON_SUM = 200       # отмена ≥ N₽ с указанной причиной = warning
 EARLY_CLOSURE_MIN = 60             # закрыт на N+ мин раньше плана = подозрительно
-STUCK_IN_TRANSIT_DAYS = 1          # заказ "В пути" N+ дней = незакрыт
+DISCOUNT_MANUAL_MIN = 500          # ручная скидка (без типа) ≥ N₽ = warning
+
+PRESET_DISCOUNTS = "6a714099-1252-4c8c-a474-9151b79e375a"
 
 # ---------------------------------------------------------------------------
 # Авторизация BO API (token-based, как в iiko_bo_events.py)
@@ -65,7 +73,8 @@ async def _get_bo_token(bo_url: str) -> str:
 
     login = settings.iiko_bo_login
     pwd_hash = hashlib.sha1(settings.iiko_bo_password.encode()).hexdigest()
-    url = f"https://{bo_url}/api/auth?login={login}&pass={pwd_hash}"
+    # bo_url уже содержит https:// — не добавляем ещё раз
+    url = f"{bo_url}/api/auth?login={login}&pass={pwd_hash}"
 
     async with httpx.AsyncClient(verify=False, timeout=15) as client:
         resp = await client.get(url)
@@ -85,11 +94,12 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     Ищет подозрительные заказы в orders_raw за указанную дату.
 
     Детекторы:
-    - cancellation: отменённый заказ с суммой ≥ порога
-    - early_closure: заказ закрыт на EARLY_CLOSURE_MIN+ мин раньше планового времени
-    - unclosed_in_transit: заказы 'В пути к клиенту' из ПРОШЛЫХ дней (незакрытые)
+    - fast_delivery:       доставка закрыта < FAST_DELIVERY_MIN мин после создания
+    - cancellation:        отменённый заказ с суммой ≥ порога
+    - early_closure:       заказ закрыт на EARLY_CLOSURE_MIN+ мин раньше плана
+    - unclosed_in_transit: заказы 'В пути к клиенту' из прошлых дней
 
-    Возвращает список событий (без поля date/city — добавляется снаружи).
+    Возвращает список событий (без полей date/city — добавляются снаружи).
     """
     findings: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -97,7 +107,58 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        # 1. Отменённые заказы с суммой
+        # 1. Аномально быстрые доставки (opened_at → actual_time < FAST_DELIVERY_MIN мин)
+        #    Работает только для заказов, созданных после деплоя фикса opened_at
+        async with db.execute(
+            """
+            SELECT branch_name, delivery_num, sum, opened_at, actual_time,
+                   courier, client_name, client_phone
+            FROM orders_raw
+            WHERE date = ?
+              AND is_self_service = 0
+              AND status IN ('Доставлена', 'Закрыта')
+              AND opened_at IS NOT NULL AND opened_at != ''
+              AND actual_time IS NOT NULL AND actual_time != ''
+            """,
+            (date_str,),
+        ) as cur:
+            for r in await cur.fetchall():
+                try:
+                    opened = datetime.fromisoformat(r["opened_at"].replace("Z", "+00:00"))
+                    actual = datetime.fromisoformat(r["actual_time"].replace("Z", "+00:00"))
+                    delta_min = (actual - opened).total_seconds() / 60
+                    if 0 < delta_min < FAST_DELIVERY_MIN:
+                        courier = r["courier"] or ""
+                        courier_str = f", курьер: {courier}" if courier else ""
+                        sum_val = int(r["sum"] or 0)
+                        sum_str = f"{sum_val:,}".replace(",", "\u00a0")
+                        o_time = r["opened_at"][11:16]
+                        a_time = r["actual_time"][11:16]
+                        findings.append({
+                            "branch_name": r["branch_name"],
+                            "event_type": "fast_delivery",
+                            "severity": "critical" if delta_min < 3 else "warning",
+                            "description": (
+                                f"#{r['delivery_num']} \u2014 доставка за {delta_min:.0f} мин "
+                                f"({o_time}\u2192{a_time})"
+                                f"{courier_str}, {sum_str}\u20bd"
+                            ),
+                            "meta_json": json.dumps({
+                                "delivery_num": r["delivery_num"],
+                                "sum": r["sum"],
+                                "delta_min": round(delta_min, 1),
+                                "opened_at": r["opened_at"],
+                                "actual_time": r["actual_time"],
+                                "courier": r["courier"],
+                                "client_name": r["client_name"],
+                                "client_phone": r["client_phone"],
+                            }, ensure_ascii=False),
+                            "created_at": now_iso,
+                        })
+                except Exception as e:
+                    logger.debug(f"[audit] Ошибка парсинга fast_delivery {r['delivery_num']}: {e}")
+
+        # 2. Отменённые заказы с суммой
         async with db.execute(
             """
             SELECT branch_name, delivery_num, sum, cancel_reason,
@@ -125,7 +186,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                         "event_type": "cancellation_with_reason" if reason else "cancellation",
                         "severity": "critical" if s >= 1000 else "warning",
                         "description": (
-                            f"Д-{r['delivery_num']} \u2014 {sum_str}\u20bd отменён"
+                            f"#{r['delivery_num']} \u2014 {sum_str}\u20bd отменён"
                             f"{reason_str}{client_str}"
                         ),
                         "meta_json": json.dumps({
@@ -138,8 +199,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                         "created_at": now_iso,
                     })
 
-        # 2. Ранние закрытия: actual_time < planned_time - EARLY_CLOSURE_MIN мин
-        #    Сигнал: заказ закрыт курьером задолго до ожидаемого времени доставки
+        # 3. Ранние закрытия: actual_time < planned_time - EARLY_CLOSURE_MIN мин
         async with db.execute(
             """
             SELECT branch_name, delivery_num, sum, planned_time, actual_time,
@@ -170,7 +230,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                             "event_type": "early_closure",
                             "severity": "critical" if early_min >= 90 else "warning",
                             "description": (
-                                f"Д-{r['delivery_num']} \u2014 закрыт на {early_min:.0f} мин раньше плана "
+                                f"#{r['delivery_num']} \u2014 закрыт на {early_min:.0f} мин раньше плана "
                                 f"(план {p_time}, факт {a_time})"
                                 f"{courier_str}, {sum_str}\u20bd"
                             ),
@@ -189,8 +249,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                 except Exception as e:
                     logger.debug(f"[audit] Ошибка парсинга early_closure {r['delivery_num']}: {e}")
 
-        # 3. Незакрытые заказы "В пути к клиенту" из прошлых дней
-        #    Сигнал: деньги могли быть взяты, но заказ так и не закрыт
+        # 4. Незакрытые заказы "В пути к клиенту" из прошлых дней
         async with db.execute(
             """
             SELECT branch_name, delivery_num, sum, planned_time, courier,
@@ -214,7 +273,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                     "event_type": "unclosed_in_transit",
                     "severity": "critical",
                     "description": (
-                        f"Д-{r['delivery_num']} ({order_date}) \u2014 заказ не закрыт, "
+                        f"#{r['delivery_num']} ({order_date}) \u2014 заказ не закрыт, "
                         f"статус \u00abВ пути\u00bb{courier_str}, {sum_str}\u20bd"
                     ),
                     "meta_json": json.dumps({
@@ -228,6 +287,80 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                     }, ensure_ascii=False),
                     "created_at": now_iso,
                 })
+
+    return findings
+
+
+async def _detect_discounts(date_str: str) -> list[dict]:
+    """
+    Ищет подозрительные скидки через OLAP PRESET_DISCOUNTS.
+
+    discount_manual — скидки без указанного типа (ручные/неавторизованные).
+    Порог: DISCOUNT_MANUAL_MIN₽ суммарно по точке за день.
+    """
+    findings: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+
+    d = datetime.strptime(date_str, "%Y-%m-%d")
+    date_bo = d.strftime("%d.%m.%Y")
+
+    try:
+        xml_text = await fetch_preset(PRESET_DISCOUNTS, date_bo, date_bo, IIKO_BO_BASE)
+    except Exception as e:
+        logger.warning(f"[audit] Не удалось получить PRESET_DISCOUNTS: {e}")
+        return findings
+
+    try:
+        root = ET.fromstring(xml_text.replace('<?xml-stylesheet', '<?ignore'))
+    except ET.ParseError:
+        # Убираем processing instruction и пробуем снова
+        clean = "\n".join(
+            line for line in xml_text.splitlines()
+            if not line.strip().startswith("<?")
+        )
+        try:
+            root = ET.fromstring(clean)
+        except ET.ParseError as e2:
+            logger.warning(f"[audit] Ошибка парсинга XML скидок: {e2}")
+            return findings
+
+    # Группируем ручные скидки (пустой OrderDiscount.Type) по точке
+    manual_by_branch: dict[str, float] = {}
+    for data in root.findall("data"):
+        dept = data.findtext("Department", "")
+        disc_type = data.findtext("OrderDiscount.Type", "")
+        disc_sum_str = data.findtext("DiscountSum", "0")
+        if disc_type != "":
+            continue  # интересуют только скидки без типа
+        try:
+            disc_sum = float(disc_sum_str or 0)
+        except ValueError:
+            continue
+        if disc_sum > 0:
+            manual_by_branch[dept] = manual_by_branch.get(dept, 0) + disc_sum
+
+    branches = settings.branches or []
+    branch_to_city = {b["name"]: b.get("city", "") for b in branches}
+
+    for branch_name, total in sorted(manual_by_branch.items(), key=lambda x: -x[1]):
+        if total < DISCOUNT_MANUAL_MIN:
+            continue
+        sum_str = f"{int(total):,}".replace(",", "\u00a0")
+        findings.append({
+            "branch_name": branch_name,
+            "city": branch_to_city.get(branch_name, ""),
+            "event_type": "discount_manual",
+            "severity": "critical" if total >= 3000 else "warning",
+            "description": (
+                f"{branch_name} \u2014 ручные скидки без типа: {sum_str}\u20bd"
+            ),
+            "meta_json": json.dumps({
+                "branch_name": branch_name,
+                "discount_sum": total,
+                "discount_type": "(без типа)",
+            }, ensure_ascii=False),
+            "created_at": now_iso,
+        })
 
     return findings
 
@@ -247,7 +380,8 @@ async def _probe_cash_shifts(branch: dict, date_str: str) -> None:
 
     d = datetime.strptime(date_str, "%Y-%m-%d")
     date_bo = d.strftime("%d.%m.%Y")
-    base = f"https://{bo_url}"
+    # bo_url уже содержит https:// — используем напрямую
+    base = bo_url
 
     try:
         token = await _get_bo_token(bo_url)
@@ -290,9 +424,11 @@ def _date_label(date_str: str) -> str:
 
 def _format_report(date_str: str, city: str, events: list[dict]) -> str:
     """Форматирует аудит-отчёт в HTML для Telegram."""
-    cancelled = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
-    early = [e for e in events if e["event_type"] == "early_closure"]
     unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
+    fast = [e for e in events if e["event_type"] == "fast_delivery"]
+    cancelled = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
+    discounts = [e for e in events if e["event_type"] == "discount_manual"]
+    early = [e for e in events if e["event_type"] == "early_closure"]
 
     lines = [
         f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>",
@@ -305,6 +441,13 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
             lines.append(f"🔴 {html.escape(e['description'])}")
         lines.append("")
 
+    if fast:
+        lines.append(f"⚡ <b>Аномально быстрые доставки ({len(fast)})</b>")
+        for e in fast:
+            icon = "🔴" if e["severity"] == "critical" else "🟡"
+            lines.append(f"{icon} {html.escape(e['description'])}")
+        lines.append("")
+
     if cancelled:
         lines.append(f"❌ <b>Отменённые заказы с суммой ({len(cancelled)})</b>")
         for e in cancelled:
@@ -312,14 +455,21 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
             lines.append(f"{icon} {html.escape(e['description'])}")
         lines.append("")
 
+    if discounts:
+        lines.append(f"💸 <b>Ручные скидки без типа ({len(discounts)})</b>")
+        for e in discounts:
+            icon = "🔴" if e["severity"] == "critical" else "🟡"
+            lines.append(f"{icon} {html.escape(e['description'])}")
+        lines.append("")
+
     if early:
-        lines.append(f"⚡ <b>Ранние закрытия заказов ({len(early)})</b>")
+        lines.append(f"⏱ <b>Ранние закрытия заказов ({len(early)})</b>")
         for e in early:
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             lines.append(f"{icon} {html.escape(e['description'])}")
         lines.append("")
 
-    total = len(cancelled) + len(early) + len(unclosed)
+    total = len(unclosed) + len(fast) + len(cancelled) + len(discounts) + len(early)
     if total == 0:
         lines.append("✅ Подозрительных операций не выявлено")
     else:
@@ -351,6 +501,15 @@ async def job_audit_report(utc_offset: int = 7) -> None:
     # Детектируем подозрительные операции из orders_raw
     all_findings = await _detect_from_orders_raw(date_str)
 
+    # Детектируем аномальные скидки через OLAP
+    try:
+        discount_findings = await _detect_discounts(date_str)
+        all_findings.extend(discount_findings)
+        if discount_findings:
+            logger.info(f"[audit] Скидки: найдено {len(discount_findings)} аномалий")
+    except Exception as e:
+        logger.warning(f"[audit] Ошибка детектора скидок: {e}")
+
     # Phase A1: разведка cash shifts API (только логирование)
     for branch in branches:
         try:
@@ -362,7 +521,8 @@ async def job_audit_report(utc_offset: int = 7) -> None:
     branch_to_city = {b["name"]: b.get("city", "") for b in branches}
     for f in all_findings:
         f["date"] = date_str
-        f["city"] = branch_to_city.get(f["branch_name"], "")
+        if "city" not in f or not f["city"]:
+            f["city"] = branch_to_city.get(f["branch_name"], "")
 
     # Сохраняем в БД
     if all_findings:

@@ -44,9 +44,10 @@ settings = get_settings()
 # Настройки порогов
 # ---------------------------------------------------------------------------
 
-FAST_DELIVERY_MIN = 10       # доставка менее N минут = подозрительно
-CANCEL_HIGH_SUM = 500        # отмена ≥ N₽ без причины = warning
-CANCEL_WITH_REASON_SUM = 200 # отмена ≥ N₽ с указанной причиной = warning
+CANCEL_HIGH_SUM = 500              # отмена ≥ N₽ без причины = warning
+CANCEL_WITH_REASON_SUM = 200       # отмена ≥ N₽ с указанной причиной = warning
+EARLY_CLOSURE_MIN = 60             # закрыт на N+ мин раньше плана = подозрительно
+STUCK_IN_TRANSIT_DAYS = 1          # заказ "В пути" N+ дней = незакрыт
 
 # ---------------------------------------------------------------------------
 # Авторизация BO API (token-based, как в iiko_bo_events.py)
@@ -82,6 +83,12 @@ async def _get_bo_token(bo_url: str) -> str:
 async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     """
     Ищет подозрительные заказы в orders_raw за указанную дату.
+
+    Детекторы:
+    - cancellation: отменённый заказ с суммой ≥ порога
+    - early_closure: заказ закрыт на EARLY_CLOSURE_MIN+ мин раньше планового времени
+    - unclosed_in_transit: заказы 'В пути к клиенту' из ПРОШЛЫХ дней (незакрытые)
+
     Возвращает список событий (без поля date/city — добавляется снаружи).
     """
     findings: list[dict] = []
@@ -90,57 +97,11 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
 
-        # 1. Аномально быстрые доставки
-        async with db.execute(
-            """
-            SELECT branch_name, delivery_num, sum, opened_at, actual_time,
-                   courier, client_name, client_phone
-            FROM orders_raw
-            WHERE date = ?
-              AND is_self_service = 0
-              AND status IN ('Доставлена', 'Закрыта')
-              AND opened_at IS NOT NULL AND opened_at != ''
-              AND actual_time IS NOT NULL AND actual_time != ''
-            """,
-            (date_str,),
-        ) as cur:
-            for r in await cur.fetchall():
-                try:
-                    opened = datetime.fromisoformat(r["opened_at"].replace("Z", "+00:00"))
-                    actual = datetime.fromisoformat(r["actual_time"].replace("Z", "+00:00"))
-                    delta_min = (actual - opened).total_seconds() / 60
-                    if 0 < delta_min < FAST_DELIVERY_MIN:
-                        courier = r["courier"] or ""
-                        courier_str = f", курьер: {courier}" if courier else ""
-                        sum_val = int(r["sum"] or 0)
-                        findings.append({
-                            "branch_name": r["branch_name"],
-                            "event_type": "fast_delivery",
-                            "severity": "critical" if delta_min < 3 else "warning",
-                            "description": (
-                                f"Д-{r['delivery_num']} — доставка за {delta_min:.0f} мин "
-                                f"({r['opened_at'][11:16]}→{r['actual_time'][11:16]})"
-                                f"{courier_str}, {sum_val:,}₽".replace(",", "\u00a0")
-                            ),
-                            "meta_json": json.dumps({
-                                "delivery_num": r["delivery_num"],
-                                "sum": r["sum"],
-                                "delta_min": round(delta_min, 1),
-                                "courier": r["courier"],
-                                "client_name": r["client_name"],
-                                "opened_at": r["opened_at"],
-                                "actual_time": r["actual_time"],
-                            }, ensure_ascii=False),
-                            "created_at": now_iso,
-                        })
-                except Exception as e:
-                    logger.debug(f"[audit] Ошибка парсинга fast_delivery {r['delivery_num']}: {e}")
-
-        # 2. Отменённые заказы с суммой
+        # 1. Отменённые заказы с суммой
         async with db.execute(
             """
             SELECT branch_name, delivery_num, sum, cancel_reason,
-                   opened_at, client_name, client_phone
+                   client_name, client_phone
             FROM orders_raw
             WHERE date = ?
               AND status = 'Отменена'
@@ -154,28 +115,119 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                 reason = (r["cancel_reason"] or "").strip()
 
                 if s >= CANCEL_HIGH_SUM or (reason and s >= CANCEL_WITH_REASON_SUM):
-                    reason_str = f", причина: «{reason}»" if reason else ""
+                    reason_str = f", причина: \u00ab{reason}\u00bb" if reason else ""
                     client_name = r["client_name"] or ""
                     client_str = f", клиент: {client_name}" if client_name else ""
                     sum_int = int(s)
+                    sum_str = f"{sum_int:,}".replace(",", "\u00a0")
                     findings.append({
                         "branch_name": r["branch_name"],
                         "event_type": "cancellation_with_reason" if reason else "cancellation",
                         "severity": "critical" if s >= 1000 else "warning",
                         "description": (
-                            f"Д-{r['delivery_num']} — {sum_int:,}₽ отменён"
+                            f"Д-{r['delivery_num']} \u2014 {sum_str}\u20bd отменён"
                             f"{reason_str}{client_str}"
-                        ).replace(",", "\u00a0"),
+                        ),
                         "meta_json": json.dumps({
                             "delivery_num": r["delivery_num"],
                             "sum": s,
                             "cancel_reason": reason,
-                            "opened_at": r["opened_at"],
                             "client_name": r["client_name"],
                             "client_phone": r["client_phone"],
                         }, ensure_ascii=False),
                         "created_at": now_iso,
                     })
+
+        # 2. Ранние закрытия: actual_time < planned_time - EARLY_CLOSURE_MIN мин
+        #    Сигнал: заказ закрыт курьером задолго до ожидаемого времени доставки
+        async with db.execute(
+            """
+            SELECT branch_name, delivery_num, sum, planned_time, actual_time,
+                   courier, client_name, client_phone
+            FROM orders_raw
+            WHERE date = ?
+              AND is_self_service = 0
+              AND status IN ('Доставлена', 'Закрыта')
+              AND planned_time IS NOT NULL AND planned_time != ''
+              AND actual_time IS NOT NULL AND actual_time != ''
+            """,
+            (date_str,),
+        ) as cur:
+            for r in await cur.fetchall():
+                try:
+                    planned = datetime.fromisoformat(r["planned_time"].replace("Z", "+00:00"))
+                    actual = datetime.fromisoformat(r["actual_time"].replace("Z", "+00:00"))
+                    early_min = (planned - actual).total_seconds() / 60
+                    if early_min >= EARLY_CLOSURE_MIN:
+                        courier = r["courier"] or ""
+                        courier_str = f", курьер: {courier}" if courier else ""
+                        sum_val = int(r["sum"] or 0)
+                        sum_str = f"{sum_val:,}".replace(",", "\u00a0")
+                        p_time = r["planned_time"][11:16]
+                        a_time = r["actual_time"][11:16]
+                        findings.append({
+                            "branch_name": r["branch_name"],
+                            "event_type": "early_closure",
+                            "severity": "critical" if early_min >= 90 else "warning",
+                            "description": (
+                                f"Д-{r['delivery_num']} \u2014 закрыт на {early_min:.0f} мин раньше плана "
+                                f"(план {p_time}, факт {a_time})"
+                                f"{courier_str}, {sum_str}\u20bd"
+                            ),
+                            "meta_json": json.dumps({
+                                "delivery_num": r["delivery_num"],
+                                "sum": r["sum"],
+                                "early_min": round(early_min, 1),
+                                "planned_time": r["planned_time"],
+                                "actual_time": r["actual_time"],
+                                "courier": r["courier"],
+                                "client_name": r["client_name"],
+                                "client_phone": r["client_phone"],
+                            }, ensure_ascii=False),
+                            "created_at": now_iso,
+                        })
+                except Exception as e:
+                    logger.debug(f"[audit] Ошибка парсинга early_closure {r['delivery_num']}: {e}")
+
+        # 3. Незакрытые заказы "В пути к клиенту" из прошлых дней
+        #    Сигнал: деньги могли быть взяты, но заказ так и не закрыт
+        async with db.execute(
+            """
+            SELECT branch_name, delivery_num, sum, planned_time, courier,
+                   client_name, client_phone, date as order_date
+            FROM orders_raw
+            WHERE date < ?
+              AND status = 'В пути к клиенту'
+              AND is_self_service = 0
+            ORDER BY date ASC, sum DESC
+            """,
+            (date_str,),
+        ) as cur:
+            for r in await cur.fetchall():
+                courier = r["courier"] or ""
+                courier_str = f", курьер: {courier}" if courier else ""
+                sum_val = int(r["sum"] or 0)
+                sum_str = f"{sum_val:,}".replace(",", "\u00a0")
+                order_date = r["order_date"]
+                findings.append({
+                    "branch_name": r["branch_name"],
+                    "event_type": "unclosed_in_transit",
+                    "severity": "critical",
+                    "description": (
+                        f"Д-{r['delivery_num']} ({order_date}) \u2014 заказ не закрыт, "
+                        f"статус \u00abВ пути\u00bb{courier_str}, {sum_str}\u20bd"
+                    ),
+                    "meta_json": json.dumps({
+                        "delivery_num": r["delivery_num"],
+                        "sum": r["sum"],
+                        "order_date": order_date,
+                        "planned_time": r["planned_time"],
+                        "courier": r["courier"],
+                        "client_name": r["client_name"],
+                        "client_phone": r["client_phone"],
+                    }, ensure_ascii=False),
+                    "created_at": now_iso,
+                })
 
     return findings
 
@@ -238,32 +290,40 @@ def _date_label(date_str: str) -> str:
 
 def _format_report(date_str: str, city: str, events: list[dict]) -> str:
     """Форматирует аудит-отчёт в HTML для Telegram."""
-    fast = [e for e in events if e["event_type"] == "fast_delivery"]
     cancelled = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
+    early = [e for e in events if e["event_type"] == "early_closure"]
+    unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
 
     lines = [
         f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>",
         "",
     ]
 
-    if fast:
-        lines.append(f"⚡ <b>Аномально быстрые доставки ({len(fast)})</b>")
-        for e in fast:
-            icon = "🔴" if e["severity"] == "critical" else "🟡"
-            lines.append(f"{icon} {html.escape(e['description'])}")
+    if unclosed:
+        lines.append(f"🚨 <b>Незакрытые заказы «В пути» ({len(unclosed)})</b>")
+        for e in unclosed:
+            lines.append(f"🔴 {html.escape(e['description'])}")
         lines.append("")
 
     if cancelled:
-        lines.append(f"❌ <b>Отмены с суммой ({len(cancelled)})</b>")
+        lines.append(f"❌ <b>Отменённые заказы с суммой ({len(cancelled)})</b>")
         for e in cancelled:
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             lines.append(f"{icon} {html.escape(e['description'])}")
         lines.append("")
 
-    if not fast and not cancelled:
+    if early:
+        lines.append(f"⚡ <b>Ранние закрытия заказов ({len(early)})</b>")
+        for e in early:
+            icon = "🔴" if e["severity"] == "critical" else "🟡"
+            lines.append(f"{icon} {html.escape(e['description'])}")
+        lines.append("")
+
+    total = len(cancelled) + len(early) + len(unclosed)
+    if total == 0:
         lines.append("✅ Подозрительных операций не выявлено")
     else:
-        lines.append(f"<i>Итого: {len(fast) + len(cancelled)} событий</i>")
+        lines.append(f"<i>Итого: {total} событий</i>")
 
     return "\n".join(lines)
 

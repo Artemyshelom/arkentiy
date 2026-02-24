@@ -66,6 +66,7 @@ _CMD_MODULE: dict[str, str] = {
     "самовывоз": "late_queries", "pickup": "late_queries",
     "тишина": "late_alerts", "mute": "late_alerts",
     "выгрузка": "marketing", "export": "marketing",
+    "аудит": "audit", "audit": "audit",
     "конкуренты": "admin", "competitors": "admin",
     "доступ": "admin", "access": "admin",
 }
@@ -948,7 +949,8 @@ HELP_TEXT = (
     "<b>История (из БД):</b>\n"
     "/поиск <i>запрос</i> — по номеру, телефону, адресу или блюду\n"
     "/день [фильтр] [дата] — опоздания за день (группировка по точкам)\n"
-    "/день <i>вчера</i> / <i>21.02.2026</i> — за конкретный день\n\n"
+    "/день <i>вчера</i> / <i>21.02.2026</i> — за конкретный день\n"
+    "/аудит [город] [дата] — подозрительные операции за день\n\n"
     "<b>Алерты:</b>\n"
     "/тишина [длительность] — выключить алерты в этом чате (макс 2 ч)\n"
     "/тишина — показать текущий статус тишины\n\n"
@@ -1103,6 +1105,9 @@ async def poll_analytics_bot() -> None:
             await _handle_pickup(chat_id, arg, city_filter=city)
         elif cmd in ("тишина", "mute"):
             await _handle_mute(chat_id, arg, user_id=user_id)
+        elif cmd in ("аудит", "audit"):
+            from app.jobs.audit import handle_audit_command
+            await handle_audit_command(chat_id, arg, city_filter=city)
         elif cmd in ("выгрузка", "export"):
             from app.jobs.marketing_export import run_export
             await run_export(chat_id, arg, _bot_url())

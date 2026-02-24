@@ -45,6 +45,7 @@ _MODULE_META: list[tuple[str, str]] = [
     ("reports",      "📊 Отчёты"),
     ("marketing",    "📈 Выгрузка данных"),
     ("finance",      "💰 Финансы"),
+    ("audit",        "🔍 Аудит"),
     ("admin",        "🛠 Админ"),
 ]
 
@@ -56,6 +57,7 @@ _MOD_SHORT: dict[str, str] = {
     "reports":      "Отчёты",
     "marketing":    "Выгрузка",
     "finance":      "Финансы",
+    "audit":        "Аудит",
     "admin":        "Админ",
 }
 

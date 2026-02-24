@@ -38,6 +38,7 @@ from app.jobs.daily_report import (
     job_send_morning_report,
     job_save_rt_snapshot,
 )
+from app.jobs.audit import job_audit_report
 
 settings = get_settings()
 
@@ -185,6 +186,17 @@ def register_jobs() -> None:
         name="RT-снапшот пт/сб UTC+7",
         replace_existing=True,
         misfire_grace_time=300,
+    )
+
+    # Аудит опасных операций UTC+7: 09:30 лок = 05:30 МСК (после утреннего отчёта на 1 мин)
+    scheduler.add_job(
+        job_audit_report,
+        trigger=CronTrigger(hour=5, minute=31),
+        kwargs={"utc_offset": 7},
+        id="audit_report_utc7",
+        name="Аудит опасных операций UTC+7 → Telegram",
+        replace_existing=True,
+        misfire_grace_time=600,
     )
 
 

@@ -237,6 +237,50 @@ async def get_payment_breakdown(date_from: str, date_to: str) -> dict[str, dict[
     return {k: dict(v) for k, v in result.items()}
 
 
+async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str, float]]:
+    """
+    Онлайн-заказы (PayType = "Оплата на сайте") по точкам.
+    date_from/date_to в ISO: "2026-02-17" / "2026-02-25" (to exclusive).
+    Возвращает: {"Барнаул_1 Ана": {"90196": 1850.0, "90200": 2300.0, ...}}
+    """
+    logger.info(f"OLAP v2: online orders {date_from} — {date_to}")
+    ONLINE_PAY_TYPES = {"Оплата на сайте"}
+
+    by_url: dict[str, set[str]] = defaultdict(set)
+    for branch in settings.branches:
+        url = branch.get("bo_url", "")
+        if url:
+            by_url[url].add(branch["name"])
+
+    result: dict[str, dict[str, float]] = defaultdict(dict)
+
+    async def _fetch_online(bo_url: str, target_names: set[str]):
+        token = await get_bo_token(bo_url)
+        async with httpx.AsyncClient(verify=False) as client:
+            rows = await _query_olap_v2(
+                bo_url, token,
+                ["Department", "Delivery.Number", "PayTypes"],
+                ["DishDiscountSumInt"],
+                date_from, date_to, client,
+            )
+            for row in rows:
+                dept = row.get("Department", "").strip()
+                if not dept or dept not in target_names:
+                    continue
+                pay_type = row.get("PayTypes", "").strip()
+                if pay_type not in ONLINE_PAY_TYPES:
+                    continue
+                order_num = str(row.get("Delivery.Number", "")).strip()
+                amount = float(row.get("DishDiscountSumInt", 0))
+                if order_num and amount:
+                    result[dept][order_num] = result[dept].get(order_num, 0) + amount
+
+    tasks = [_fetch_online(url, names) for url, names in by_url.items()]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    return dict(result)
+
+
 async def get_branch_olap_stats(date: datetime) -> dict[str, dict]:
     """
     Drop-in замена iiko_bo_olap.get_branch_olap_stats() (для /статус).

@@ -109,6 +109,7 @@ async def init_db() -> None:
     await init_analytics_tables()
     await init_competitor_tables()
     await init_bank_statement_tables()
+    await init_online_payments_tables()
     await init_saas_tables()
     await seed_default_tenant()
 
@@ -151,6 +152,170 @@ async def save_bank_statement_log(
                 datetime.now(timezone.utc).isoformat(),
                 user_id, chat_id, filename, date_from, date_to, total_docs, total_files,
             ),
+        )
+        await db.commit()
+
+
+async def init_online_payments_tables() -> None:
+    """Таблицы трекера онлайн-оплат (сверка ТБанк vs iiko)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS online_payments (
+                id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+                branch              TEXT NOT NULL,
+                order_number        TEXT NOT NULL,
+                order_date          TEXT NOT NULL,
+                iiko_amount         REAL NOT NULL,
+                status              TEXT NOT NULL DEFAULT 'pending',
+                tbank_amount        REAL,
+                tbank_commission    REAL,
+                tbank_confirmed_date TEXT,
+                tbank_transaction_id TEXT,
+                created_at          TEXT NOT NULL,
+                updated_at          TEXT NOT NULL,
+                UNIQUE(branch, order_number)
+            );
+            CREATE INDEX IF NOT EXISTS idx_online_payments_status
+                ON online_payments(status);
+            CREATE INDEX IF NOT EXISTS idx_online_payments_date
+                ON online_payments(order_date);
+
+            CREATE TABLE IF NOT EXISTS tbank_registry_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                processed_at    TEXT NOT NULL,
+                user_id         INTEGER,
+                chat_id         INTEGER,
+                filename        TEXT,
+                report_date     TEXT,
+                total_orders    INTEGER,
+                confirmed       INTEGER,
+                mismatched      INTEGER,
+                new_pending     INTEGER,
+                missing_in_iiko INTEGER
+            );
+        """)
+        await db.commit()
+
+
+async def upsert_online_payment(
+    branch: str,
+    order_number: str,
+    order_date: str,
+    iiko_amount: float,
+) -> None:
+    """Регистрирует заказ в трекере (если ещё нет). Не перезаписывает confirmed."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO online_payments
+               (branch, order_number, order_date, iiko_amount, status, created_at, updated_at)
+               VALUES (?, ?, ?, ?, 'pending', ?, ?)
+               ON CONFLICT(branch, order_number) DO UPDATE SET
+                 iiko_amount = excluded.iiko_amount,
+                 updated_at  = excluded.updated_at
+               WHERE online_payments.status = 'pending'""",
+            (branch, order_number, order_date, iiko_amount, now, now),
+        )
+        await db.commit()
+
+
+async def confirm_online_payment(
+    branch: str,
+    order_number: str,
+    tbank_amount: float,
+    tbank_commission: float,
+    tbank_confirmed_date: str,
+    tbank_transaction_id: str,
+    iiko_amount: float | None = None,
+) -> str:
+    """
+    Подтверждает оплату из реестра ТБанк.
+    Возвращает результат: 'confirmed', 'mismatch', 'created_confirmed', 'created_mismatch'.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT id, iiko_amount FROM online_payments WHERE branch = ? AND order_number = ?",
+            (branch, order_number),
+        )).fetchone()
+
+        if row:
+            db_iiko_amount = row[1]
+            status = "confirmed" if abs(db_iiko_amount - tbank_amount) < 1.0 else "mismatch"
+            await db.execute(
+                """UPDATE online_payments SET
+                     status = ?, tbank_amount = ?, tbank_commission = ?,
+                     tbank_confirmed_date = ?, tbank_transaction_id = ?, updated_at = ?
+                   WHERE branch = ? AND order_number = ?""",
+                (status, tbank_amount, tbank_commission,
+                 tbank_confirmed_date, tbank_transaction_id, now,
+                 branch, order_number),
+            )
+            await db.commit()
+            return status
+        else:
+            amt = iiko_amount if iiko_amount is not None else tbank_amount
+            status = "confirmed" if iiko_amount is not None and abs(iiko_amount - tbank_amount) < 1.0 else "missing_in_iiko"
+            if iiko_amount is None:
+                status = "missing_in_iiko"
+            await db.execute(
+                """INSERT INTO online_payments
+                   (branch, order_number, order_date, iiko_amount, status,
+                    tbank_amount, tbank_commission, tbank_confirmed_date, tbank_transaction_id,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (branch, order_number, tbank_confirmed_date, amt, status,
+                 tbank_amount, tbank_commission, tbank_confirmed_date, tbank_transaction_id,
+                 now, now),
+            )
+            await db.commit()
+            return f"created_{status}"
+
+
+async def get_pending_payments(max_age_days: int | None = None) -> list[dict]:
+    """Возвращает все pending-оплаты, опционально старше max_age_days."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        if max_age_days is not None:
+            rows = await (await db.execute(
+                """SELECT * FROM online_payments
+                   WHERE status = 'pending'
+                     AND julianday('now') - julianday(order_date) >= ?
+                   ORDER BY order_date""",
+                (max_age_days,),
+            )).fetchall()
+        else:
+            rows = await (await db.execute(
+                "SELECT * FROM online_payments WHERE status = 'pending' ORDER BY order_date",
+            )).fetchall()
+        return [dict(r) for r in rows]
+
+
+async def get_overdue_payments(days: int = 4) -> list[dict]:
+    """Заказы pending дольше N дней."""
+    return await get_pending_payments(max_age_days=days)
+
+
+async def save_tbank_registry_log(
+    user_id: int,
+    chat_id: int,
+    filename: str,
+    report_date: str,
+    total_orders: int,
+    confirmed: int,
+    mismatched: int,
+    new_pending: int,
+    missing_in_iiko: int,
+) -> None:
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO tbank_registry_logs
+               (processed_at, user_id, chat_id, filename, report_date,
+                total_orders, confirmed, mismatched, new_pending, missing_in_iiko)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (datetime.now(timezone.utc).isoformat(),
+             user_id, chat_id, filename, report_date,
+             total_orders, confirmed, mismatched, new_pending, missing_in_iiko),
         )
         await db.commit()
 

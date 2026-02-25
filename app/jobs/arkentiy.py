@@ -29,6 +29,7 @@ import aiosqlite
 import httpx
 
 from app.jobs import bank_statement
+from app.jobs import tbank_reconciliation
 
 from app import access
 from app.clients.iiko_bo_events import (
@@ -262,6 +263,44 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
         )
     except Exception as e:
         logger.warning(f"[bank_statement] db log: {e}")
+
+
+async def _handle_tbank_registry(chat_id: int, tg_doc: dict, user_id: int = 0) -> None:
+    """Обработка реестра ТБанк: скачать, проверить формат, сверить с iiko."""
+    file_id = tg_doc.get("file_id", "")
+    file_name = tg_doc.get("file_name", "")
+
+    raw = await _download_tg_file(file_id)
+    if not raw:
+        await _send(chat_id, "❌ Не удалось скачать файл")
+        return
+
+    if not tbank_reconciliation.is_tbank_registry(raw):
+        return
+
+    await _send(chat_id, f"📥 Обрабатываю реестр ТБанк <b>{html.escape(file_name)}</b>...")
+
+    try:
+        result = await tbank_reconciliation.process_registry(
+            data=raw,
+            user_id=user_id,
+            chat_id=chat_id,
+            filename=file_name,
+        )
+    except Exception as e:
+        logger.error(f"tbank_reconciliation: {e}", exc_info=True)
+        await _send(chat_id, f"❌ Ошибка обработки: {html.escape(str(e))}")
+        return
+
+    if "error" in result:
+        await _send(chat_id, f"❌ {html.escape(result['error'])}")
+        return
+
+    report = result.get("report", "")
+    if report:
+        await _send(chat_id, report)
+
+    await _send(chat_id, "✅ Сверка онлайн-оплат завершена")
 
 
 async def _answer_callback(callback_id: str, text: str = "") -> None:
@@ -1682,17 +1721,23 @@ async def poll_analytics_bot() -> None:
         if chat_id > 0 and not access.is_admin(user_id):
             continue
 
-        # Автодетект банковской выписки (файл без команды)
+        # Автодетект финансовых файлов (без команды)
         tg_doc = message.get("document")
         if tg_doc and not text:
             file_name = tg_doc.get("file_name", "")
-            if file_name.lower().endswith(".txt"):
-                perms = access.get_permissions(chat_id, user_id)
-                if perms.has("finance"):
+            perms = access.get_permissions(chat_id, user_id)
+            if perms.has("finance"):
+                if file_name.lower().endswith(".txt"):
                     try:
                         await _handle_bank_statement(chat_id, tg_doc, user_id=user_id)
                     except Exception as e:
                         logger.error(f"[bank_statement] {e}", exc_info=True)
+                        await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
+                elif file_name.lower().endswith(".xlsx"):
+                    try:
+                        await _handle_tbank_registry(chat_id, tg_doc, user_id=user_id)
+                    except Exception as e:
+                        logger.error(f"[tbank_registry] {e}", exc_info=True)
                         await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
             continue
 

@@ -19,7 +19,6 @@ Polling каждые 30с → инкрементальный поток.
 """
 
 import asyncio
-import hashlib
 import logging
 import re
 import time
@@ -29,6 +28,7 @@ from datetime import datetime, timezone, timedelta
 
 import httpx
 
+from app.clients.iiko_auth import get_bo_token
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -52,15 +52,11 @@ _COOK_ROLE_SUBSTRINGS = ("сушист", "kitchen", "помпов")  # кух у
 _COURIER_ROLE_PREFIXES = ("курьер", "courier", "delivery", "кур", "крс")
 _COURIER_ROLE_SUBSTRINGS = ("доставка", "k_rs")
 
-TOKEN_TTL = 3600          # сек, ~1 час
 FULL_RELOAD_INTERVAL = 6  # часов
 
 # ---------------------------------------------------------------------------
 # Модульные переменные
 # ---------------------------------------------------------------------------
-
-# Токен кеш: {bo_url: (token, timestamp)}
-_bo_tokens: dict[str, tuple[str, float]] = {}
 
 # Глобальный реестр состояний точек: {branch_name: BranchState}
 _states: dict[str, "BranchState"] = {}
@@ -233,14 +229,22 @@ class BranchState:
         }
 
     def staff_list(self, role_class: str) -> list[dict]:
-        """Список персонала по роли с признаком is_active."""
+        """Список персонала по роли с признаком is_active.
+        Фильтрует только сессии, открытые сегодня (по локальному дню точки).
+        """
+        from datetime import date, datetime
+
+        today_str = date.today().isoformat()
         result = []
         for uid, s in self.sessions.items():
             if s.get("role_class") != role_class:
                 continue
+            opened = s.get("opened_at") or ""
+            if opened and opened[:10] < today_str:
+                continue
             result.append({
                 "name": s.get("name", uid),
-                "opened_at": s.get("opened_at"),
+                "opened_at": opened,
                 "closed_at": s.get("closed_at"),
                 "is_active": s.get("closed_at") is None,
             })
@@ -286,25 +290,12 @@ class BranchState:
 
 
 # ---------------------------------------------------------------------------
-# Auth
+# Auth (делегируем в iiko_auth — единый кеш токенов)
 # ---------------------------------------------------------------------------
 
 async def _get_token(bo_url: str, client: httpx.AsyncClient) -> str:
-    """Получает (или возвращает кешированный) API-токен iiko BO."""
-    cached = _bo_tokens.get(bo_url)
-    if cached and (time.time() - cached[1]) < TOKEN_TTL:
-        return cached[0]
-
-    login = settings.iiko_bo_login
-    pwd_hash = hashlib.sha1(settings.iiko_bo_password.encode()).hexdigest()
-    url = f"{bo_url}/api/auth?login={login}&pass={pwd_hash}"
-
-    resp = await client.get(url, timeout=15)
-    resp.raise_for_status()
-    token = resp.text.strip()
-    _bo_tokens[bo_url] = (token, time.time())
-    logger.debug(f"iiko BO Events token обновлён: {bo_url}")
-    return token
+    """Обёртка: передаёт httpx client в iiko_auth для переиспользования соединения."""
+    return await get_bo_token(bo_url, client=client)
 
 
 # ---------------------------------------------------------------------------
@@ -565,6 +556,7 @@ def _delivery_to_row(branch_name: str, num: str, d: dict, now: str, ready_time_o
         "delivery_address": d.get("delivery_address", ""),
         "items": d.get("items", ""),
         "ready_time": ready_time_override,
+        "cooked_time": d.get("cooked_time", ""),
         "comment": d.get("comment", ""),
         "operator": d.get("operator", ""),
         "opened_at": d.get("opened_at", ""),

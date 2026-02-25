@@ -1,27 +1,24 @@
 """
-Вечерний и утренний ежедневные отчёты по точкам → Telegram.
+Ежедневный утренний отчёт по точкам → Telegram.
 
-Вечерний (23:30 местного пн-чт): итоги текущего дня.
-Вечерний (00:30 сб/вс лок): итоги пт/сб (days_ago=1).
-Утренний (09:30 местного): финальные итоги вчера.
+09:25 местного (после OLAP enrichment в 09:00):
+OLAP v2 → выручка/COGS/скидки + orders_raw → агрегаты → daily_stats + ТГ.
 """
 
 import html
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 
 from app.clients import telegram
-from app.clients.iiko_bo_events import get_branch_rt
-from app.clients.iiko_bo_olap import get_all_branches_stats
+from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.database import (
+    aggregate_orders_for_daily_stats,
     clear_updates_for_date,
-    get_daily_stats,
-    get_rt_snapshot,
     get_updates_for_date,
     log_job_finish,
     log_job_start,
-    save_rt_snapshot,
     upsert_daily_stats_batch,
 )
 
@@ -55,31 +52,29 @@ def _fmt_pct(v) -> str:
 
 
 def _format_branch_report(
-    branch: dict,
+    name: str,
     stats: dict,
-    date: datetime,
-    report_type: str = "вечер",
-    rt_data: dict | None = None,
-    snapshot: dict | None = None,
+    date_str: str,
+    agg: dict,
+    *,
+    is_period: bool = False,
 ) -> str:
-    name = branch["name"]
-    date_str = date.strftime("%d.%m.%Y")
+    """Форматирует отчёт точки для Telegram.
 
-    revenue = stats.get("revenue_net")
-    check_count = stats.get("check_count")
+    stats  — OLAP v2 данные (revenue, cogs, discounts) или daily_stats row.
+    agg    — агрегаты из orders_raw: задержки, времена, скидки, штат.
+    is_period — True для отчётов за неделю/месяц (скрывает штат).
+    """
+    revenue = stats.get("revenue_net") or stats.get("revenue")
+    check_count = stats.get("check_count") or stats.get("orders_count")
     avg_check = round(revenue / check_count) if revenue and check_count else None
     cogs_pct = stats.get("cogs_pct")
     discount_sum = stats.get("discount_sum")
-    discount_types = stats.get("discount_types") or []
     sailplay = stats.get("sailplay")
 
-    icon = "🌙" if report_type == "вечер" else "☀️"
-    lines = [f"📊 <b>{html.escape(name)}</b> | {date_str} | {icon} {report_type}", ""]
+    lines = [f"📊 <b>{html.escape(name)}</b> | {date_str}", ""]
 
-    if revenue is not None:
-        lines.append(f"💰 Выручка: <b>{_fmt_money(revenue)}</b>")
-    else:
-        lines.append("💰 Выручка: <b>—</b>")
+    lines.append(f"💰 Выручка: <b>{_fmt_money(revenue)}</b>" if revenue is not None else "💰 Выручка: <b>—</b>")
 
     checks_str = _fmt_num(check_count)
     avg_str = _fmt_money(avg_check) if avg_check else "—"
@@ -89,225 +84,80 @@ def _format_branch_report(
     disc_str = _fmt_money(discount_sum) if discount_sum else "—"
     sail_str = _fmt_money(sailplay) if sailplay else "—"
     lines.append(f"💸 Скидки: {disc_str} | SailPlay: {sail_str}")
-    for t in discount_types:
-        lines.append(f"   └ {t}")
+    discount_types = agg.get("discount_types_agg") or []
+    if isinstance(discount_types, str):
+        try:
+            discount_types = json.loads(discount_types)
+        except (json.JSONDecodeError, TypeError):
+            discount_types = []
+    for dt in discount_types:
+        if isinstance(dt, dict):
+            cnt = dt.get("count", "")
+            s = dt.get("sum", 0)
+            cnt_str = f" x {cnt}" if cnt else ""
+            lines.append(f"   └ {dt.get('type', '?')}{cnt_str}: {_fmt_money(s)}")
+        else:
+            lines.append(f"   └ {dt}")
     lines.append("")
 
     lines.append(f"📦 Себестоимость: {_fmt_pct(cogs_pct)}")
     lines.append("")
 
-    # Опоздания — из живых RT или снапшота
-    delays = None
-    if rt_data:
-        delays = rt_data.get("delays")
-    elif snapshot:
-        total = snapshot.get("delays_total", 0)
-        if total:
-            delays = {
-                "late_count": snapshot["delays_late"],
-                "total_delivered": total,
-                "avg_delay_min": snapshot["delays_avg_min"],
-            }
-
-    if delays and delays.get("total_delivered", 0) > 0:
-        late = delays["late_count"]
-        total_d = delays["total_delivered"]
-        pct = late / total_d * 100 if total_d else 0
-        avg_min = delays["avg_delay_min"]
+    late = agg.get("late_delivery_count") or 0
+    total_d = agg.get("total_delivery_count") or 0
+    if total_d > 0:
+        pct = late / total_d * 100
         if late > 0:
-            lines.append(f"🔴 Опозданий: {late} из {total_d} ({pct:.1f}%) | среднее: {avg_min} мин")
+            avg_late = agg.get("avg_late_min") or 0
+            lines.append(f"🔴 Опозданий: {late} из {total_d} доставок ({pct:.1f}%) | среднее: {avg_late} мин")
         else:
-            lines.append(f"✅ Опозданий: 0 из {total_d}")
+            lines.append(f"✅ Опозданий: 0 из {total_d} доставок")
     else:
-        lines.append("⏱ Опозданий: нет данных")
+        lines.append("🚚 Опозданий: нет данных")
 
-    # Штат за день
-    cooks_today = rt_data.get("total_cooks_today") if rt_data else (snapshot.get("cooks_today") if snapshot else None)
-    couriers_today = rt_data.get("total_couriers_today") if rt_data else (snapshot.get("couriers_today") if snapshot else None)
+    cook = agg.get("avg_cooking_min")
+    wait = agg.get("avg_wait_min")
+    delivery = agg.get("avg_delivery_min")
+    time_parts = []
+    if cook is not None:
+        time_parts.append(f"Готовка: {cook}")
+    if wait is not None:
+        time_parts.append(f"Ожидание: {wait}")
+    if delivery is not None:
+        time_parts.append(f"В пути: {delivery}")
+    if time_parts:
+        lines.append(f"🕐 {' | '.join(time_parts)} мин")
+        total_time = sum(x for x in (cook, wait, delivery) if x is not None)
+        if len([x for x in (cook, wait, delivery) if x is not None]) >= 2:
+            lines.append(f"   └ Итого: {round(total_time, 1)} мин")
 
-    staff_parts = []
-    if cooks_today:
-        staff_parts.append(f"{cooks_today} поваров")
-    if couriers_today:
-        staff_parts.append(f"{couriers_today} курьеров")
-    if staff_parts:
-        lines.append(f"👥 На смене за день: {', '.join(staff_parts)}")
+    exact_cnt = agg.get("exact_time_count") or 0
+    if exact_cnt > 0:
+        lines.append(f"📌 Точных заказов: {exact_cnt} (не в средних временах)")
+    lines.append("")
+
+    if not is_period:
+        cooks_today = agg.get("cooks_today") or 0
+        couriers_today = agg.get("couriers_today") or 0
+        staff_parts = []
+        if cooks_today:
+            staff_parts.append(f"{cooks_today} поваров")
+        if couriers_today:
+            staff_parts.append(f"{couriers_today} курьеров")
+        if staff_parts:
+            lines.append(f"👥 На смене за день: {', '.join(staff_parts)}")
 
     return "\n".join(lines)
 
 
 
-async def job_save_rt_snapshot(utc_offset: int) -> None:
-    """
-    Сохраняет RT-снапшот пт/сб в 23:50 лок. — только из памяти, без OLAP.
-    Читает get_branch_rt() (загружается в память каждые 30с),
-    пишет в SQLite. Вечерний отчёт в 00:30 читает оттуда.
-    """
-    tz = _branch_tz(utc_offset)
-    today = datetime.now(tz)
-    date_iso = today.strftime("%Y-%m-%d")
-
-    branches = [b for b in settings.branches if b.get("utc_offset", 7) == utc_offset]
-    saved = 0
-    for branch in branches:
-        name = branch["name"]
-        rt_data = get_branch_rt(name)
-        if not rt_data:
-            logger.warning(f"RT-снапшот пт/сб: нет данных [{name}]")
-            continue
-        delays = rt_data.get("delays", {})
-        try:
-            await save_rt_snapshot(
-                branch=name,
-                date=date_iso,
-                delays_late=delays.get("late_count", 0),
-                delays_total=delays.get("total_delivered", 0),
-                delays_avg_min=delays.get("avg_delay_min", 0),
-                cooks_today=rt_data.get("total_cooks_today", 0),
-                couriers_today=rt_data.get("total_couriers_today", 0),
-            )
-            saved += 1
-        except Exception as e:
-            logger.warning(f"Не удалось сохранить RT-снапшот [{name}]: {e}")
-
-    logger.info(f"RT-снапшот пт/сб UTC+{utc_offset}: сохранено {saved}/{len(branches)}")
-
-
-async def job_send_evening_report(
-    utc_offset: int,
-    days_ago: int = 0,
-    day_label: str = "",
-) -> None:
-    job_id = f"evening_report_utc{utc_offset}" + (f"_d{days_ago}" if days_ago else "")
-    log_id = await log_job_start(job_id)
-
-    tz = _branch_tz(utc_offset)
-    target_date = datetime.now(tz) - timedelta(days=days_ago)
-    date_iso = target_date.strftime("%Y-%m-%d")
-
-    branches = [b for b in settings.branches if b.get("utc_offset", 7) == utc_offset]
-    if not branches:
-        await log_job_finish(log_id, "ok", f"Нет точек для UTC+{utc_offset}")
-        return
-
-    try:
-        all_stats = await get_all_branches_stats(target_date)
-    except Exception as e:
-        logger.error(f"Ошибка iiko BO в вечернем отчёте: {e}")
-        await telegram.error_alert(job_id, str(e))
-        await log_job_finish(log_id, "error", str(e))
-        return
-
-    sent = 0
-    for branch in branches:
-        name = branch["name"]
-        stats = all_stats.get(name, {})
-        rt_data = get_branch_rt(name)
-        snapshot = None
-
-        if days_ago == 0 and rt_data:
-            # Текущий день: сохраняем снапшот для утреннего отчёта
-            delays = rt_data.get("delays", {})
-            try:
-                await save_rt_snapshot(
-                    branch=name,
-                    date=date_iso,
-                    delays_late=delays.get("late_count", 0),
-                    delays_total=delays.get("total_delivered", 0),
-                    delays_avg_min=delays.get("avg_delay_min", 0),
-                    cooks_today=rt_data.get("total_cooks_today", 0),
-                    couriers_today=rt_data.get("total_couriers_today", 0),
-                )
-            except Exception as e:
-                logger.warning(f"Не удалось сохранить RT-снапшот [{name}]: {e}")
-        elif days_ago > 0:
-            # Прошлый день: берём снапшот из БД
-            try:
-                snapshot = await get_rt_snapshot(name, date_iso)
-            except Exception as e:
-                logger.warning(f"Не удалось загрузить RT-снапшот [{name}]: {e}")
-            rt_data = None
-
-        # Сохраняем OLAP-данные в daily_stats (чтобы утренний отчёт читал из БД)
-        try:
-            rev = stats.get("revenue_net") or 0
-            chk = stats.get("check_count") or 0
-            d_delays = (rt_data.get("delays") or {}) if rt_data else {}
-            late_c = d_delays.get("late_count", 0)
-            total_d = d_delays.get("total_delivered", 0)
-            avg_min = d_delays.get("avg_delay_min", 0)
-            cooks = (rt_data.get("total_cooks_today") or 0) if rt_data else 0
-            couriers = (rt_data.get("total_couriers_today") or 0) if rt_data else 0
-            await upsert_daily_stats_batch([{
-                "branch_name":    name,
-                "date":           date_iso,
-                "orders_count":   chk,
-                "revenue":        rev,
-                "avg_check":      round(rev / chk) if chk else 0,
-                "cogs_pct":       stats.get("cogs_pct"),
-                "sailplay":       stats.get("sailplay"),
-                "discount_sum":   stats.get("discount_sum"),
-                "discount_types": json.dumps(stats.get("discount_types") or [], ensure_ascii=False),
-                "delivery_count": chk - (stats.get("pickup_count") or 0),
-                "pickup_count":   stats.get("pickup_count") or 0,
-                "late_count":     late_c,
-                "total_delivered":total_d,
-                "late_percent":   round(late_c / total_d * 100, 1) if total_d else 0,
-                "avg_late_min":   avg_min,
-                "cooks_count":    cooks,
-                "couriers_count": couriers,
-            }])
-        except Exception as e:
-            logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
-
-        # Сохраняем OLAP-данные в daily_stats (чтобы утренний отчёт читал из БД)
-        try:
-            rev = stats.get("revenue_net") or 0
-            chk = stats.get("check_count") or 0
-            d_delays = (rt_data.get("delays") or {}) if rt_data else {}
-            late_c = d_delays.get("late_count", 0)
-            total_d = d_delays.get("total_delivered", 0)
-            avg_min = d_delays.get("avg_delay_min", 0)
-            cooks = (rt_data.get("total_cooks_today") or 0) if rt_data else 0
-            couriers = (rt_data.get("total_couriers_today") or 0) if rt_data else 0
-            await upsert_daily_stats_batch([{
-                "branch_name":    name,
-                "date":           date_iso,
-                "orders_count":   chk,
-                "revenue":        rev,
-                "avg_check":      round(rev / chk) if chk else 0,
-                "cogs_pct":       stats.get("cogs_pct"),
-                "sailplay":       stats.get("sailplay"),
-                "discount_sum":   stats.get("discount_sum"),
-                "discount_types": json.dumps(stats.get("discount_types") or [], ensure_ascii=False),
-                "delivery_count": chk - (stats.get("pickup_count") or 0),
-                "pickup_count":   stats.get("pickup_count") or 0,
-                "late_count":     late_c,
-                "total_delivered":total_d,
-                "late_percent":   round(late_c / total_d * 100, 1) if total_d else 0,
-                "avg_late_min":   avg_min,
-                "cooks_count":    cooks,
-                "couriers_count": couriers,
-            }])
-        except Exception as e:
-            logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
-
-        try:
-            msg = _format_branch_report(
-                branch, stats, target_date,
-                report_type="вечер",
-                rt_data=rt_data,
-                snapshot=snapshot,
-            )
-            await telegram.report(msg)
-            sent += 1
-        except Exception as e:
-            logger.error(f"Ошибка отправки вечернего отчёта [{name}]: {e}")
-
-    await log_job_finish(log_id, "ok", f"Отправлено: {sent}/{len(branches)}")
-
-
 async def job_send_morning_report(utc_offset: int) -> None:
+    """Единственный ежедневный отчёт. Запускается утром за вчера.
+    1) OLAP v2 → выручка, COGS, скидки
+    2) orders_raw → агрегаты (задержки, времена, типы скидок)
+    3) Пишет daily_stats
+    4) Отправляет в ТГ
+    """
     log_id = await log_job_start(f"morning_report_utc{utc_offset}")
 
     tz = _branch_tz(utc_offset)
@@ -319,62 +169,70 @@ async def job_send_morning_report(utc_offset: int) -> None:
         await log_job_finish(log_id, "ok", f"Нет точек для UTC+{utc_offset}")
         return
 
+    try:
+        all_stats = await get_all_branches_stats(yesterday)
+    except Exception as e:
+        logger.error(f"Ошибка iiko BO в утреннем отчёте: {e}")
+        await telegram.error_alert(f"morning_report_utc{utc_offset}", str(e))
+        await log_job_finish(log_id, "error", str(e))
+        return
+
     updates = await get_updates_for_date(date_iso)
     updates_by_branch: dict[str, list[dict]] = {}
     for u in updates:
         updates_by_branch.setdefault(u["branch"], []).append(u)
 
-    # Пробуем загрузить финансовые данные из нашей БД (сохранены вечерним отчётом)
-    db_stats: dict[str, dict] = {}
-    for branch in branches:
-        try:
-            row = await get_daily_stats(branch["name"], date_iso)
-            if row and row.get("revenue"):
-                import json as _json
-                disc_types = []
-                try:
-                    disc_types = _json.loads(row.get("discount_types") or "[]")
-                except Exception:
-                    pass
-                db_stats[branch["name"]] = {
-                    "revenue_net":    row["revenue"],
-                    "check_count":    row["orders_count"],
-                    "cogs_pct":       row.get("cogs_pct"),
-                    "sailplay":       row.get("sailplay"),
-                    "discount_sum":   row.get("discount_sum"),
-                    "discount_types": disc_types,
-                    "pickup_count":   row.get("pickup_count"),
-                }
-        except Exception as e:
-            logger.warning(f"Не удалось прочитать daily_stats [{branch['name']}]: {e}")
-
-    # Если БД покрыла все точки — iiko BO не запрашиваем
-    if len(db_stats) == len(branches):
-        all_stats = db_stats
-        logger.info(f"Утренний отчёт UTC+{utc_offset}: данные из local DB (iiko BO не запрашивался)")
-    else:
-        logger.info(f"Утренний отчёт UTC+{utc_offset}: БД покрыла {len(db_stats)}/{len(branches)}, дозапрашиваем iiko BO")
-        try:
-            iiko_stats = await get_all_branches_stats(yesterday)
-        except Exception as e:
-            logger.error(f"Ошибка iiko BO в утреннем отчёте: {e}")
-            await telegram.error_alert(f"morning_report_utc{utc_offset}", str(e))
-            await log_job_finish(log_id, "error", str(e))
-            return
-        all_stats = {**iiko_stats, **db_stats}  # db_stats приоритетнее
-
     sent = 0
     for branch in branches:
         name = branch["name"]
         stats = all_stats.get(name, {})
-        branch_updates = updates_by_branch.get(name, [])
 
-        snapshot = None
+        # Агрегаты из orders_raw (задержки, времена, типы скидок)
+        agg = await aggregate_orders_for_daily_stats(name, date_iso)
+
+        rev = stats.get("revenue_net") or 0
+        chk = stats.get("check_count") or 0
+
+        discount_types_json = json.dumps(
+            agg.get("discount_types_agg") or stats.get("discount_types") or [],
+            ensure_ascii=False,
+        )
+
+        total_d = agg.get("total_delivery_count") or 0
+        late_d = agg.get("late_delivery_count") or 0
+        late_pct = round(late_d / total_d * 100, 1) if total_d else 0
+
         try:
-            snapshot = await get_rt_snapshot(name, date_iso)
+            await upsert_daily_stats_batch([{
+                "branch_name":    name,
+                "date":           date_iso,
+                "orders_count":   chk,
+                "revenue":        rev,
+                "avg_check":      round(rev / chk) if chk else 0,
+                "cogs_pct":       stats.get("cogs_pct"),
+                "sailplay":       stats.get("sailplay"),
+                "discount_sum":   stats.get("discount_sum"),
+                "discount_types": discount_types_json,
+                "delivery_count": chk - (stats.get("pickup_count") or 0),
+                "pickup_count":   stats.get("pickup_count") or 0,
+                "late_count":     late_d,
+                "total_delivered": total_d,
+                "late_percent":   late_pct,
+                "avg_late_min":   agg.get("avg_late_min") or 0,
+                "cooks_count":    agg.get("cooks_today") or 0,
+                "couriers_count": agg.get("couriers_today") or 0,
+                "late_delivery_count": late_d,
+                "late_pickup_count":   agg.get("late_pickup_count") or 0,
+                "avg_cooking_min":     agg.get("avg_cooking_min"),
+                "avg_wait_min":        agg.get("avg_wait_min"),
+                "avg_delivery_min":    agg.get("avg_delivery_min"),
+                "exact_time_count":    agg.get("exact_time_count") or 0,
+            }])
         except Exception as e:
-            logger.warning(f"Не удалось загрузить RT-снапшот для утреннего [{name}]: {e}")
+            logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
 
+        # Отправка в ТГ
+        branch_updates = updates_by_branch.get(name, [])
         try:
             lines = []
             if branch_updates:
@@ -394,12 +252,8 @@ async def job_send_morning_report(utc_offset: int) -> None:
                 if lines:
                     lines.append("")
 
-            msg_body = _format_branch_report(
-                branch, stats, yesterday,
-                report_type="утро",
-                rt_data=None,
-                snapshot=snapshot,
-            )
+            date_str = yesterday.strftime("%d.%m.%Y")
+            msg_body = _format_branch_report(name, stats, date_str, agg)
             lines.append(msg_body)
             await telegram.report("\n".join(lines))
             sent += 1

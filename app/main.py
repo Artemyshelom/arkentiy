@@ -27,17 +27,14 @@ from app.webhooks.bitrix import router as bitrix_router
 
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
+from app.jobs.olap_enrichment import job_olap_enrichment
 # from app.jobs.telegram_commands import poll_telegram_commands  # Арсений отключён, заменён Аркентием
 from app.clients.iiko_bo_events import job_poll_iiko_events
 from app.monitoring.healthcheck import job_backup_sqlite
 from app.jobs.competitor_monitor import job_monitor_competitors
 from app.jobs.arkentiy import poll_analytics_bot, run_polling_loop
 from app.jobs.late_alerts import job_late_alerts
-from app.jobs.daily_report import (
-    job_send_evening_report,
-    job_send_morning_report,
-    job_save_rt_snapshot,
-)
+from app.jobs.daily_report import job_send_morning_report
 from app.jobs.audit import job_audit_report
 from app.jobs.cancel_sync import job_cancel_sync
 
@@ -80,10 +77,20 @@ def register_jobs() -> None:
     #     misfire_grace_time=60,
     # )
 
-    # Выгрузка заказов iiko → Google Sheets: ежедневно в 23:00
+    # OLAP enrichment orders_raw: 09:00 местного = 05:00 МСК (перед утренним отчётом)
+    scheduler.add_job(
+        job_olap_enrichment,
+        trigger=CronTrigger(hour=5, minute=0),
+        id="olap_enrichment",
+        name="OLAP обогащение orders_raw",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Выгрузка iiko → Google Sheets + ТГ-оповещение: 09:26 местного = 05:26 МСК
     scheduler.add_job(
         job_export_iiko_to_sheets,
-        trigger=CronTrigger(hour=23, minute=0),
+        trigger=CronTrigger(hour=5, minute=26),
         id="iiko_to_sheets",
         name="iiko заказы → Google Sheets",
         replace_existing=True,
@@ -145,32 +152,10 @@ def register_jobs() -> None:
         misfire_grace_time=60,
     )
 
-    # Вечерний отчёт UTC+7 (пн-чт): 23:30 лок = 19:30 МСК
-    scheduler.add_job(
-        job_send_evening_report,
-        trigger=CronTrigger(day_of_week="sun,mon,tue,wed,thu", hour=19, minute=30),
-        kwargs={"utc_offset": 7},
-        id="evening_report_utc7",
-        name="Вечерний отчёт (вс-чт 23:30) UTC+7 → Telegram",
-        replace_existing=True,
-        misfire_grace_time=600,
-    )
-
-    # Вечерний отчёт UTC+7 пт/сб: 00:30 следующего дня лок = 20:30 МСК пт/сб
-    scheduler.add_job(
-        job_send_evening_report,
-        trigger=CronTrigger(day_of_week="fri,sat", hour=20, minute=30),
-        kwargs={"utc_offset": 7, "days_ago": 1},
-        id="evening_report_utc7_fri",
-        name="Вечерний отчёт пт/сб (00:30 след. дня лок) UTC+7 → Telegram",
-        replace_existing=True,
-        misfire_grace_time=600,
-    )
-
-    # Утренний отчёт UTC+7: 09:30 лок = 05:30 МСК
+    # Утренний отчёт UTC+7: 09:25 лок = 05:25 МСК (после OLAP enrichment)
     scheduler.add_job(
         job_send_morning_report,
-        trigger=CronTrigger(hour=5, minute=30),
+        trigger=CronTrigger(hour=5, minute=25),
         kwargs={"utc_offset": 7},
         id="morning_report_utc7",
         name="Утренний отчёт UTC+7 → Telegram",
@@ -178,21 +163,10 @@ def register_jobs() -> None:
         misfire_grace_time=600,
     )
 
-    # RT-снапшот UTC+7 пт/сб: 23:50 лок = 19:50 МСК
-    scheduler.add_job(
-        job_save_rt_snapshot,
-        trigger=CronTrigger(day_of_week="fri,sat", hour=19, minute=50),
-        kwargs={"utc_offset": 7},
-        id="rt_snapshot_utc7",
-        name="RT-снапшот пт/сб UTC+7",
-        replace_existing=True,
-        misfire_grace_time=300,
-    )
-
-    # Аудит опасных операций UTC+7: 09:30 лок = 05:30 МСК (после утреннего отчёта на 1 мин)
+    # Аудит опасных операций UTC+7: 09:27 лок = 05:27 МСК
     scheduler.add_job(
         job_audit_report,
-        trigger=CronTrigger(hour=5, minute=31),
+        trigger=CronTrigger(hour=5, minute=27),
         kwargs={"utc_offset": 7},
         id="audit_report_utc7",
         name="Аудит опасных операций UTC+7 → Telegram",

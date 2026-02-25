@@ -329,7 +329,6 @@ async def _refresh_cache() -> None:
     """Перечитывает конфиг из БД и обновляет in-memory кэш access.py."""
     cfg = await _db.get_access_config_from_db()
     access.update_db_cache(cfg)
-    # #region agent log
 
 
 async def _toggle_module(section: str, key_str: str, module: str) -> None:

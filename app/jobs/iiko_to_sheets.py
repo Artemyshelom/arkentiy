@@ -1,8 +1,8 @@
 """
 Задача: Ежедневная выгрузка метрик iiko → Google Sheets.
-Расписание: ежедневно в 23:00 МСК.
+Расписание: ежедневно в 23:31 местного (19:31 МСК).
 
-Источник данных: iiko Web BO OLAP-пресеты (app/clients/iiko_bo_olap.py).
+Источник данных: OLAP v2 (app/clients/iiko_bo_olap_v2.py).
 Логика:
   1. Инкрементальная запись — не дублировать уже существующие строки.
   2. Перепроверка вчерашнего дня — обновлять если iiko BO изменил данные.
@@ -24,7 +24,7 @@ from app.clients.google_sheets import (
     read_range,
     write_range,
 )
-from app.clients.iiko_bo_olap import get_all_branches_stats
+from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.database import (
     log_job_finish,
@@ -248,7 +248,7 @@ async def export_day(date: datetime) -> list[list]:
 
 
 async def job_export_iiko_to_sheets() -> None:
-    """Ежедневная выгрузка данных за вчера в Google Sheets с инкрементальной логикой."""
+    """Ежедневная выгрузка данных за сегодня в Google Sheets (23:31 местного)."""
     log_id = await log_job_start("iiko_to_sheets")
 
     if not settings.google_sheets_iiko_id:
@@ -261,10 +261,10 @@ async def job_export_iiko_to_sheets() -> None:
         return
 
     tz = branch_tz(branches[0])
-    # Джоб в 23:00 МСК = 03:00 следующего дня по UTC+7 → пишем вчера
-    yesterday = datetime.now(tz) - timedelta(days=1)
-    date_iso = yesterday.strftime("%Y-%m-%d")
-    date_display = yesterday.strftime("%d.%m.%Y")
+    # Джоб в 23:31 местного — пишем сегодня
+    today = datetime.now(tz)
+    date_iso = today.strftime("%Y-%m-%d")
+    date_display = today.strftime("%d.%m.%Y")
 
     # Создаём лист + заголовок если нужно
     try:
@@ -281,9 +281,8 @@ async def job_export_iiko_to_sheets() -> None:
 
     written = 0
     if not date_in_sheets:
-        # --- 2.1: Строк за вчера нет → дозаписываем ---
         try:
-            rows = await export_day(yesterday)
+            rows = await export_day(today)
         except Exception as e:
             logger.error(f"Ошибка сбора данных: {e}")
             await telegram.error_alert("iiko_to_sheets", str(e))
@@ -304,8 +303,8 @@ async def job_export_iiko_to_sheets() -> None:
     else:
         logger.info(f"Строки за {date_display} уже есть в Sheets — пропускаем append")
 
-    # --- 2.2: Перепроверка вчерашнего дня ---
-    changed = await _compare_and_update_date(yesterday, index)
+    # --- 2.2: Перепроверка текущего дня ---
+    changed = await _compare_and_update_date(today, index)
     if changed:
         logger.info(f"Перепроверка {date_display}: обновлено точек: {len(changed)}")
     else:
@@ -315,15 +314,15 @@ async def job_export_iiko_to_sheets() -> None:
     is_monday = datetime.now(tz).weekday() == 0
     if is_monday:
         logger.info("Понедельник: еженедельная перепроверка за 7 дней")
-        for days_back in range(2, 8):
-            past_date = yesterday - timedelta(days=days_back - 1)
+        for days_back in range(1, 7):
+            past_date = today - timedelta(days=days_back)
             weekly_changed = await _compare_and_update_date(past_date, index)
             if weekly_changed:
                 logger.info(f"Обновлено за {past_date.strftime('%d.%m.%Y')}: {len(weekly_changed)} точек")
 
     # Итоговое уведомление
     try:
-        rows_for_notify = await export_day(yesterday)
+        rows_for_notify = await export_day(today)
         total = sum(
             r[COL_REVENUE] for r in rows_for_notify if isinstance(r[COL_REVENUE], int)
         )

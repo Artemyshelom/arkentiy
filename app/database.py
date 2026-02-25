@@ -337,6 +337,8 @@ async def init_analytics_tables() -> None:
             ("service_print_time", "TEXT"),
             ("cooking_to_send_duration", "INTEGER"),
             ("pay_breakdown",      "TEXT"),
+            ("cooked_time",        "TEXT"),
+            ("discount_type",      "TEXT"),
         ]
         for col_name, col_type in new_columns:
             try:
@@ -346,23 +348,16 @@ async def init_analytics_tables() -> None:
                 pass  # Колонка уже существует
 
         daily_stats_new_cols = [
-            ("cogs_pct",       "REAL"),
-            ("sailplay",       "REAL"),
-            ("discount_sum",   "REAL"),
-            ("discount_types", "TEXT"),
-        ]
-        for col_name, col_type in daily_stats_new_cols:
-            try:
-                await db.execute(f"ALTER TABLE daily_stats ADD COLUMN {col_name} {col_type}")
-                await db.commit()
-            except Exception:
-                pass
-
-        daily_stats_new_cols = [
-            ("cogs_pct",       "REAL"),
-            ("sailplay",       "REAL"),
-            ("discount_sum",   "REAL"),
-            ("discount_types", "TEXT"),
+            ("cogs_pct",             "REAL"),
+            ("sailplay",             "REAL"),
+            ("discount_sum",         "REAL"),
+            ("discount_types",       "TEXT"),
+            ("late_delivery_count",  "INTEGER DEFAULT 0"),
+            ("late_pickup_count",    "INTEGER DEFAULT 0"),
+            ("avg_cooking_min",      "REAL"),
+            ("avg_wait_min",         "REAL"),
+            ("avg_delivery_min",     "REAL"),
+            ("exact_time_count",     "INTEGER DEFAULT 0"),
         ]
         for col_name, col_type in daily_stats_new_cols:
             try:
@@ -463,7 +458,7 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                 planned_time, actual_time, is_self_service,
                 date, is_late, late_minutes,
                 client_name, client_phone, delivery_address, items,
-                ready_time,
+                ready_time, cooked_time,
                 comment, operator, opened_at, has_problem, problem_comment,
                 payment_type, bonus_accrued, source, return_sum, service_charge,
                 cancel_reason, cancel_comment,
@@ -472,7 +467,7 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                        :planned_time, :actual_time, :is_self_service,
                        :date, :is_late, :late_minutes,
                        :client_name, :client_phone, :delivery_address, :items,
-                       :ready_time,
+                       :ready_time, :cooked_time,
                        :comment, :operator, :opened_at, :has_problem, :problem_comment,
                        :payment_type, :bonus_accrued, :source, :return_sum, :service_charge,
                        :cancel_reason, :cancel_comment,
@@ -485,12 +480,17 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                  client_name=excluded.client_name, client_phone=excluded.client_phone,
                  delivery_address=excluded.delivery_address, items=excluded.items,
                  ready_time=COALESCE(excluded.ready_time, orders_raw.ready_time),
+                 cooked_time=COALESCE(excluded.cooked_time, orders_raw.cooked_time),
                  comment=excluded.comment, operator=excluded.operator,
                  opened_at=excluded.opened_at, has_problem=excluded.has_problem,
-                 problem_comment=excluded.problem_comment, payment_type=excluded.payment_type,
-                 bonus_accrued=excluded.bonus_accrued, source=excluded.source,
-                 return_sum=excluded.return_sum, service_charge=excluded.service_charge,
-                 cancel_reason=excluded.cancel_reason, cancel_comment=excluded.cancel_comment,
+                 problem_comment=excluded.problem_comment,
+                 payment_type=COALESCE(NULLIF(excluded.payment_type, ''), orders_raw.payment_type),
+                 bonus_accrued=COALESCE(excluded.bonus_accrued, orders_raw.bonus_accrued),
+                 source=COALESCE(NULLIF(excluded.source, ''), orders_raw.source),
+                 return_sum=COALESCE(excluded.return_sum, orders_raw.return_sum),
+                 service_charge=COALESCE(excluded.service_charge, orders_raw.service_charge),
+                 cancel_reason=COALESCE(NULLIF(excluded.cancel_reason, ''), orders_raw.cancel_reason),
+                 cancel_comment=COALESCE(NULLIF(excluded.cancel_comment, ''), orders_raw.cancel_comment),
                  updated_at=excluded.updated_at""",
             rows,
         )
@@ -523,15 +523,342 @@ async def upsert_daily_stats_batch(rows: list[dict]) -> None:
                (branch_name, date, orders_count, revenue, avg_check,
                 cogs_pct, sailplay, discount_sum, discount_types,
                 delivery_count, pickup_count, late_count, total_delivered,
-                late_percent, avg_late_min, cooks_count, couriers_count, updated_at)
+                late_percent, avg_late_min, cooks_count, couriers_count,
+                late_delivery_count, late_pickup_count,
+                avg_cooking_min, avg_wait_min, avg_delivery_min,
+                exact_time_count, updated_at)
                VALUES (:branch_name, :date, :orders_count, :revenue, :avg_check,
                        :cogs_pct, :sailplay, :discount_sum, :discount_types,
                        :delivery_count, :pickup_count, :late_count, :total_delivered,
                        :late_percent, :avg_late_min, :cooks_count, :couriers_count,
-                       datetime('now'))""",
+                       :late_delivery_count, :late_pickup_count,
+                       :avg_cooking_min, :avg_wait_min, :avg_delivery_min,
+                       :exact_time_count, datetime('now'))""",
             rows,
         )
         await db.commit()
+
+
+async def backfill_daily_stats_from_orders_raw() -> int:
+    """One-time backfill: recalculate aggregate fields in daily_stats from orders_raw + shifts_raw."""
+    import json as _json
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        pairs = await (await db.execute(
+            "SELECT DISTINCT branch_name, date FROM orders_raw ORDER BY date"
+        )).fetchall()
+
+    updated = 0
+    for pair in pairs:
+        bn, dt = pair["branch_name"], pair["date"]
+        agg = await aggregate_orders_for_daily_stats(bn, dt)
+
+        dt_json = _json.dumps(agg.get("discount_types_agg") or [], ensure_ascii=False)
+        total_d = agg.get("total_delivery_count") or 0
+        late_d = agg.get("late_delivery_count") or 0
+        late_pct = round(late_d / total_d * 100, 1) if total_d else 0
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            await db.execute(
+                """UPDATE daily_stats SET
+                       total_delivered = ?,
+                       late_count = ?,
+                       late_delivery_count = ?,
+                       late_pickup_count = ?,
+                       late_percent = ?,
+                       avg_late_min = ?,
+                       avg_cooking_min = ?,
+                       avg_wait_min = ?,
+                       avg_delivery_min = ?,
+                       cooks_count = ?,
+                       couriers_count = ?,
+                       discount_types = ?,
+                       exact_time_count = ?,
+                       updated_at = datetime('now')
+                   WHERE branch_name = ? AND date = ?""",
+                (
+                    total_d, late_d, late_d,
+                    agg.get("late_pickup_count") or 0,
+                    late_pct,
+                    agg.get("avg_late_min") or 0,
+                    agg.get("avg_cooking_min"),
+                    agg.get("avg_wait_min"),
+                    agg.get("avg_delivery_min"),
+                    agg.get("cooks_today") or 0,
+                    agg.get("couriers_today") or 0,
+                    dt_json,
+                    agg.get("exact_time_count") or 0,
+                    bn, dt,
+                ),
+            )
+            await db.commit()
+        updated += 1
+    return updated
+
+
+async def backfill_daily_stats_olap() -> int:
+    """One-time backfill: fill cogs_pct, sailplay, discount_sum from OLAP v2 for dates that lack them."""
+    import asyncio
+    from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
+
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        rows = await (await db.execute(
+            """SELECT DISTINCT date FROM daily_stats
+               WHERE (cogs_pct IS NULL OR cogs_pct = 0)
+               ORDER BY date DESC"""
+        )).fetchall()
+
+    dates = [r["date"] for r in rows]
+    if not dates:
+        return 0
+
+    updated = 0
+    for date_iso in dates:
+        try:
+            dt = datetime.fromisoformat(date_iso)
+            all_stats = await get_all_branches_stats(dt)
+        except Exception:
+            continue
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            for name, stats in all_stats.items():
+                cogs = stats.get("cogs_pct")
+                sail = stats.get("sailplay")
+                disc = stats.get("discount_sum")
+                if cogs or sail or disc:
+                    await db.execute(
+                        """UPDATE daily_stats SET
+                               cogs_pct = COALESCE(?, cogs_pct),
+                               sailplay = COALESCE(?, sailplay),
+                               discount_sum = COALESCE(?, discount_sum),
+                               updated_at = datetime('now')
+                           WHERE branch_name = ? AND date = ?""",
+                        (cogs, sail, disc, name, date_iso),
+                    )
+            await db.commit()
+        updated += 1
+        await asyncio.sleep(0.3)
+
+    return updated
+
+
+_EXACT_TIME_CONDITIONS = """(
+        LOWER(COALESCE(comment, '')) LIKE '%точн%'
+        OR LOWER(COALESCE(comment, '')) LIKE '%тчн%'
+        OR LOWER(COALESCE(comment, '')) LIKE '%предзаказ%'
+        OR (planned_time != '' AND opened_at != ''
+            AND (julianday(planned_time)
+                 - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440 > 150)
+        OR (service_print_time != '' AND opened_at != ''
+            AND (julianday(service_print_time)
+                 - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440 > 90)
+        OR (cooked_time != '' AND opened_at != ''
+            AND (julianday(cooked_time)
+                 - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440 > 210)
+        OR (send_time != '' AND cooked_time != '' AND actual_time != ''
+            AND (julianday(send_time) - julianday(cooked_time)) * 1440 > 120
+            AND (julianday(replace(substr(actual_time, 1, 19), 'T', ' '))
+                 - julianday(send_time)) * 1440 < 5)
+    )"""
+
+_EXACT_TIME_FILTER = f"\n    AND NOT {_EXACT_TIME_CONDITIONS}\n"
+
+
+async def aggregate_orders_for_daily_stats(
+    branch_name: str, date_iso: str
+) -> dict:
+    """
+    Агрегирует данные из orders_raw для daily_stats:
+    задержки, средние времена (без заказов на точное время), типы скидок, штат.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        row = await (await db.execute(
+            f"""SELECT
+                SUM(CASE WHEN is_late = 1 AND is_self_service = 0 THEN 1 ELSE 0 END)
+                    AS late_delivery_count,
+                SUM(CASE WHEN is_late = 1 AND is_self_service = 1 THEN 1 ELSE 0 END)
+                    AS late_pickup_count,
+                SUM(CASE WHEN is_self_service = 0
+                         AND status IN ('Доставлена','Закрыта') THEN 1 ELSE 0 END)
+                    AS total_delivery_count,
+                AVG(CASE WHEN is_late = 1 AND is_self_service = 0
+                         THEN late_minutes END)
+                    AS avg_late_min
+            FROM orders_raw
+            WHERE branch_name = ? AND date = ?
+              AND status != 'Отменена'""",
+            (branch_name, date_iso),
+        )).fetchone()
+
+        result = dict(row) if row else {}
+
+        time_row = await (await db.execute(
+            f"""SELECT
+                AVG(CASE
+                    WHEN cooked_time != '' AND opened_at != '' AND sum >= 200
+                    THEN CASE
+                        WHEN (julianday(cooked_time)
+                              - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440
+                             BETWEEN 1 AND 120
+                        THEN (julianday(cooked_time)
+                              - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440
+                    END
+                END) AS avg_cooking_min,
+                AVG(CASE
+                    WHEN send_time != '' AND cooked_time != ''
+                    THEN CASE
+                        WHEN (julianday(send_time)
+                              - julianday(cooked_time)) * 1440
+                             BETWEEN 0 AND 120
+                        THEN (julianday(send_time)
+                              - julianday(cooked_time)) * 1440
+                    END
+                END) AS avg_wait_min,
+                AVG(CASE
+                    WHEN actual_time != '' AND send_time != ''
+                        AND is_self_service = 0
+                    THEN CASE
+                        WHEN (julianday(replace(substr(actual_time, 1, 19), 'T', ' '))
+                              - julianday(send_time)) * 1440
+                             BETWEEN 1 AND 120
+                        THEN (julianday(replace(substr(actual_time, 1, 19), 'T', ' '))
+                              - julianday(send_time)) * 1440
+                    END
+                END) AS avg_delivery_min
+            FROM orders_raw
+            WHERE branch_name = ? AND date = ?
+              AND status != 'Отменена'
+              {_EXACT_TIME_FILTER}""",
+            (branch_name, date_iso),
+        )).fetchone()
+
+        if time_row:
+            result.update(dict(time_row))
+
+        exact_row = await (await db.execute(
+            f"""SELECT COUNT(*) AS exact_time_count
+            FROM orders_raw
+            WHERE branch_name = ? AND date = ?
+              AND status != 'Отменена'
+              AND {_EXACT_TIME_CONDITIONS}""",
+            (branch_name, date_iso),
+        )).fetchone()
+
+        if exact_row:
+            result["exact_time_count"] = exact_row["exact_time_count"] or 0
+
+        dt_rows = await (await db.execute(
+            """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+               FROM orders_raw
+               WHERE branch_name = ? AND date = ?
+                 AND discount_type IS NOT NULL AND discount_type != ''
+                 AND status != 'Отменена'
+               GROUP BY discount_type
+               ORDER BY total DESC""",
+            (branch_name, date_iso),
+        )).fetchall()
+
+        if dt_rows:
+            result["discount_types_agg"] = [
+                {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+                for r in dt_rows
+            ]
+        else:
+            result["discount_types_agg"] = []
+
+        for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min"):
+            v = result.get(k)
+            if v is not None:
+                result[k] = round(v, 1)
+
+        # Штат из shifts_raw
+        staff_rows = await (await db.execute(
+            """SELECT role_class, COUNT(DISTINCT employee_id) as cnt
+               FROM shifts_raw
+               WHERE branch_name = ? AND date = ?
+               GROUP BY role_class""",
+            (branch_name, date_iso),
+        )).fetchall()
+        staff = {r["role_class"]: r["cnt"] for r in staff_rows}
+        result["cooks_today"] = staff.get("cook", 0)
+        result["couriers_today"] = staff.get("courier", 0)
+
+        return result
+
+
+async def aggregate_orders_today(branch_name: str, date_iso: str) -> dict:
+    """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + времена)."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        time_row = await (await db.execute(
+            f"""SELECT
+                AVG(CASE
+                    WHEN cooked_time != '' AND opened_at != '' AND sum >= 200
+                    THEN CASE
+                        WHEN (julianday(cooked_time)
+                              - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440
+                             BETWEEN 1 AND 120
+                        THEN (julianday(cooked_time)
+                              - julianday(replace(substr(opened_at, 1, 19), 'T', ' '))) * 1440
+                    END
+                END) AS avg_cooking_min,
+                AVG(CASE
+                    WHEN send_time != '' AND cooked_time != ''
+                    THEN CASE
+                        WHEN (julianday(send_time)
+                              - julianday(cooked_time)) * 1440
+                             BETWEEN 0 AND 120
+                        THEN (julianday(send_time)
+                              - julianday(cooked_time)) * 1440
+                    END
+                END) AS avg_wait_min,
+                AVG(CASE
+                    WHEN actual_time != '' AND send_time != ''
+                        AND is_self_service = 0
+                    THEN CASE
+                        WHEN (julianday(replace(substr(actual_time, 1, 19), 'T', ' '))
+                              - julianday(send_time)) * 1440
+                             BETWEEN 1 AND 120
+                        THEN (julianday(replace(substr(actual_time, 1, 19), 'T', ' '))
+                              - julianday(send_time)) * 1440
+                    END
+                END) AS avg_delivery_min
+            FROM orders_raw
+            WHERE branch_name = ? AND date = ?
+              AND status != 'Отменена'
+              {_EXACT_TIME_FILTER}""",
+            (branch_name, date_iso),
+        )).fetchone()
+
+        result = dict(time_row) if time_row else {}
+
+        dt_rows = await (await db.execute(
+            """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+               FROM orders_raw
+               WHERE branch_name = ? AND date = ?
+                 AND discount_type IS NOT NULL AND discount_type != ''
+                 AND status != 'Отменена'
+               GROUP BY discount_type
+               ORDER BY total DESC""",
+            (branch_name, date_iso),
+        )).fetchall()
+
+        result["discount_types_agg"] = [
+            {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+            for r in dt_rows
+        ] if dt_rows else []
+
+        for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min"):
+            v = result.get(k)
+            if v is not None:
+                result[k] = round(v, 1)
+
+        return result
 
 
 async def get_daily_stats(branch_name: str, date_iso: str) -> dict | None:
@@ -545,6 +872,108 @@ async def get_daily_stats(branch_name: str, date_iso: str) -> dict | None:
             row = await cursor.fetchone()
             return dict(row) if row else None
 
+
+async def get_period_stats(branch_name: str, date_from: str, date_to: str) -> dict | None:
+    """Агрегирует daily_stats за период [date_from, date_to] для одной точки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+
+        row = await (await db.execute(
+            """SELECT
+                SUM(orders_count) AS orders_count,
+                SUM(revenue) AS revenue,
+                SUM(discount_sum) AS discount_sum,
+                SUM(sailplay) AS sailplay,
+                SUM(delivery_count) AS delivery_count,
+                SUM(pickup_count) AS pickup_count,
+                SUM(late_count) AS late_count,
+                SUM(total_delivered) AS total_delivered,
+                SUM(COALESCE(late_delivery_count, 0)) AS late_delivery_count,
+                SUM(COALESCE(late_pickup_count, 0)) AS late_pickup_count,
+                SUM(cooks_count) AS cooks_sum,
+                SUM(couriers_count) AS couriers_sum,
+                COUNT(*) AS days_count,
+                -- Средневзвешенный COGS% (вес = выручка)
+                CASE WHEN SUM(revenue) > 0
+                     THEN SUM(cogs_pct * revenue) / SUM(revenue)
+                END AS cogs_pct,
+                AVG(avg_late_min) AS avg_late_min,
+                AVG(avg_cooking_min) AS avg_cooking_min,
+                AVG(avg_wait_min) AS avg_wait_min,
+                AVG(avg_delivery_min) AS avg_delivery_min,
+                SUM(COALESCE(exact_time_count, 0)) AS exact_time_count
+            FROM daily_stats
+            WHERE branch_name = ? AND date BETWEEN ? AND ?""",
+            (branch_name, date_from, date_to),
+        )).fetchone()
+
+        if not row or not row["revenue"]:
+            return None
+
+        result = dict(row)
+        rev = result["revenue"] or 0
+        chk = result["orders_count"] or 0
+        result["avg_check"] = round(rev / chk) if chk else 0
+        days = result.pop("days_count", 1) or 1
+        result["cooks_count"] = round(result.pop("cooks_sum", 0) / days) if days else 0
+        result["couriers_count"] = round(result.pop("couriers_sum", 0) / days) if days else 0
+
+        for k in ("cogs_pct", "avg_late_min", "avg_cooking_min", "avg_wait_min", "avg_delivery_min"):
+            v = result.get(k)
+            if v is not None:
+                result[k] = round(v, 1 if k != "cogs_pct" else 2)
+
+        # Скидки по типам — из orders_raw напрямую
+        dt_rows = await (await db.execute(
+            """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+               FROM orders_raw
+               WHERE branch_name = ? AND date BETWEEN ? AND ?
+                 AND discount_type IS NOT NULL AND discount_type != ''
+                 AND status != 'Отменена'
+               GROUP BY discount_type
+               ORDER BY total DESC""",
+            (branch_name, date_from, date_to),
+        )).fetchall()
+
+        result["discount_types"] = json.dumps(
+            [{"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+             for r in dt_rows],
+            ensure_ascii=False,
+        ) if dt_rows else "[]"
+
+        return result
+
+
+async def get_exact_time_orders(
+    branch_name: str | None,
+    date_iso: str,
+    branch_names: list[str] | None = None,
+) -> list[dict]:
+    """Возвращает заказы, определённые как 'на точное время' для даты."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        where = "WHERE date = ? AND status != 'Отменена'"
+        params: list = [date_iso]
+
+        if branch_name:
+            where += " AND branch_name = ?"
+            params.append(branch_name)
+        elif branch_names:
+            placeholders = ",".join("?" * len(branch_names))
+            where += f" AND branch_name IN ({placeholders})"
+            params.extend(branch_names)
+
+        where += f" AND {_EXACT_TIME_CONDITIONS}"
+
+        rows = await (await db.execute(
+            f"""SELECT delivery_num, branch_name, sum, comment,
+                       opened_at, planned_time, cooked_time, send_time,
+                       actual_time, service_print_time, is_self_service
+                FROM orders_raw {where}
+                ORDER BY opened_at""",
+            params,
+        )).fetchall()
+        return [dict(r) for r in rows]
 
 
 # =============================================================================

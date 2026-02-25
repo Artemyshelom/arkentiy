@@ -8,10 +8,11 @@
   /курьеры [фильтр]  — курьеры со статистикой
   /помощь            — справка
 
-Команды из БД (SQLite orders_raw / shifts_raw):
+Команды из БД (SQLite orders_raw / shifts_raw / daily_stats):
   /поиск <номер>     — найти заказ по номеру доставки
-  /день [дата]       — сводка за день по всем точкам
-  /опоздания [дата]  — список опоздавших заказов
+  /отчёт [филиал] [период] — отчёт за день/неделю/месяц/диапазон
+  /точные [филиал] [дата]  — заказы на точное время
+  /опоздания [фильтр] [дата] — активные или исторические опоздания
 
 Примечание: файл называется arkentiy.py.
 Будущий analytics_bot.py будет отдельным модулем для глубокой аналитики.
@@ -35,8 +36,9 @@ from app.clients.iiko_bo_events import (
     _parse_customer_phone,
 )
 from app.config import get_settings
-from app.database import DB_PATH, get_client_order_count, log_silence
+from app.database import DB_PATH, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
 from app.jobs import access_manager
+from app.jobs.daily_report import _format_branch_report, _fmt_money
 from app.jobs.iiko_status_report import (
     format_branch_status,
     get_available_branches,
@@ -61,7 +63,8 @@ _CMD_MODULE: dict[str, str] = {
     "повара": "reports", "cooks": "reports",
     "курьеры": "reports", "couriers": "reports",
     "поиск": "search", "search": "search",
-    "день": "late_queries", "day": "late_queries",
+    "отчёт": "reports", "отчет": "reports", "report": "reports",
+    "точные": "reports", "exact": "reports",
     "опоздания": "late_queries", "late": "late_queries",
     "самовывоз": "late_queries", "pickup": "late_queries",
     "тишина": "late_alerts", "mute": "late_alerts",
@@ -313,12 +316,15 @@ async def _handle_staff(chat_id: int, arg: str, role: str, city_filter: str | No
 
 async def _format_order_card(r: dict, client_count: int | None = None) -> str:
     """Полная карточка заказа."""
-    if r["is_late"]:
+    is_cancelled = (r.get("status") or "").lower() in ("отменена", "отменён")
+
+    if is_cancelled:
+        late_str = "—"
+    elif r["is_late"]:
         late_str = f"🔴 опоздал {r['late_minutes']:.0f} мин"
     elif r["actual_time"]:
         late_str = "✅ вовремя"
     else:
-        # Проверяем, не опаздывает ли уже (iiko время = UTC+7, VPS = UTC)
         late_str = "⏳ ещё не доставлен"
         if r.get("planned_time"):
             try:
@@ -370,22 +376,27 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
     else:
         client_tag = ""
 
-    # Пометка о потенциально устаревшем статусе: iiko не всегда шлёт событие отмены
-    stale_note = ""
-    if r.get("status") in ("Новая", "Не подтверждена", "Ждет отправки") and r.get("planned_time"):
-        try:
-            from datetime import timezone, timedelta as _td
-            clean_pt = r["planned_time"].replace("T", " ").split(".")[0]
-            planned_dt = datetime.strptime(clean_pt, "%Y-%m-%d %H:%M:%S")
-            now_local = (datetime.now(tz=timezone.utc) + _td(hours=7)).replace(tzinfo=None)
-            if (now_local - planned_dt).total_seconds() > 3600:  # >1 час прошло
-                stale_note = "\n   ⚠️ <i>статус может быть устарел — iiko не прислала обновление</i>"
-        except Exception:
-            pass
+    if is_cancelled:
+        cancel_reason = r.get("cancel_reason") or ""
+        reason_part = f" ({html.escape(cancel_reason)})" if cancel_reason else ""
+        status_line = f"   ❌ <b>Статус: ОТМЕНЕНА</b>{reason_part}"
+    else:
+        stale_note = ""
+        if r.get("status") in ("Новая", "Не подтверждена", "Ждет отправки") and r.get("planned_time"):
+            try:
+                from datetime import timezone, timedelta as _td
+                clean_pt = r["planned_time"].replace("T", " ").split(".")[0]
+                planned_dt = datetime.strptime(clean_pt, "%Y-%m-%d %H:%M:%S")
+                now_local = (datetime.now(tz=timezone.utc) + _td(hours=7)).replace(tzinfo=None)
+                if (now_local - planned_dt).total_seconds() > 3600:
+                    stale_note = "\n   ⚠️ <i>статус может быть устарел — iiko не прислала обновление</i>"
+            except Exception:
+                pass
+        status_line = f"   Статус: {html.escape(r['status'] or '?')}{stale_note}"
 
     return (
         f"📍 <b>{html.escape(r['branch_name'])}</b> | #{r['delivery_num']}\n"
-        f"   Статус: {html.escape(r['status'] or '?')}{stale_note}\n"
+        f"{status_line}\n"
         f"   👤 {client}{client_tag} | 📞 <code>{phone}</code>\n"
         f"   🗺 {addr}\n"
         f"   🛵 Курьер: {html.escape(r['courier'] or '—')}\n"
@@ -426,9 +437,21 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             "<code>/поиск 119458</code> — по номеру заказа\n"
             "<code>/поиск +79831...</code> — по телефону клиента\n"
             "<code>/поиск Пролетарская</code> — по адресу\n"
-            "<code>/поиск Филадельфия</code> — все заказы с этим блюдом"
+            "<code>/поиск Филадельфия</code> — все заказы с этим блюдом\n"
+            "<code>/поиск 119458 томск</code> — поиск с фильтром по городу"
         )
         return
+
+    # Парсинг ручного фильтра города/филиала (последний токен)
+    tokens = query.strip().split()
+    manual_filter: str | None = None
+    if len(tokens) >= 2:
+        last = tokens[-1]
+        maybe_branches = get_available_branches(last)
+        if maybe_branches:
+            manual_filter = last
+            tokens = tokens[:-1]
+            query = " ".join(tokens)
 
     is_numeric = query.isdigit()
     q = f"%{query}%"
@@ -436,10 +459,25 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
               planned_time, actual_time, is_late, late_minutes,
               client_name, client_phone, delivery_address, items, is_self_service, comment"""
 
-    # Фильтр по городу (из прав чата)
-    city_branch_names: list[str] = []
+    # Права чата
+    allowed_set: set[str] = set()
     if city_filter:
-        city_branch_names = [b["name"] for b in get_available_branches(city_filter)]
+        allowed_set = {b["name"] for b in get_available_branches(city_filter)}
+
+    # Ручной фильтр пересекается с правами чата
+    city_branch_names: list[str] = []
+    if manual_filter:
+        manual_branches = get_available_branches(manual_filter)
+        manual_names = [b["name"] for b in manual_branches]
+        if allowed_set:
+            city_branch_names = [n for n in manual_names if n in allowed_set]
+            if not city_branch_names:
+                await _send(chat_id, f"❌ Нет доступа к «{manual_filter}»")
+                return
+        else:
+            city_branch_names = manual_names
+    elif city_filter:
+        city_branch_names = list(allowed_set)
 
     def _city_clause(alias: str = "") -> tuple[str, list]:
         """Возвращает (sql_fragment, params) для фильтра по городу."""
@@ -536,9 +574,389 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
 
 
 
+_MONTH_NAMES = {
+    "январь": 1, "янв": 1, "февраль": 2, "фев": 2, "март": 3, "мар": 3,
+    "апрель": 4, "апр": 4, "май": 5, "июнь": 6, "июн": 6,
+    "июль": 7, "июл": 7, "август": 8, "авг": 8, "сентябрь": 9, "сен": 9,
+    "октябрь": 10, "окт": 10, "ноябрь": 11, "ноя": 11, "декабрь": 12, "дек": 12,
+}
+
+_PERIOD_PATTERNS = [
+    # single dates
+    r"^\d{4}-\d{2}-\d{2}$",
+    r"^\d{2}\.\d{2}\.\d{4}$",
+    r"^\d{2}\.\d{2}$",
+    r"^(вчера|сегодня|today|yesterday)$",
+    # ranges
+    r"^\d{2}\.\d{2}-\d{2}\.\d{2}$",
+    r"^\d{2}\.\d{2}\.\d{4}-\d{2}\.\d{2}\.\d{4}$",
+    # relative
+    r"^\d+д$",
+    r"^(неделя|week|эта_неделя|this_week)$",
+    r"^(месяц|month)$",
+]
+
+
+def _parse_period(tokens: list[str]) -> tuple[str, str, str, list[str]]:
+    """Разбирает токены на (date_from, date_to, display_label, filter_tokens).
+
+    Поддерживает: один день, диапазон DD.MM-DD.MM, Nд, неделя, месяц, название месяца.
+    """
+    import calendar
+    today = datetime.now(timezone(timedelta(hours=7))).date()
+    period_token = ""
+    filter_tokens = []
+
+    all_period = list(_PERIOD_PATTERNS) + [
+        r"^(" + "|".join(_MONTH_NAMES.keys()) + r")$",
+    ]
+
+    for tok in tokens:
+        low = tok.lower()
+        if not period_token and any(re.match(p, low) for p in all_period):
+            period_token = low
+        else:
+            filter_tokens.append(tok)
+
+    if not period_token:
+        period_token = "вчера"
+
+    # --- Single date ---
+    if period_token in ("вчера", "yesterday"):
+        d = today - timedelta(days=1)
+        return d.isoformat(), d.isoformat(), d.strftime("%d.%m.%Y"), filter_tokens
+    if period_token in ("сегодня", "today"):
+        return today.isoformat(), today.isoformat(), today.strftime("%d.%m.%Y"), filter_tokens
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", period_token):
+        return period_token, period_token, datetime.fromisoformat(period_token).strftime("%d.%m.%Y"), filter_tokens
+    m = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})$", period_token)
+    if m:
+        iso = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+        return iso, iso, period_token, filter_tokens
+    m = re.match(r"^(\d{2})\.(\d{2})$", period_token)
+    if m:
+        iso = f"{today.year}-{m.group(2)}-{m.group(1)}"
+        return iso, iso, period_token, filter_tokens
+
+    # --- Range DD.MM-DD.MM ---
+    m = re.match(r"^(\d{2})\.(\d{2})-(\d{2})\.(\d{2})$", period_token)
+    if m:
+        f = f"{today.year}-{m.group(2)}-{m.group(1)}"
+        t = f"{today.year}-{m.group(4)}-{m.group(3)}"
+        label = f"{m.group(1)}.{m.group(2)} – {m.group(3)}.{m.group(4)}.{today.year}"
+        return f, t, label, filter_tokens
+
+    # --- Range DD.MM.YYYY-DD.MM.YYYY ---
+    m = re.match(r"^(\d{2})\.(\d{2})\.(\d{4})-(\d{2})\.(\d{2})\.(\d{4})$", period_token)
+    if m:
+        f = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
+        t = f"{m.group(6)}-{m.group(5)}-{m.group(4)}"
+        label = f"{m.group(1)}.{m.group(2)}.{m.group(3)} – {m.group(4)}.{m.group(5)}.{m.group(6)}"
+        return f, t, label, filter_tokens
+
+    # --- Relative: Nд ---
+    m = re.match(r"^(\d+)д$", period_token)
+    if m:
+        n = int(m.group(1))
+        d_from = today - timedelta(days=n)
+        d_to = today - timedelta(days=1)
+        label = f"{d_from.strftime('%d.%m')} – {d_to.strftime('%d.%m.%Y')} ({n}д)"
+        return d_from.isoformat(), d_to.isoformat(), label, filter_tokens
+
+    # --- неделя / месяц ---
+    if period_token in ("неделя", "week"):
+        last_monday = today - timedelta(days=today.weekday() + 7)
+        last_sunday = last_monday + timedelta(days=6)
+        label = f"{last_monday.strftime('%d.%m')} – {last_sunday.strftime('%d.%m.%Y')} (неделя)"
+        return last_monday.isoformat(), last_sunday.isoformat(), label, filter_tokens
+    if period_token in ("эта_неделя", "эта неделя", "this_week"):
+        this_monday = today - timedelta(days=today.weekday())
+        d_to = today - timedelta(days=1)
+        if d_to < this_monday:
+            d_to = this_monday
+        label = f"{this_monday.strftime('%d.%m')} – {d_to.strftime('%d.%m.%Y')} (эта неделя)"
+        return this_monday.isoformat(), d_to.isoformat(), label, filter_tokens
+    if period_token in ("месяц", "month"):
+        d_from = today - timedelta(days=30)
+        d_to = today - timedelta(days=1)
+        label = f"{d_from.strftime('%d.%m')} – {d_to.strftime('%d.%m.%Y')} (месяц)"
+        return d_from.isoformat(), d_to.isoformat(), label, filter_tokens
+
+    # --- Название месяца ---
+    month_num = _MONTH_NAMES.get(period_token)
+    if month_num:
+        year = today.year if month_num <= today.month else today.year - 1
+        last_day = calendar.monthrange(year, month_num)[1]
+        d_from = f"{year}-{month_num:02d}-01"
+        d_to = f"{year}-{month_num:02d}-{last_day:02d}"
+        label = f"{period_token.capitalize()} {year}"
+        return d_from, d_to, label, filter_tokens
+
+    # fallback — вчера
+    d = today - timedelta(days=1)
+    return d.isoformat(), d.isoformat(), d.strftime("%d.%m.%Y"), filter_tokens
+
+
+async def _build_branch_report(
+    name: str, date_from: str, date_to: str, label: str, is_single_day: bool,
+) -> str | None:
+    """Собирает отчёт для одной точки. Возвращает текст или None."""
+    import json as _json
+
+    if is_single_day:
+        ds = await get_daily_stats(name, date_from)
+    else:
+        ds = await get_period_stats(name, date_from, date_to)
+
+    if not ds:
+        return None
+
+    if is_single_day:
+        agg = await aggregate_orders_for_daily_stats(name, date_from)
+    else:
+        discount_types_raw = ds.get("discount_types") or "[]"
+        try:
+            dt_parsed = _json.loads(discount_types_raw)
+        except (TypeError, _json.JSONDecodeError):
+            dt_parsed = []
+
+        agg = {
+            "late_delivery_count": ds.get("late_delivery_count") or ds.get("late_count") or 0,
+            "total_delivery_count": ds.get("total_delivered") or 0,
+            "avg_late_min": ds.get("avg_late_min") or 0,
+            "avg_cooking_min": ds.get("avg_cooking_min"),
+            "avg_wait_min": ds.get("avg_wait_min"),
+            "avg_delivery_min": ds.get("avg_delivery_min"),
+            "discount_types_agg": dt_parsed,
+            "cooks_today": ds.get("cooks_count") or 0,
+            "couriers_today": ds.get("couriers_count") or 0,
+            "exact_time_count": ds.get("exact_time_count") or 0,
+        }
+
+    return _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
+
+
+async def _build_city_aggregate(
+    branches: list[dict], date_from: str, date_to: str, label: str, is_single_day: bool,
+) -> str | None:
+    """Агрегирует данные по всем филиалам города в один отчёт."""
+    import json as _json
+
+    totals: dict = {}
+    weighted_keys = ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min")
+    sum_keys = (
+        "revenue", "orders_count", "discount_sum", "sailplay",
+        "late_delivery_count", "total_delivered", "exact_time_count",
+    )
+    count = 0
+    all_dt: dict[str, dict] = {}
+
+    for branch in branches:
+        name = branch["name"]
+        if is_single_day:
+            ds = await get_daily_stats(name, date_from)
+            agg = await aggregate_orders_for_daily_stats(name, date_from) if ds else {}
+        else:
+            ds = await get_period_stats(name, date_from, date_to)
+            agg = {}
+
+        if not ds:
+            continue
+        count += 1
+
+        for k in sum_keys:
+            val = ds.get(k) or agg.get(k) or 0
+            totals[k] = totals.get(k, 0) + val
+
+        for k in weighted_keys:
+            val = agg.get(k) if is_single_day else ds.get(k)
+            if val is not None:
+                totals.setdefault(f"_{k}_sum", 0)
+                totals[f"_{k}_sum"] += val
+                totals.setdefault(f"_{k}_cnt", 0)
+                totals[f"_{k}_cnt"] += 1
+
+        cogs_pct = ds.get("cogs_pct")
+        rev = ds.get("revenue") or ds.get("revenue_net") or 0
+        if cogs_pct is not None and rev:
+            totals.setdefault("_cogs_w", 0)
+            totals["_cogs_w"] += cogs_pct * rev
+            totals.setdefault("_cogs_rev", 0)
+            totals["_cogs_rev"] += rev
+
+        dt_src = agg.get("discount_types_agg") if is_single_day else ds.get("discount_types")
+        if isinstance(dt_src, str):
+            try:
+                dt_src = _json.loads(dt_src)
+            except (TypeError, _json.JSONDecodeError):
+                dt_src = []
+        if dt_src and isinstance(dt_src, list):
+            for dt in dt_src:
+                if isinstance(dt, dict):
+                    t = dt.get("type", "?")
+                    all_dt.setdefault(t, {"type": t, "count": 0, "sum": 0})
+                    all_dt[t]["count"] += dt.get("count", 0)
+                    all_dt[t]["sum"] += dt.get("sum", 0)
+
+    if count == 0:
+        return None
+
+    for k in weighted_keys:
+        s = totals.pop(f"_{k}_sum", None)
+        c = totals.pop(f"_{k}_cnt", None)
+        if s is not None and c:
+            totals[k] = round(s / c, 1)
+
+    cogs_w = totals.pop("_cogs_w", None)
+    cogs_rev = totals.pop("_cogs_rev", None)
+    totals["cogs_pct"] = round(cogs_w / cogs_rev, 2) if cogs_w and cogs_rev else None
+
+    rev = totals.get("revenue") or totals.get("orders_count", 0)
+    chk = totals.get("orders_count") or 0
+    totals["avg_check"] = round(rev / chk) if chk else 0
+    totals["check_count"] = chk
+
+    city_name = branches[0].get("city", "Город")
+    agg_out = {
+        "late_delivery_count": totals.get("late_delivery_count", 0),
+        "total_delivery_count": totals.get("total_delivered", 0),
+        "avg_late_min": totals.get("avg_late_min", 0),
+        "avg_cooking_min": totals.get("avg_cooking_min"),
+        "avg_wait_min": totals.get("avg_wait_min"),
+        "avg_delivery_min": totals.get("avg_delivery_min"),
+        "discount_types_agg": sorted(all_dt.values(), key=lambda x: x["sum"], reverse=True),
+        "cooks_today": 0,
+        "couriers_today": 0,
+        "exact_time_count": totals.get("exact_time_count", 0),
+    }
+
+    return _format_branch_report(
+        f"{city_name} (все точки)", totals, label, agg_out, is_period=not is_single_day,
+    )
+
+
 async def _handle_day(chat_id: int, arg: str, city_filter=None) -> None:
     """
-    /день [фильтр] [дата] — исторические опоздания за день из БД (группировка по точкам).
+    /отчёт [филиал] [период] — отчёт за день/неделю/месяц/диапазон из daily_stats.
+    При запросе по городу (>1 филиала) — сначала агрегат, потом inline-кнопки.
+    """
+    tokens = arg.strip().split() if arg.strip() else []
+    date_from, date_to, label, filter_tokens = _parse_period(tokens)
+    filter_q = " ".join(filter_tokens).strip()
+    is_single_day = (date_from == date_to)
+
+    if not filter_q and city_filter:
+        filter_q = city_filter
+
+    branches_cfg = get_available_branches(filter_q) if filter_q else get_available_branches()
+    if filter_q and not branches_cfg:
+        await _send(chat_id, f"❌ Точка или город «{filter_q}» не найдены.")
+        return
+
+    is_city_query = len(branches_cfg) > 1 and filter_q
+
+    if is_city_query:
+        agg_msg = await _build_city_aggregate(branches_cfg, date_from, date_to, label, is_single_day)
+        if agg_msg:
+            buttons = []
+            row: list[dict] = []
+            for b in branches_cfg:
+                short = b["name"].split("_")[-1] if "_" in b["name"] else b["name"]
+                cb = f"rpt:{b['name']}:{date_from}:{date_to}"
+                row.append({"text": short, "callback_data": cb})
+                if len(row) >= 3:
+                    buttons.append(row)
+                    row = []
+            if row:
+                buttons.append(row)
+            await _send_with_keyboard(chat_id, agg_msg, buttons)
+        else:
+            await _send(chat_id, f"📭 <b>{label}</b> — нет данных за этот период.")
+        return
+
+    sent = 0
+    for branch in branches_cfg:
+        msg = await _build_branch_report(branch["name"], date_from, date_to, label, is_single_day)
+        if msg:
+            await _send(chat_id, msg)
+            sent += 1
+
+    if sent == 0:
+        await _send(chat_id, f"📭 <b>{label}</b> — нет данных за этот период.")
+
+
+async def _handle_exact_orders(chat_id: int, arg: str, city_filter: str | None = None) -> None:
+    """/точные [филиал] [дата] — заказы на точное время → CSV-файл."""
+    import csv
+    import io
+
+    tokens = arg.strip().split() if arg.strip() else []
+    date_from, _, _, filter_tokens = _parse_period(tokens)
+    filter_q = " ".join(filter_tokens).strip()
+
+    if not filter_q and city_filter:
+        filter_q = city_filter
+
+    branch_names: list[str] = []
+    branch_name: str | None = None
+    if filter_q:
+        branches_cfg = get_available_branches(filter_q)
+        if not branches_cfg:
+            await _send(chat_id, f"❌ Точка или город «{filter_q}» не найдены.")
+            return
+        branch_names = [b["name"] for b in branches_cfg]
+        if len(branches_cfg) == 1:
+            branch_name = branches_cfg[0]["name"]
+
+    orders = await get_exact_time_orders(branch_name, date_from, branch_names or None)
+
+    if not orders:
+        await _send(chat_id, f"📌 <b>Точных заказов нет</b> за {date_from}")
+        return
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([
+        "Номер", "Филиал", "Сумма", "Тип", "Комментарий",
+        "Открыт", "План", "На кухне", "Отправлен", "Доставлен",
+    ])
+    for o in orders:
+        writer.writerow([
+            o["delivery_num"],
+            o["branch_name"] or "",
+            int(o["sum"] or 0),
+            "Самовывоз" if o.get("is_self_service") else "Доставка",
+            (o.get("comment") or "").replace("\n", " "),
+            (o.get("opened_at") or "")[:19].replace("T", " "),
+            (o.get("planned_time") or "")[:19].replace("T", " "),
+            (o.get("cooked_time") or "")[:19].replace("T", " "),
+            (o.get("send_time") or "")[:19].replace("T", " "),
+            (o.get("actual_time") or "")[:19].replace("T", " "),
+        ])
+
+    csv_bytes = buf.getvalue().encode("utf-8-sig")
+    filename = f"exact_orders_{date_from}.csv"
+    caption = f"📌 <b>Заказы на точное время</b> | {date_from} | {len(orders)} шт."
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            r = await client.post(
+                f"{_bot_url()}/sendDocument",
+                data={"chat_id": str(chat_id), "caption": caption, "parse_mode": "HTML"},
+                files={"document": (filename, csv_bytes, "text/csv; charset=utf-8")},
+            )
+            if not r.json().get("ok"):
+                logger.error(f"exact_orders sendDocument: {r.text[:200]}")
+                await _send(chat_id, f"❌ Ошибка отправки файла")
+    except Exception as e:
+        logger.error(f"exact_orders sendDocument: {e}")
+        await _send(chat_id, f"❌ Ошибка: {e}")
+
+
+async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
+    """
+    Исторические опоздания за день из БД (группировка по точкам).
+    Вызывается из /опоздания [дата].
     """
     import re
     from collections import defaultdict
@@ -739,7 +1157,22 @@ def _human_status_rt(status: str, cooking_status: str | None) -> str:
 
 
 async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
-    """/опоздания [фильтр] — активные опоздавшие доставки прямо сейчас."""
+    """/опоздания [фильтр] [дата] — без даты: активные прямо сейчас, с датой: из БД."""
+    DATE_PATTERNS = [
+        r"^\d{4}-\d{2}-\d{2}$",
+        r"^\d{2}\.\d{2}\.\d{4}$",
+        r"^\d{2}\.\d{2}$",
+        r"^(вчера|yesterday)$",
+    ]
+    tokens = arg.strip().split() if arg.strip() else []
+    has_date = any(
+        any(re.match(p, tok.lower()) for p in DATE_PATTERNS)
+        for tok in tokens
+    )
+    if has_date:
+        await _handle_day_delays(chat_id, arg, city_filter=city_filter)
+        return
+
     now_local = (
         datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
     ).replace(tzinfo=None)
@@ -951,39 +1384,106 @@ async def _handle_mute(chat_id: int, arg: str, user_id: int) -> None:
 # Help text
 # ------------------------------------------------------------------
 
-HELP_TEXT = (
-    "<b>Аналитический бот — команды:</b>\n\n"
-    "<b>Real-time (текущий момент):</b>\n"
-    "/статус [фильтр] — состояние всех точек\n"
-    "/повара [фильтр] — повара на смене\n"
-    "/курьеры [фильтр] — курьеры со статистикой\n"
-    "/опоздания [фильтр] — активные опоздавшие доставки прямо сейчас\n"
-    "/самовывоз [фильтр] — активные опоздавшие самовывозы\n\n"
-    "<b>История (из БД):</b>\n"
-    "/поиск <i>запрос</i> — по номеру, телефону, адресу или блюду\n"
-    "/день [фильтр] [дата] — опоздания за день (группировка по точкам)\n"
-    "/день <i>вчера</i> / <i>21.02.2026</i> — за конкретный день\n"
-    "/аудит [город] [дата] — подозрительные операции за день\n\n"
-    "<b>Алерты:</b>\n"
-    "/тишина [длительность] — выключить алерты в этом чате (макс 2 ч)\n"
-    "/тишина — показать текущий статус тишины\n\n"
-    "<b>Выгрузка данных:</b>\n"
-    "/выгрузка <i>запрос</i> — выгрузка базы клиентов в CSV\n\n"
-    "<b>Конкуренты:</b>\n"
-    "/конкуренты — обновить таблицы конкурентов в Google Sheets\n\n"
-    "<b>Администратор:</b>\n"
-    "/доступ — управление доступом чатов и пользователей\n\n"
-    "<i>Форматы даты: 21.02.2026 / 2026-02-21 / вчера</i>\n"
-    "<i>Фильтр: город (Барнаул) или точка (Барнаул 2)</i>\n\n"
-    "<i>Примеры:</i>\n"
-    "<code>/статус Барнаул</code>\n"
-    "<code>/опоздания Томск</code>\n"
-    "<code>/день вчера</code>\n"
-    "<code>/день Барнаул вчера</code>\n"
-    "<code>/тишина 30</code>\n"
-    "<code>/тишина 1ч</code>\n"
-    "<code>/поиск Филадельфия</code>"
-)
+def _build_help(perms) -> str:
+    """Собирает справку только из модулей, доступных этому чату."""
+    lines = ["<b>Аналитический бот — команды:</b>", ""]
+
+    if perms.has("reports"):
+        lines += [
+            "<b>📊 Отчёты и статус:</b>",
+            "/статус [фильтр] — состояние всех точек прямо сейчас",
+            "/повара [фильтр] — повара на сегодняшней смене",
+            "/курьеры [фильтр] — курьеры со статистикой",
+            "/отчёт [филиал] [период] — отчёт за день/неделю/месяц/диапазон",
+            "/точные [филиал] [дата] — заказы на точное время (предзаказы)",
+            "",
+        ]
+
+    if perms.has("late_queries"):
+        lines += [
+            "<b>🚚 Опоздания:</b>",
+            "/опоздания [фильтр] — активные опоздавшие доставки прямо сейчас",
+            "/опоздания [фильтр] [дата] — опоздания из БД за дату",
+            "/самовывоз [фильтр] — активные опоздавшие самовывозы",
+            "",
+        ]
+
+    if perms.has("late_alerts"):
+        lines += [
+            "<b>🔕 Алерты:</b>",
+            "/тишина [длительность] — выключить алерты в этом чате (макс 2 ч)",
+            "/тишина — показать статус тишины",
+            "",
+        ]
+
+    if perms.has("search"):
+        lines += [
+            "<b>🔍 Поиск:</b>",
+            "/поиск <i>запрос</i> — по номеру, телефону, адресу или блюду",
+            "/поиск <i>запрос</i> <i>город</i> — с фильтром по городу",
+            "",
+        ]
+
+    if perms.has("audit"):
+        lines += [
+            "<b>🔎 Аудит:</b>",
+            "/аудит [город] [дата] — подозрительные операции за день",
+            "",
+        ]
+
+    if perms.has("marketing"):
+        lines += [
+            "<b>📈 Выгрузка:</b>",
+            "/выгрузка <i>запрос</i> — выгрузка базы клиентов в CSV",
+            "",
+        ]
+
+    if perms.has("admin"):
+        lines += [
+            "<b>🛠 Администратор:</b>",
+            "/конкуренты — обновить таблицы конкурентов",
+            "",
+        ]
+
+    has_dates = perms.has("reports") or perms.has("late_queries")
+    if has_dates:
+        lines += [
+            "<i>Форматы даты: 21.02 / 2026-02-21 / вчера</i>",
+            "<i>Периоды: вчера / 14.02 / неделя / эта неделя / месяц / 7д / 01.02-15.02 / февраль</i>",
+            "<i>Фильтр: город (Барнаул) или точка (Барнаул_1)</i>",
+        ]
+
+    if perms.has("reports"):
+        lines += [
+            "",
+            "<i>Примеры:</i>",
+            "<code>/отчёт Барнаул 14.02</code>",
+            "<code>/отчёт Барнаул неделя</code>",
+            "<code>/отчёт 01.02-15.02</code>",
+            "<code>/точные Барнаул</code>",
+        ]
+
+    if perms.has("search"):
+        lines += [
+            "<code>/поиск 119458</code>",
+            "<code>/поиск 12345 томск</code>",
+        ]
+
+    if perms.has("late_queries") and not perms.has("reports"):
+        lines += [
+            "",
+            "<i>Примеры:</i>",
+            "<code>/опоздания Томск</code>",
+            "<code>/опоздания вчера</code>",
+        ]
+
+    if perms.has("late_alerts"):
+        lines += [
+            "<code>/тишина 30</code>",
+            "<code>/тишина 1ч</code>",
+        ]
+
+    return "\n".join(lines)
 
 
 async def poll_analytics_bot() -> None:
@@ -1032,6 +1532,24 @@ async def poll_analytics_bot() -> None:
                     order_num = cb_data[6:]
                     await _answer_callback(cb_id)
                     await _handle_search(cb_chat_id, order_num, city_filter=perms.city)
+                else:
+                    await _answer_callback(cb_id, "🚫 Нет доступа")
+            elif cb_data.startswith("rpt:"):
+                perms = access.get_permissions(cb_chat_id, cb_user_id)
+                if perms.has("reports"):
+                    parts = cb_data.split(":", 3)
+                    if len(parts) == 4:
+                        _, branch_name, d_from, d_to = parts
+                        is_single = (d_from == d_to)
+                        lbl = d_from if is_single else f"{d_from} – {d_to}"
+                        await _answer_callback(cb_id)
+                        msg = await _build_branch_report(branch_name, d_from, d_to, lbl, is_single)
+                        if msg:
+                            await _send(cb_chat_id, msg)
+                        else:
+                            await _send(cb_chat_id, f"📭 {branch_name} — нет данных за {lbl}")
+                    else:
+                        await _answer_callback(cb_id, "❌ Ошибка данных")
                 else:
                     await _answer_callback(cb_id, "🚫 Нет доступа")
             else:
@@ -1085,13 +1603,12 @@ async def poll_analytics_bot() -> None:
 
         # Команды без проверки модуля
         if cmd in ("помощь", "help", "start"):
-            await _send(chat_id, HELP_TEXT)
+            await _send(chat_id, _build_help(perms))
             continue
 
         # Проверяем модуль для команды
         required_module = _CMD_MODULE.get(cmd)
         if required_module and not perms.has(required_module):
-            # Молча игнорируем — чат не предназначен для этой команды
             continue
 
         city = perms.city  # None = все города, иначе фильтруем
@@ -1110,8 +1627,10 @@ async def poll_analytics_bot() -> None:
             await _handle_staff(chat_id, arg, "courier", city_filter=city)
         elif cmd in ("поиск", "search"):
             await _handle_search(chat_id, arg, city_filter=city)
-        elif cmd in ("день", "day"):
+        elif cmd in ("отчёт", "отчет", "report"):
             await _handle_day(chat_id, arg, city_filter=city)
+        elif cmd in ("точные", "exact"):
+            await _handle_exact_orders(chat_id, arg, city_filter=city)
         elif cmd in ("опоздания", "late"):
             await _handle_late(chat_id, arg, city_filter=city)
         elif cmd in ("самовывоз", "pickup"):

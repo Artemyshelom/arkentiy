@@ -19,6 +19,26 @@ BASE_URL = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 REQUEST_TIMEOUT = 15.0
 
 
+TG_MAX_LEN = 4096
+
+
+def _split_text(text: str, max_len: int = TG_MAX_LEN) -> list[str]:
+    """Разбивает длинный текст на части по границам строк."""
+    if len(text) <= max_len:
+        return [text]
+    parts: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            parts.append(text)
+            break
+        cut = text.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+        parts.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+    return parts
+
+
 async def send_message(
     chat_id: str,
     text: str,
@@ -28,8 +48,26 @@ async def send_message(
 ) -> bool:
     """
     Отправляет сообщение в чат. Возвращает True при успехе.
+    Автоматически разбивает длинные сообщения на части.
     Retry с exponential backoff при ошибках.
     """
+    parts = _split_text(text)
+    for part in parts:
+        ok = await _send_single(chat_id, part, parse_mode, disable_notification, retry)
+        if not ok:
+            return False
+        if len(parts) > 1:
+            await asyncio.sleep(0.3)
+    return True
+
+
+async def _send_single(
+    chat_id: str,
+    text: str,
+    parse_mode: str = "HTML",
+    disable_notification: bool = False,
+    retry: int = 3,
+) -> bool:
     for attempt in range(retry):
         try:
             async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
@@ -46,7 +84,6 @@ async def send_message(
                 if data.get("ok"):
                     return True
 
-                # Telegram rate limit (429)
                 if response.status_code == 429:
                     retry_after = data.get("parameters", {}).get("retry_after", 5)
                     logger.warning(f"Telegram rate limit, жду {retry_after}с")

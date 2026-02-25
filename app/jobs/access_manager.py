@@ -137,6 +137,19 @@ async def _answer_cb(cb_id: str, text: str = "", alert: bool = False) -> None:
         pass
 
 
+async def _get_chat_title(chat_id: int) -> str | None:
+    """Получает title чата через Telegram API getChat."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            r = await client.get(f"{_bot_url()}/getChat", params={"chat_id": chat_id})
+            data = r.json()
+            if data.get("ok"):
+                return data["result"].get("title") or data["result"].get("first_name")
+    except Exception as e:
+        logger.error(f"[access_manager] _get_chat_title: {e}")
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Screen builders
 # ---------------------------------------------------------------------------
@@ -241,6 +254,9 @@ def _chat_screen(cid_str: str) -> tuple[str, list]:
     all_mark = "●" if current_cities is None else "○"
     keyboard.append([{"text": f"{all_mark} Все города", "callback_data": f"ac:ty:{cid_str}:null"}])
 
+    keyboard.append([
+        {"text": "✏️ Переименовать", "callback_data": f"ac:rn:{cid_str}"},
+    ])
     keyboard.append([
         {"text": "🗑 Удалить", "callback_data": f"ac:cd:{cid_str}"},
         {"text": "← Назад", "callback_data": "ac:main"},
@@ -547,9 +563,18 @@ async def handle_callback(
 
     elif action == "rg" and len(parts) >= 3:
         cid_str = parts[2]
-        await _register_chat(cid_str, f"Чат {cid_str}")
+        title = await _get_chat_title(int(cid_str)) or f"Чат {cid_str}"
+        await _register_chat(cid_str, title)
         text, kb = _chat_screen(cid_str)
         await _edit(chat_id, message_id, text, kb)
+
+    elif action == "rn" and len(parts) >= 3:
+        _pending[user_id] = {"action": "rename_chat", "step": "await_name", "chat_id": parts[2]}
+        await _edit(
+            chat_id, message_id,
+            f"\u270f\ufe0f <b>\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c \u0447\u0430\u0442</b>\n\n\u041e\u0442\u043f\u0440\u0430\u0432\u044c \u043d\u043e\u0432\u043e\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435 \u0434\u043b\u044f \u0447\u0430\u0442\u0430 <code>{parts[2]}</code>",
+            [[{"text": "← Отмена", "callback_data": f"ac:c:{parts[2]}"}]],
+        )
 
     elif action == "ig":
         await _edit(chat_id, message_id, "✅ Чат проигнорирован.", [])
@@ -582,6 +607,21 @@ async def handle_text(chat_id: int, user_id: int, text: str) -> bool:
             _pending.pop(user_id, None)
             t, kb = _chat_screen(state["chat_id"])
             await _send(chat_id, f"✅ Чат «{name}» добавлен. Настрой модули:\n\n{t}", kb)
+            return True
+
+    if state["action"] == "rename_chat":
+        if state["step"] == "await_name":
+            name = text.strip()
+            cid_str = state["chat_id"]
+            cfg = access.get_config()
+            chat = cfg.get("chats", {}).get(cid_str, {})
+            modules = chat.get("modules", [])
+            city = chat.get("city")
+            await _db.upsert_tenant_chat(int(cid_str), name, modules, city)
+            await _refresh_cache()
+            _pending.pop(user_id, None)
+            t, kb = _chat_screen(cid_str)
+            await _send(chat_id, f"\u2705 \u0427\u0430\u0442 \u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d \u0432 \u00ab{name}\u00bb\n\n{t}", kb)
             return True
 
     if state["action"] == "add_user":

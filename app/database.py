@@ -108,8 +108,51 @@ async def init_db() -> None:
         await db.commit()
     await init_analytics_tables()
     await init_competitor_tables()
+    await init_bank_statement_tables()
     await init_saas_tables()
     await seed_default_tenant()
+
+
+async def init_bank_statement_tables() -> None:
+    """Создаёт таблицу логов обработки банковских выписок."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS bank_statement_logs (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                processed_at TEXT NOT NULL,
+                user_id      INTEGER,
+                chat_id      INTEGER,
+                filename     TEXT,
+                date_from    TEXT,
+                date_to      TEXT,
+                total_docs   INTEGER,
+                total_files  INTEGER
+            );
+        """)
+        await db.commit()
+
+
+async def save_bank_statement_log(
+    user_id: int,
+    chat_id: int,
+    filename: str,
+    date_from: str,
+    date_to: str,
+    total_docs: int,
+    total_files: int,
+) -> None:
+    """Записывает факт обработки банковской выписки."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """INSERT INTO bank_statement_logs
+               (processed_at, user_id, chat_id, filename, date_from, date_to, total_docs, total_files)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                datetime.now(timezone.utc).isoformat(),
+                user_id, chat_id, filename, date_from, date_to, total_docs, total_files,
+            ),
+        )
+        await db.commit()
 
 
 async def init_competitor_tables() -> None:

@@ -197,6 +197,46 @@ async def get_all_branches_stats(date: datetime) -> dict[str, dict]:
     return merged
 
 
+async def get_payment_breakdown(date_from: str, date_to: str) -> dict[str, dict[str, float]]:
+    """
+    Разбивка выручки по типам оплаты для каждой точки за период.
+    date_from/date_to в ISO: "2026-02-20" / "2026-02-23" (to exclusive).
+    Возвращает: {"Барнаул_1 Ана": {"Картой при получении": 492668.0, "Сбербанк": 199273.0, ...}}
+    """
+    logger.info(f"OLAP v2: payment breakdown {date_from} — {date_to}")
+
+    by_url: dict[str, set[str]] = defaultdict(set)
+    for branch in settings.branches:
+        url = branch.get("bo_url", "")
+        if url:
+            by_url[url].add(branch["name"])
+
+    result: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
+
+    async def _fetch_payments(bo_url: str, target_names: set[str]):
+        token = await get_bo_token(bo_url)
+        async with httpx.AsyncClient(verify=False) as client:
+            rows = await _query_olap_v2(
+                bo_url, token,
+                ["Department", "PayTypes"],
+                ["DishDiscountSumInt"],
+                date_from, date_to, client,
+            )
+            for row in rows:
+                dept = row.get("Department", "").strip()
+                if not dept or dept not in target_names:
+                    continue
+                pay_type = row.get("PayTypes", "").strip()
+                amount = float(row.get("DishDiscountSumInt", 0))
+                if pay_type and amount:
+                    result[dept][pay_type] += amount
+
+    tasks = [_fetch_payments(url, names) for url, names in by_url.items()]
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+    return {k: dict(v) for k, v in result.items()}
+
+
 async def get_branch_olap_stats(date: datetime) -> dict[str, dict]:
     """
     Drop-in замена iiko_bo_olap.get_branch_olap_stats() (для /статус).

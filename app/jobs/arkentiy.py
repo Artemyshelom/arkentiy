@@ -28,6 +28,8 @@ from typing import Optional
 import aiosqlite
 import httpx
 
+from app.jobs import bank_statement
+
 from app import access
 from app.clients.iiko_bo_events import (
     get_all_branches_staff,
@@ -149,6 +151,117 @@ async def _send_with_keyboard(chat_id: int, text: str, keyboard: list) -> None:
                 logger.error(f"analytics_bot keyboard send error: {r.text[:200]}")
     except Exception as e:
         logger.error(f"analytics_bot _send_with_keyboard: {e}")
+
+
+async def _download_tg_file(file_id: str) -> bytes | None:
+    """Скачивает файл из Telegram по file_id."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.get(f"{_bot_url()}/getFile", params={"file_id": file_id})
+            data = r.json()
+            if not data.get("ok"):
+                logger.error(f"getFile error: {r.text[:200]}")
+                return None
+            file_path = data["result"]["file_path"]
+            token = settings.telegram_analytics_bot_token
+            dl = await client.get(f"https://api.telegram.org/file/bot{token}/{file_path}")
+            return dl.content
+    except Exception as e:
+        logger.error(f"_download_tg_file: {e}")
+        return None
+
+
+async def _send_document(chat_id: int, filename: str, data: bytes, caption: str = "") -> bool:
+    """Отправляет файл в Telegram-чат."""
+    try:
+        async with httpx.AsyncClient(timeout=30) as client:
+            payload = {"chat_id": str(chat_id)}
+            if caption:
+                payload["caption"] = caption[:1024]
+                payload["parse_mode"] = "HTML"
+            r = await client.post(
+                f"{_bot_url()}/sendDocument",
+                data=payload,
+                files={"document": (filename, data, "application/octet-stream")},
+            )
+            if not r.json().get("ok"):
+                logger.error(f"sendDocument error: {r.text[:200]}")
+                return False
+            return True
+    except Exception as e:
+        logger.error(f"_send_document: {e}")
+        return False
+
+
+async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -> None:
+    """Обработка банковской выписки: скачать, распарсить, разбить, отправить."""
+    file_id = tg_doc.get("file_id", "")
+    file_name = tg_doc.get("file_name", "")
+    await _send(chat_id, f"📥 Обрабатываю выписку <b>{html.escape(file_name)}</b>...")
+
+    raw = await _download_tg_file(file_id)
+    if not raw:
+        await _send(chat_id, "❌ Не удалось скачать файл")
+        return
+
+    for enc in ("windows-1251", "utf-8", "cp866"):
+        try:
+            content = raw.decode(enc)
+            break
+        except (UnicodeDecodeError, ValueError):
+            continue
+    else:
+        await _send(chat_id, "❌ Не удалось определить кодировку файла")
+        return
+
+    if not bank_statement.is_1c_statement(content):
+        return
+
+    try:
+        result = bank_statement.process_statement(content)
+    except Exception as e:
+        logger.error(f"bank_statement processing: {e}", exc_info=True)
+        await _send(chat_id, f"❌ Ошибка обработки: {html.escape(str(e))}")
+        return
+
+    await _send(chat_id, result["summary"])
+
+    for filename, file_bytes in result["files"].items():
+        ok = await _send_document(chat_id, filename, file_bytes)
+        if not ok:
+            await _send(chat_id, f"❌ Не удалось отправить {filename}")
+
+    count = len(result["files"])
+    await _send(chat_id, f"✅ Готово: {count} файлов отправлено")
+
+    # Сверка эквайринга с iiko (отдельно — если iiko недоступен, файлы уже отправлены)
+    if result["acquiring"]:
+        try:
+            accounts_map = bank_statement.load_accounts_map()
+            reconcile_text = await bank_statement.reconcile_acquiring(
+                result["acquiring"], accounts_map,
+                result["parsed"].date_from, result["parsed"].date_to,
+            )
+            if reconcile_text:
+                await _send(chat_id, reconcile_text)
+        except Exception as e:
+            logger.error(f"[bank_statement] reconcile: {e}", exc_info=True)
+            await _send(chat_id, f"⚠️ Сверка с iiko не удалась: {html.escape(str(e))}")
+
+    # Логирование в БД
+    try:
+        from app.database import save_bank_statement_log
+        await save_bank_statement_log(
+            user_id=user_id,
+            chat_id=chat_id,
+            filename=file_name,
+            date_from=result["parsed"].date_from,
+            date_to=result["parsed"].date_to,
+            total_docs=len(result["parsed"].documents),
+            total_files=count,
+        )
+    except Exception as e:
+        logger.warning(f"[bank_statement] db log: {e}")
 
 
 async def _answer_callback(callback_id: str, text: str = "") -> None:
@@ -1567,6 +1680,20 @@ async def poll_analytics_bot() -> None:
 
         # Личка — только admin. Остальные игнорируются молча.
         if chat_id > 0 and not access.is_admin(user_id):
+            continue
+
+        # Автодетект банковской выписки (файл без команды)
+        tg_doc = message.get("document")
+        if tg_doc and not text:
+            file_name = tg_doc.get("file_name", "")
+            if file_name.lower().endswith(".txt"):
+                perms = access.get_permissions(chat_id, user_id)
+                if perms.has("finance"):
+                    try:
+                        await _handle_bank_statement(chat_id, tg_doc, user_id=user_id)
+                    except Exception as e:
+                        logger.error(f"[bank_statement] {e}", exc_info=True)
+                        await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
             continue
 
         # Не команда — проверяем диалог access_manager (например, ввод ID чата)

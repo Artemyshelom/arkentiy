@@ -285,8 +285,12 @@ def split_by_branch(
 def generate_1c_file(
     branch: BranchResult,
     parsed: ParsedStatement,
+    acquiring: list[AcquiringEntry] | None = None,
 ) -> str:
     lines: list[str] = []
+
+    # Суммарная комиссия для корректировки остатков
+    total_commission = sum(a.commission for a in acquiring) if acquiring else 0.0
 
     # Шапка
     lines.append(_MARKER)
@@ -300,16 +304,16 @@ def generate_1c_file(
     lines.append(f"ДатаКонца={parsed.date_to}")
     lines.append(f"РасчСчет={branch.account}")
 
-    # Секции остатков
+    # Секции остатков (корректируем на комиссию)
     for bal in branch.balances:
         lines.append("СекцияРасчСчет")
         lines.append(f"ДатаНачала={bal.date_from}")
         lines.append(f"ДатаКонца={bal.date_to}")
         lines.append(f"НачальныйОстаток={_fmt_amount(bal.opening)}")
         lines.append(f"РасчСчет={bal.account}")
-        lines.append(f"ВсегоСписано={_fmt_amount(bal.debited)}")
+        lines.append(f"ВсегоСписано={_fmt_amount(bal.debited + total_commission)}")
         lines.append(f"ВсегоПоступило={_fmt_amount(bal.credited)}")
-        lines.append(f"КонечныйОстаток={_fmt_amount(bal.closing)}")
+        lines.append(f"КонечныйОстаток={_fmt_amount(bal.closing - total_commission)}")
         lines.append("КонецРасчСчет")
 
     # Документы (расходы + приходы, без дублей, в порядке оригинала)
@@ -322,6 +326,23 @@ def generate_1c_file(
         seen_ids.add(doc_id)
         for raw_line in doc.raw_lines:
             lines.append(raw_line)
+
+    # Синтетические расходные документы на комиссию (по одному на каждый день)
+    if acquiring:
+        for acq in sorted(acquiring, key=lambda a: a.shift_date):
+            lines.append("СекцияДокумент=Банковский ордер")
+            lines.append(f"Номер=КОМ-{acq.shift_date.replace('.', '')}")
+            lines.append(f"Дата={acq.doc_date}")
+            lines.append(f"Сумма={_fmt_amount(acq.commission)}")
+            lines.append(f"ДатаСписано={acq.doc_date}")
+            lines.append(f"ПлательщикРасчСчет={branch.account}")
+            lines.append(
+                f"НазначениеПлатежа=Комиссия по эквайрингу СБЕРБАНК"
+                f" за {acq.shift_date}."
+                f" Мерчант {acq.merchant_id}."
+                f" Операций {acq.operations}."
+            )
+            lines.append("КонецДокумента")
 
     lines.append("КонецФайла")
     return "\r\n".join(lines)
@@ -406,14 +427,19 @@ def build_summary(
 
     # Сверка эквайринга
     if acquiring:
+        total_commission = sum(a.commission for a in acquiring)
         parts.append(f"\n<b>Эквайринг Сбер</b>: {len(acquiring)} записей")
         acq_by_branch: dict[str, float] = {}
+        comm_by_branch: dict[str, float] = {}
         for a in acquiring:
             acq_by_branch[a.account] = acq_by_branch.get(a.account, 0) + a.gross_amount
+            comm_by_branch[a.account] = comm_by_branch.get(a.account, 0) + a.commission
         for acc, gross in sorted(acq_by_branch.items()):
             info = branches_by_account(branches).get(acc)
             label = info.label if info else acc[-4:]
-            parts.append(f"  {label}: {_fmt_rub(gross)} (до комиссии)")
+            comm = comm_by_branch.get(acc, 0)
+            parts.append(f"  {label}: {_fmt_rub(gross)} (до комиссии), комиссия {_fmt_rub(comm)}")
+        parts.append(f"💳 Комиссия вшита в файлы: {_fmt_rub(total_commission)} ({len(acquiring)} документов)")
 
     return "\n".join(parts)
 
@@ -600,7 +626,8 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
     for br in branches:
         if br.debit_count == 0 and br.credit_count == 0:
             continue
-        file_content = generate_1c_file(br, parsed)
+        branch_acq = [a for a in acquiring if a.account == br.account]
+        file_content = generate_1c_file(br, parsed, acquiring=branch_acq or None)
         period = f"{parsed.date_from}-{parsed.date_to}".replace(".", "")
         filename = f"{br.label}_{period}.txt"
         files[filename] = file_content.encode("utf-8")

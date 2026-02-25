@@ -428,22 +428,38 @@ def build_sql(params: dict) -> tuple[str, list]:
 
     outer_where = (" WHERE " + " AND ".join(outer_conds)) if outer_conds else ""
 
+    # Авто-дедупликация: клиент-ориентированные запросы возвращают уникальных клиентов
+    # по умолчанию, чтобы CSV можно было сразу использовать для рассылки/обзвона.
+    # Явно unique_clients_only=False отключает это поведение.
     unique_clients_only = params.get("unique_clients_only")
+    if unique_clients_only is None:
+        # Включаем автоматически когда запрос явно клиент-ориентирован
+        if (
+            params.get("min_orders_in_period") is not None
+            or params.get("max_orders_in_period") is not None
+            or params.get("exclude_period_from")
+            or params.get("exclude_period_to")
+            or params.get("max_total_orders") is not None
+        ):
+            unique_clients_only = True
+
+    # Базовый отфильтрованный запрос
+    filtered_sql = f"SELECT * FROM ({inner_sql}) t{outer_where}"
+
     if unique_clients_only:
-        # Один ряд на клиента — строка с последним заказом
+        # ROW_NUMBER() надёжнее GROUP BY+HAVING в SQLite:
+        # берём одну строку на клиента — ту, где последний заказ по дате.
         sql = (
-            f"SELECT t.* FROM ({inner_sql}) t"
-            f"{outer_where}"
-            f" GROUP BY t.client_phone"
-            f" HAVING t.date = MAX(t.date)"
-            f" ORDER BY t.date DESC, t.branch_name"
+            f"SELECT * FROM ("
+            f"  SELECT t.*, ROW_NUMBER() OVER ("
+            f"    PARTITION BY t.client_phone ORDER BY t.date DESC, t.delivery_num DESC"
+            f"  ) AS _rn"
+            f"  FROM ({filtered_sql}) t"
+            f") WHERE _rn = 1"
+            f" ORDER BY date DESC, branch_name"
         )
     else:
-        sql = (
-            f"SELECT * FROM ({inner_sql}) t"
-            f"{outer_where}"
-            f" ORDER BY t.date DESC, t.branch_name"
-        )
+        sql = f"{filtered_sql} ORDER BY t.date DESC, t.branch_name"
 
     return sql, final_args
 
@@ -626,7 +642,18 @@ def _build_params_summary(params: dict) -> str:
     elif has_problem is False:
         lines.append("✅ Только без жалоб")
 
-    if params.get("unique_clients_only"):
+    unique_clients_only = params.get("unique_clients_only")
+    if unique_clients_only is None:
+        # Показываем если авто-дедупликация была бы включена
+        if (
+            params.get("min_orders_in_period") is not None
+            or params.get("max_orders_in_period") is not None
+            or params.get("exclude_period_from")
+            or params.get("exclude_period_to")
+            or params.get("max_total_orders") is not None
+        ):
+            lines.append("👥 Дедупликация: <b>один клиент = одна строка</b> (авто)")
+    elif unique_clients_only:
         lines.append("👥 Уникальные клиенты (последний заказ)")
 
     branch = params.get("branch")

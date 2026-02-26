@@ -146,7 +146,7 @@ async def record_data_update(date: str, branch: str, field: str, old_value, new_
     await pool.execute(
         """INSERT INTO report_updates (tenant_id, date, branch, field, old_value, new_value)
            VALUES ($1, $2, $3, $4, $5, $6)""",
-        tenant_id, date, branch, field,
+        tenant_id, _to_date(date), branch, field,
         str(old_value) if old_value is not None else None,
         str(new_value) if new_value is not None else None,
     )
@@ -156,7 +156,7 @@ async def get_updates_for_date(date: str, tenant_id: int = 1) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT * FROM report_updates WHERE tenant_id = $1 AND date = $2 ORDER BY recorded_at",
-        tenant_id, date,
+        tenant_id, _to_date(date),
     )
     return [dict(r) for r in rows]
 
@@ -165,7 +165,7 @@ async def clear_updates_for_date(date: str, tenant_id: int = 1) -> None:
     pool = get_pool()
     await pool.execute(
         "DELETE FROM report_updates WHERE tenant_id = $1 AND date = $2",
-        tenant_id, date,
+        tenant_id, _to_date(date),
     )
 
 
@@ -188,7 +188,7 @@ async def save_rt_snapshot(
            ON CONFLICT (tenant_id, branch, date) DO UPDATE SET
              delays_late = $4, delays_total = $5, delays_avg_min = $6,
              cooks_today = $7, couriers_today = $8, saved_at = now()""",
-        tenant_id, branch, date,
+        tenant_id, branch, _to_date(date),
         delays_late, delays_total, delays_avg_min, cooks_today, couriers_today,
     )
 
@@ -198,7 +198,7 @@ async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | 
     row = await pool.fetchrow(
         """SELECT delays_late, delays_total, delays_avg_min, cooks_today, couriers_today
            FROM daily_rt_snapshot WHERE tenant_id = $1 AND branch = $2 AND date = $3""",
-        tenant_id, branch, date,
+        tenant_id, branch, _to_date(date),
     )
     return dict(row) if row else None
 
@@ -495,7 +495,7 @@ async def save_audit_events_batch(events: list[dict], tenant_id: int = 1) -> Non
                        (tenant_id, date, branch_name, city, event_type, severity, description, meta_json, created_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)""",
                     tenant_id,
-                    e.get("date"), e.get("branch_name"), e.get("city"),
+                    _to_date(e.get("date")), e.get("branch_name"), e.get("city"),
                     e.get("event_type"), e.get("severity", "warning"),
                     e.get("description"), e.get("meta_json"),
                     e.get("created_at", datetime.now(timezone.utc).isoformat()),
@@ -507,12 +507,12 @@ async def clear_audit_events(date: str, branch_name: str | None = None, tenant_i
     if branch_name:
         await pool.execute(
             "DELETE FROM audit_events WHERE tenant_id = $1 AND date = $2 AND branch_name = $3",
-            tenant_id, date, branch_name,
+            tenant_id, _to_date(date), branch_name,
         )
     else:
         await pool.execute(
             "DELETE FROM audit_events WHERE tenant_id = $1 AND date = $2",
-            tenant_id, date,
+            tenant_id, _to_date(date),
         )
 
 
@@ -522,7 +522,7 @@ async def get_audit_events(
 ) -> list[dict]:
     pool = get_pool()
     query = "SELECT * FROM audit_events WHERE tenant_id = $1 AND date = $2"
-    params: list = [tenant_id, date]
+    params: list = [tenant_id, _to_date(date)]
     idx = 3
     if branch_name:
         query += f" AND branch_name = ${idx}"

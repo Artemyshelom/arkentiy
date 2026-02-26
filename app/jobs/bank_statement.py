@@ -111,6 +111,16 @@ class AcquiringEntry:
     gross_amount: float
     commission: float
     net_amount: float
+    # Реквизиты для синтетического документа на комиссию
+    our_inn: str = ""        # наш ИНН (из ПолучательИНН исходного doc)
+    our_name: str = ""       # наше наименование
+    our_kpp: str = ""        # наш КПП
+    bank_bik: str = ""       # БИК банка (общий для нас и Сбера)
+    bank_korshet: str = ""   # кор/счёт банка
+    bank_name: str = ""      # наименование банка
+    sbr_account: str = ""    # р/с Сбербанка (из ПлательщикРасчСчет исходного doc)
+    sbr_inn: str = ""        # ИНН Сбербанка
+    sbr_name: str = ""       # наименование Сбербанка
 
 
 # ── загрузка конфига ─────────────────────────────────────────────────────────
@@ -120,6 +130,13 @@ def load_accounts_map(path: Path | None = None) -> dict[str, dict]:
     with open(p, "r", encoding="utf-8") as f:
         data = json.load(f)
     return data["accounts"]
+
+
+def load_acquiring_corr_account(path: Path | None = None) -> str:
+    p = path or _ACCOUNTS_PATH
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("acquiring_corr_account", "")
 
 
 # ── парсер 1С ────────────────────────────────────────────────────────────────
@@ -241,10 +258,16 @@ def split_by_branch(
     Returns (branch_results, unmatched_docs).
     unmatched_docs — документы, где ни плательщик, ни получатель не в маппинге.
     """
-    our_accounts = set(accounts_map.keys())
+    # Только счета, реально заявленные в этой выписке.
+    # Если выписка по Абакану — счета Барнаула сюда не попадут,
+    # и переводы между городами не создадут лишних файлов.
+    statement_accounts = set(parsed.accounts)
+    our_accounts = set(accounts_map.keys()) & statement_accounts
 
     results: dict[str, BranchResult] = {}
     for acc, info in accounts_map.items():
+        if acc not in statement_accounts:
+            continue  # счёт не в этой выписке — пропускаем
         acc_balances = [b for b in parsed.balances if b.account == acc]
         results[acc] = BranchResult(
             account=acc,
@@ -286,6 +309,7 @@ def generate_1c_file(
     branch: BranchResult,
     parsed: ParsedStatement,
     acquiring: list[AcquiringEntry] | None = None,
+    acquiring_corr_account: str = "",
 ) -> str:
     lines: list[str] = []
 
@@ -330,19 +354,38 @@ def generate_1c_file(
     # Синтетические расходные документы на комиссию (по одному на каждый день)
     if acquiring:
         for acq in sorted(acquiring, key=lambda a: a.shift_date):
-            lines.append("СекцияДокумент=Банковский ордер")
-            lines.append(f"Номер=КОМ-{acq.shift_date.replace('.', '')}")
-            lines.append(f"Дата={acq.doc_date}")
-            lines.append(f"Сумма={_fmt_amount(acq.commission)}")
-            lines.append(f"ДатаСписано={acq.doc_date}")
-            lines.append(f"ПлательщикРасчСчет={branch.account}")
-            lines.append(
-                f"НазначениеПлатежа=Комиссия по эквайрингу СБЕРБАНК"
-                f" за {acq.shift_date}."
-                f" Мерчант {acq.merchant_id}."
-                f" Операций {acq.operations}."
-            )
-            lines.append("КонецДокумента")
+            synth_lines = [
+                "СекцияДокумент=Банковский ордер",
+                f"Номер=КОМ-{acq.shift_date.replace('.', '')}",
+                f"Дата={acq.doc_date}",
+                f"Сумма={_fmt_amount(acq.commission)}",
+                f"ДатаСписано={acq.doc_date}",
+                f"Плательщик={acq.our_name}",
+                f"ПлательщикИНН={acq.our_inn}",
+                f"ПлательщикКПП={acq.our_kpp}",
+                f"ПлательщикРасчСчет={branch.account}",
+                f"ПлательщикБанк1={acq.bank_name}",
+                f"ПлательщикБИК={acq.bank_bik}",
+                f"ПлательщикКорсчет={acq.bank_korshet}",
+                f"Получатель={acq.sbr_name}",
+                f"ПолучательИНН={acq.sbr_inn}",
+                f"ПолучательРасчСчет={acq.sbr_account}",
+                f"ПолучательБанк1={acq.bank_name}",
+                f"ПолучательБИК={acq.bank_bik}",
+                f"ПолучательКорсчет={acq.bank_korshet}",
+                *(
+                    [f"КоррСчет={acquiring_corr_account}"]
+                    if acquiring_corr_account else []
+                ),
+                (
+                    f"НазначениеПлатежа=Комиссия по эквайрингу СБЕРБАНК"
+                    f" за {acq.shift_date}."
+                    f" Мерчант {acq.merchant_id}."
+                    f" Операций {acq.operations}."
+                ),
+                "КонецДокумента",
+            ]
+            lines.extend(synth_lines)
 
     lines.append("КонецФайла")
     return "\r\n".join(lines)
@@ -369,6 +412,7 @@ def parse_acquiring(documents: list[Document], accounts_map: dict[str, dict]) ->
             continue
         gross = _parse_spaced_number(m.group(4))
         commission = _parse_spaced_number(m.group(5))
+        f = doc.fields
         entries.append(AcquiringEntry(
             account=payee,
             doc_date=doc.date,
@@ -378,6 +422,15 @@ def parse_acquiring(documents: list[Document], accounts_map: dict[str, dict]) ->
             gross_amount=gross,
             commission=commission,
             net_amount=round(gross - commission, 2),
+            our_inn=f.get("ПолучательИНН", ""),
+            our_name=f.get("Получатель", ""),
+            our_kpp=f.get("ПолучательКПП", ""),
+            bank_bik=f.get("ПлательщикБИК", ""),
+            bank_korshet=f.get("ПлательщикКорсчет", ""),
+            bank_name=f.get("ПлательщикБанк1", ""),
+            sbr_account=f.get("ПлательщикРасчСчет", ""),
+            sbr_inn=f.get("ПлательщикИНН", ""),
+            sbr_name=f.get("Плательщик", ""),
         ))
 
     return entries
@@ -610,6 +663,7 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
       - parsed: ParsedStatement
     """
     accounts_map = load_accounts_map(accounts_path)
+    acq_corr_account = load_acquiring_corr_account(accounts_path)
     parsed = parse_1c(content)
 
     logger.info(
@@ -627,10 +681,10 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
         if br.debit_count == 0 and br.credit_count == 0:
             continue
         branch_acq = [a for a in acquiring if a.account == br.account]
-        file_content = generate_1c_file(br, parsed, acquiring=branch_acq or None)
+        file_content = generate_1c_file(br, parsed, acquiring=branch_acq or None, acquiring_corr_account=acq_corr_account)
         period = f"{parsed.date_from}-{parsed.date_to}".replace(".", "")
         filename = f"{br.label}_{period}.txt"
-        files[filename] = file_content.encode("utf-8")
+        files[filename] = file_content.encode("windows-1251")
 
     summary = build_summary(branches, unmatched, parsed, acquiring)
 

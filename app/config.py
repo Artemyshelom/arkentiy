@@ -52,6 +52,7 @@ class Settings(BaseSettings):
     # OpenRouter (LLM-парсинг маркетинговых запросов)
     openrouter_api_key: str = ""
     openrouter_model: str = "google/gemini-2.5-flash"
+    humor_model: str = "anthropic/claude-3-5-haiku"
 
     # Маркетинг: chat_id или user_id через запятую, кому доступна /выгрузка
     telegram_marketing_ids: str = ""

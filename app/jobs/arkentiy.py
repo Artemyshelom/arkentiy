@@ -21,7 +21,6 @@
 import asyncio
 import html
 import logging
-import random
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -78,41 +77,6 @@ _CMD_MODULE: dict[str, str] = {
     "доступ": "admin", "access": "admin",
 }
 
-
-# Kyrgyz режим для Ильи
-_ILYA_ID = 822559806
-
-_KYRGYZ_GREETINGS = [
-    "Салам алейкум, Илья! 🌟",
-    "Саламатсызбы, Илья мырза! 🙏",
-    "Салам, кандайсың? 😄",
-    "Жакшысызбы, Илья мырза! Кабарлар жакшыбы? ✨",
-    "Кош келдиңиз, Илья мырза! 🎉",
-    "О, патрон келди! Бардыгы даяр, мырза! 😄",
-    "Ассалому алайкум, Илья баатыр! Эмне буюрасыз? ⚔️",
-    "Бүгүн кандай? Ишке даярмын, Илья мырза! 💪",
-    "Куттуу болсун бүгүнкү күн, Илья мырза! 🔥",
-]
-
-_KYRGYZ_ACKS = [
-    "Макул, мырза, дароо эле кылам! ⚡",
-    "Ооба, Илья мырза, азыр эле жасап жатам. 🔥",
-    "Буйруңуз, мырза! Дароо орундатам! 🫡",
-    "Дароо эле, Илья мырза! Бир секунд... ⏱",
-    "Сиздин буйрук — менин иш, мырза! 💪",
-    "Эмир кылдыңыз — аткарам, Илья мырза! 🎯",
-    "Жарайт, баш мырза, азыр аткарам! 🚀",
-]
-
-_greeted_today: dict[int, str] = {}
-
-
-def _check_and_mark_ilya_greeting() -> bool:
-    today = datetime.now().date().isoformat()
-    if _greeted_today.get(_ILYA_ID) != today:
-        _greeted_today[_ILYA_ID] = today
-        return True
-    return False
 
 
 # ------------------------------------------------------------------
@@ -185,8 +149,13 @@ async def _edit_message(chat_id: int, message_id: int, text: str, keyboard: list
             if keyboard is not None:
                 payload["reply_markup"] = {"inline_keyboard": keyboard}
             r = await client.post(f"{_bot_url()}/editMessageText", json=payload)
-            if not r.json().get("ok"):
-                logger.error(f"editMessageText error: {r.text[:200]}")
+            resp = r.json()
+            if not resp.get("ok"):
+                desc = resp.get("description", "")
+                if "message is not modified" in desc:
+                    pass  # данные не изменились — норма
+                else:
+                    logger.error(f"editMessageText error: {r.text[:200]}")
     except Exception as e:
         logger.error(f"_edit_message: {e}")
 
@@ -2158,10 +2127,6 @@ async def poll_analytics_bot() -> None:
                 await _send(chat_id, "🚫 Нет доступа.")
             continue
 
-        # Киргизское приветствие Ильи — раз в день
-        if user_id == _ILYA_ID and _check_and_mark_ilya_greeting():
-            await _send(chat_id, random.choice(_KYRGYZ_GREETINGS))
-
         cmd_raw = text.lstrip("/").split("@")[0]
         parts = cmd_raw.split(None, 1)
         cmd = parts[0].lower()
@@ -2180,16 +2145,10 @@ async def poll_analytics_bot() -> None:
         city = perms.city  # None = все города, иначе фильтруем
 
         if cmd in ("статус", "status"):
-            if user_id == _ILYA_ID:
-                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_status(chat_id, arg, city_filter=city)
         elif cmd in ("повара", "cooks"):
-            if user_id == _ILYA_ID:
-                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_staff(chat_id, arg, "cook", city_filter=city)
         elif cmd in ("курьеры", "couriers"):
-            if user_id == _ILYA_ID:
-                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_staff(chat_id, arg, "courier", city_filter=city)
         elif cmd in ("поиск", "search"):
             await _handle_search(chat_id, arg, city_filter=city)

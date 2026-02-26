@@ -210,12 +210,6 @@ async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | 
 async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
     if not rows:
         return
-    # #region agent log
-    _sample = rows[0] if rows else {}
-    _d_raw = _sample.get("date")
-    _d_conv = _to_date(_d_raw)
-    logger.info(f"[DBG-6d218f] upsert_orders_batch rows={len(rows)} date_raw={_d_raw!r} date_type={type(_d_raw).__name__} date_converted={_d_conv!r} date_converted_type={type(_d_conv).__name__}")
-    # #endregion
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():

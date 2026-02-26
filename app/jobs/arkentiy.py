@@ -154,6 +154,46 @@ async def _send_with_keyboard(chat_id: int, text: str, keyboard: list) -> None:
         logger.error(f"analytics_bot _send_with_keyboard: {e}")
 
 
+async def _send_with_keyboard_return_id(chat_id: int, text: str, keyboard: list) -> int | None:
+    """Отправляет сообщение с inline-клавиатурой, возвращает message_id."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{_bot_url()}/sendMessage",
+                json={
+                    "chat_id": chat_id,
+                    "text": text,
+                    "parse_mode": "HTML",
+                    "reply_markup": {"inline_keyboard": keyboard},
+                },
+            )
+            data = r.json()
+            if data.get("ok"):
+                return data["result"]["message_id"]
+            logger.error(f"analytics_bot _send_with_keyboard_return_id: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"analytics_bot _send_with_keyboard_return_id: {e}")
+    return None
+
+
+async def _edit_message(chat_id: int, message_id: int, text: str, keyboard: list | None = None) -> None:
+    """Редактирует существующее сообщение (текст + клавиатура)."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            payload: dict = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "HTML"}
+            if keyboard is not None:
+                payload["reply_markup"] = {"inline_keyboard": keyboard}
+            r = await client.post(f"{_bot_url()}/editMessageText", json=payload)
+            if not r.json().get("ok"):
+                logger.error(f"editMessageText error: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"_edit_message: {e}")
+
+
+# Кеш отчётов ТБанк для drill-down (message_id -> original report text)
+_tbank_report_cache: dict[int, str] = {}
+
+
 async def _download_tg_file(file_id: str) -> bytes | None:
     """Скачивает файл из Telegram по file_id."""
     try:
@@ -242,6 +282,7 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
             reconcile_text = await bank_statement.reconcile_acquiring(
                 result["acquiring"], accounts_map,
                 result["parsed"].date_from, result["parsed"].date_to,
+                statement_accounts=set(result["parsed"].accounts),
             )
             if reconcile_text:
                 await _send(chat_id, reconcile_text)
@@ -298,7 +339,13 @@ async def _handle_tbank_registry(chat_id: int, tg_doc: dict, user_id: int = 0) -
 
     report = result.get("report", "")
     if report:
-        await _send(chat_id, report)
+        if result.get("has_pending"):
+            keyboard = [[{"text": "🔍 Детализация по точке", "callback_data": "tbank:branches"}]]
+            msg_id = await _send_with_keyboard_return_id(chat_id, report, keyboard)
+            if msg_id:
+                _tbank_report_cache[msg_id] = report
+        else:
+            await _send(chat_id, report)
 
     await _send(chat_id, "✅ Сверка онлайн-оплат завершена")
 
@@ -1678,6 +1725,32 @@ async def poll_analytics_bot() -> None:
                 await access_manager.handle_callback(
                     cb_id, cb_user_id, cb_chat_id, cb_message_id, cb_data
                 )
+            elif cb_data.startswith("tbank:"):
+                perms = access.get_permissions(cb_chat_id, cb_user_id)
+                if perms.has("finance"):
+                    await _answer_callback(cb_id)
+                    from app.database import get_overdue_payments, get_pending_payments
+                    all_pending = await get_pending_payments(since_date=tbank_reconciliation.TRACKING_START_DATE)
+                    overdue = await get_overdue_payments(tbank_reconciliation.OVERDUE_DAYS, since_date=tbank_reconciliation.TRACKING_START_DATE)
+
+                    if cb_data == "tbank:branches":
+                        text, keyboard = tbank_reconciliation.build_branch_list(all_pending, overdue)
+                        await _edit_message(cb_chat_id, cb_message_id, text, keyboard)
+
+                    elif cb_data.startswith("tbank:branch:"):
+                        branch = cb_data[len("tbank:branch:"):]
+                        text, keyboard = tbank_reconciliation.build_branch_detail(branch, all_pending, overdue)
+                        await _edit_message(cb_chat_id, cb_message_id, text, keyboard)
+
+                    elif cb_data == "tbank:back":
+                        cached = _tbank_report_cache.get(cb_message_id)
+                        if cached:
+                            keyboard = [[{"text": "🔍 Детализация по точке", "callback_data": "tbank:branches"}]]
+                            await _edit_message(cb_chat_id, cb_message_id, cached, keyboard)
+                        else:
+                            await _answer_callback(cb_id, "Отчёт устарел")
+                else:
+                    await _answer_callback(cb_id, "🚫 Нет доступа")
             elif cb_data.startswith("order:"):
                 perms = access.get_permissions(cb_chat_id, cb_user_id)
                 if perms.has("search"):

@@ -24,6 +24,7 @@ SECRETS_DIR = Path(__file__).resolve().parent.parent.parent / "secrets"
 TBANK_BRANCHES_PATH = SECRETS_DIR / "tbank_branches.json"
 
 OVERDUE_DAYS = 4
+TRACKING_START_DATE = "2026-02-18"  # Точка отсчёта: раньше этой даты не смотрим
 
 
 # ---------------------------------------------------------------------------
@@ -173,13 +174,18 @@ def parse_tbank_registry(data: bytes) -> list[TBankSheet]:
             if comment == "Оплата по заказу":
                 if pending_tx:
                     transactions.append(TBankTransaction(**pending_tx, commission=0.0))
+                tx_status = str(row[5] or "").strip()
+                if tx_status != "Закрыт":
+                    # Пропускаем незавершённые ("Готовится" и т.п.) — платёж не подтверждён ТБанком
+                    pending_tx = None
+                    continue
                 pending_tx = {
                     "order_date": _parse_date(row[0]),
                     "transaction_date": _parse_date(row[1]),
                     "transaction_id": str(row[2] or ""),
                     "transaction_time": str(row[3] or ""),
                     "order_number": str(int(row[4]) if isinstance(row[4], (int, float)) else row[4] or ""),
-                    "status": str(row[5] or ""),
+                    "status": tx_status,
                     "payment_type": str(row[6] or ""),
                     "delivery_type": str(row[7] or ""),
                     "amount": float(row[8] or 0),
@@ -253,6 +259,7 @@ async def process_registry(
         confirm_online_payment,
         get_overdue_payments,
         get_pending_payments,
+        get_tracking_summary,
         save_tbank_registry_log,
         upsert_online_payment,
     )
@@ -277,23 +284,28 @@ async def process_registry(
     all_order_dates.sort()
     date_from = all_order_dates[0]
     date_to_raw = all_order_dates[-1]
-    date_to_dt = datetime.fromisoformat(date_to_raw) + timedelta(days=1)
-    date_from_extended = (datetime.fromisoformat(date_from) - timedelta(days=7)).strftime("%Y-%m-%d")
+    # +2 дня: iiko может записывать заказы на следующую дату (timezone/midnight cutoff)
+    date_to_dt = datetime.fromisoformat(date_to_raw) + timedelta(days=2)
+    date_from_extended = max(
+        (datetime.fromisoformat(date_from) - timedelta(days=7)).strftime("%Y-%m-%d"),
+        TRACKING_START_DATE,
+    )
 
-    iiko_orders: dict[str, dict[str, float]] = {}
+    iiko_orders: dict[str, dict[str, dict]] = {}
     try:
         iiko_orders = await get_online_orders(date_from_extended, date_to_dt.strftime("%Y-%m-%d"))
-        logger.info(f"[tbank] iiko онлайн-заказов: {sum(len(v) for v in iiko_orders.values())} по {len(iiko_orders)} точкам")
+        total_iiko = sum(len(v) for v in iiko_orders.values())
+        logger.info(f"[tbank] iiko онлайн-заказов: {total_iiko} по {len(iiko_orders)} точкам")
     except Exception as e:
         logger.error(f"[tbank] iiko OLAP error: {e}", exc_info=True)
 
     for dept, orders in iiko_orders.items():
-        for order_num, amount in orders.items():
+        for order_num, info in orders.items():
             await upsert_online_payment(
                 branch=dept,
                 order_number=order_num,
-                order_date=date_from,
-                iiko_amount=amount,
+                order_date=info.get("date") or date_from,
+                iiko_amount=info["amount"],
             )
 
     report_date = sheets[0].report_date if sheets else ""
@@ -315,7 +327,16 @@ async def process_registry(
             result.total_tbank_amount += tx.amount
             result.total_tbank_commission += tx.commission
 
-            iiko_amount = dept_iiko.get(tx.order_number)
+            # Settlement lag: заказы до начала трекинга — всегда будет хвост в начале
+            # (платежи до 17:50 МСК → следующий рабочий день, поэтому реестр 18.02
+            # содержит заказы от 17.02 и ранее). Сверку для них не проводим.
+            if _date_to_iso(tx.order_date) < TRACKING_START_DATE:
+                branch_conf += 1
+                result.confirmed += 1
+                continue
+
+            iiko_entry = dept_iiko.get(tx.order_number)
+            iiko_amount = iiko_entry["amount"] if iiko_entry else None
 
             status = await confirm_online_payment(
                 branch=iiko_dept,
@@ -359,10 +380,11 @@ async def process_registry(
             "details": branch_details,
         }
 
-    all_pending = await get_pending_payments()
+    all_pending = await get_pending_payments(since_date=TRACKING_START_DATE)
     result.new_pending = len(all_pending)
 
-    overdue = await get_overdue_payments(OVERDUE_DAYS)
+    overdue = await get_overdue_payments(OVERDUE_DAYS, since_date=TRACKING_START_DATE)
+    tracking = await get_tracking_summary(since_date=TRACKING_START_DATE)
 
     try:
         await save_tbank_registry_log(
@@ -379,11 +401,16 @@ async def process_registry(
     except Exception as e:
         logger.warning(f"[tbank] db log: {e}")
 
-    report_text = _build_report(result, overdue, report_date)
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+    has_pending = any(p["order_date"] != today_iso for p in all_pending)
+
+    report_text = _build_report(result, overdue, all_pending, tracking, report_date)
     return {
         "report": report_text,
         "result": result,
         "overdue": overdue,
+        "all_pending": all_pending,
+        "has_pending": has_pending,
     }
 
 
@@ -402,62 +429,196 @@ def _fmt_money(val: float) -> str:
     return f"{int(val):,}".replace(",", " ")
 
 
-def _build_report(result: ReconciliationResult, overdue: list[dict], report_date: str) -> str:
+def _fmt_date(iso: str) -> str:
+    try:
+        return datetime.fromisoformat(iso).strftime("%d.%m")
+    except Exception:
+        return iso
+
+
+def _days_ago(iso: str) -> int:
+    try:
+        return (datetime.now(timezone.utc).date() - datetime.fromisoformat(iso).date()).days
+    except Exception:
+        return 0
+
+
+def _plural_orders(n: int) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} заказ"
+    if 2 <= n % 10 <= 4 and not (12 <= n % 100 <= 14):
+        return f"{n} заказа"
+    return f"{n} заказов"
+
+
+def _build_report(
+    result: ReconciliationResult,
+    overdue: list[dict],
+    all_pending: list[dict],
+    tracking: dict,
+    report_date: str,
+) -> str:
     lines: list[str] = []
+    today_iso = datetime.now(timezone.utc).date().isoformat()
 
-    lines.append(f"<b>СВЕРКА ОНЛАЙН-ОПЛАТ | реестр {html.escape(report_date)}</b>")
-    lines.append("")
+    # ── Блок 1: Текущий реестр ──────────────────────────────────────────────
+    lines.append(f"💳 <b>Реестр ТБанк · {html.escape(report_date)}</b>")
+    lines.append(f"{result.total_tbank_orders} заказов · {_fmt_money(result.total_tbank_amount)} р · комиссия {_fmt_money(result.total_tbank_commission)} р")
 
-    for dept, br in result.branch_results.items():
-        ok = br["mismatched"] == 0 and br["missing_in_iiko"] == 0
-        icon = "\u2705" if ok else "\u26a0\ufe0f"
-        lines.append(f"{icon} <b>{html.escape(dept)}</b>")
-        lines.append(f"  \u0422\u0411\u0430\u043d\u043a: {br['total_orders']} \u0437\u0430\u043a., {_fmt_money(br['total_amount'])} \u0440")
-        lines.append(f"  \u041a\u043e\u043c\u0438\u0441\u0441\u0438\u044f: {_fmt_money(br['total_commission'])} \u0440")
-        lines.append(f"  \u041f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e: {br['confirmed']}")
-
-        for d in br["details"]:
-            if d["type"] == "mismatch":
-                iiko_str = _fmt_money(d['iiko']) if d['iiko'] is not None else "\u2014"
-                lines.append(f"  \u26a0\ufe0f #{d['order']}: \u0422\u0411\u0430\u043d\u043a {_fmt_money(d['tbank'])} \u0440 vs iiko {iiko_str} \u0440")
-            elif d["type"] == "missing_in_iiko":
-                lines.append(f"  \u2753 #{d['order']}: \u0422\u0411\u0430\u043d\u043a {_fmt_money(d['tbank'])} \u0440 \u2014 \u043d\u0435\u0442 \u0432 iiko")
-        lines.append("")
-
-    lines.append(f"<b>\u0418\u0422\u041e\u0413\u041e:</b> {result.total_tbank_orders} \u0437\u0430\u043a\u0430\u0437\u043e\u0432, {_fmt_money(result.total_tbank_amount)} \u0440")
-    lines.append(f"\u041a\u043e\u043c\u0438\u0441\u0441\u0438\u044f \u0422\u0411\u0430\u043d\u043a: {_fmt_money(result.total_tbank_commission)} \u0440")
     issues = result.mismatched + result.missing_in_iiko
     if issues == 0:
-        lines.append("\u2705 \u0412\u0441\u0435 \u0437\u0430\u043a\u0430\u0437\u044b \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u044b")
+        lines.append("✅ Все подтверждены")
     else:
-        lines.append(f"\u26a0\ufe0f \u0420\u0430\u0441\u0445\u043e\u0436\u0434\u0435\u043d\u0438\u0439: {issues}")
+        lines.append(f"⚠️ {issues} расхождени{'е' if issues == 1 else 'я' if 2 <= issues <= 4 else 'й'}:")
+        for dept, br in result.branch_results.items():
+            for d in br.get("details", []):
+                if d["type"] == "mismatch":
+                    iiko_str = _fmt_money(d["iiko"]) if d["iiko"] is not None else "—"
+                    lines.append(f"  #{d['order']} {html.escape(dept)} · ТБанк {_fmt_money(d['tbank'])} р ≠ iiko {iiko_str} р")
+                elif d["type"] == "missing_in_iiko":
+                    lines.append(f"  #{d['order']} {html.escape(dept)} · {_fmt_money(d['tbank'])} р — не найден в iiko")
 
-    if overdue:
+    # ── Блок 2: Статус онлайн-оплат ─────────────────────────────────────────
+    if tracking:
         lines.append("")
-        lines.append(f"\u203c\ufe0f <b>\u041f\u0420\u041e\u0421\u0420\u041e\u0427\u0415\u041d\u041d\u042b\u0415 \u041e\u041f\u041b\u0410\u0422\u042b (> {OVERDUE_DAYS} \u0434\u043d\u0435\u0439):</b>")
-        by_date: dict[str, list] = defaultdict(list)
-        for p in overdue:
-            by_date[p["order_date"]].append(p)
+        start_display = _fmt_date(TRACKING_START_DATE)
+        lines.append(f"📋 <b>Онлайн-оплаты · с {start_display}</b>")
 
-        for dt in sorted(by_date.keys()):
-            payments = by_date[dt]
-            total = sum(p["iiko_amount"] for p in payments)
-            try:
-                display_date = datetime.fromisoformat(dt).strftime("%d.%m")
-            except Exception:
-                display_date = dt
-            days_ago = (datetime.now(timezone.utc).date() - datetime.fromisoformat(dt).date()).days
-            lines.append(f"  \U0001f534 {display_date} ({days_ago} \u0434\u043d.): {len(payments)} \u0437\u0430\u043a., {_fmt_money(total)} \u0440")
-            for p in payments[:5]:
-                lines.append(f"    #{p['order_number']} {html.escape(p['branch'])} \u2014 {_fmt_money(p['iiko_amount'])} \u0440")
-            if len(payments) > 5:
-                lines.append(f"    ... \u0438 \u0435\u0449\u0451 {len(payments) - 5}")
+        # Pending без сегодня (реестра за сегодня нет по определению)
+        non_today_pending = [p for p in all_pending if p["order_date"] != today_iso]
+        total_pending_amount = sum(p.get("iiko_amount") or 0 for p in non_today_pending)
 
-    pending_all_count = result.new_pending
-    if pending_all_count > 0 and not overdue:
-        lines.append("")
-        lines.append(f"\u23f3 \u041e\u0436\u0438\u0434\u0430\u044e\u0442 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u044f: {pending_all_count} \u0437\u0430\u043a\u0430\u0437\u043e\u0432")
-    elif pending_all_count > 0:
-        lines.append(f"\u23f3 \u0412\u0441\u0435\u0433\u043e \u043e\u0436\u0438\u0434\u0430\u044e\u0442: {pending_all_count} \u0437\u0430\u043a\u0430\u0437\u043e\u0432")
+        if not non_today_pending:
+            lines.append("✅ Все оплаты подтверждены")
+        else:
+            lines.append(f"Ожидают: {_plural_orders(len(non_today_pending))} на {_fmt_money(total_pending_amount)} р")
+
+            # --- 🔴 Просрочено (> OVERDUE_DAYS) ---
+            overdue_groups: dict[tuple, list] = defaultdict(list)
+            for p in overdue:
+                if p["order_date"] != today_iso:
+                    overdue_groups[(p["branch"], p["order_date"])].append(p)
+
+            if overdue_groups:
+                lines.append("")
+                lines.append("🔴 <b>Просрочено (> 4 дн.)</b>")
+                for (branch, date_iso) in sorted(overdue_groups.keys(), key=lambda x: (x[1], x[0])):
+                    group = overdue_groups[(branch, date_iso)]
+                    amt = sum(p.get("iiko_amount") or 0 for p in group)
+                    lines.append(f"{html.escape(branch)} · {_fmt_date(date_iso)} — {_plural_orders(len(group))} ({_fmt_money(amt)} р)")
+                    for p in group[:3]:
+                        lines.append(f"  └ #{p['order_number']}: {_fmt_money(p.get('iiko_amount') or 0)} р")
+                    if len(group) > 3:
+                        lines.append(f"  └ ... ещё {len(group) - 3}")
+
+            # --- ⏳ Ожидают реестр (свежие, ≤ OVERDUE_DAYS) ---
+            non_overdue_pending = [p for p in non_today_pending if _days_ago(p["order_date"]) < OVERDUE_DAYS]
+
+            pending_groups: dict[tuple, list] = defaultdict(list)
+            for p in non_overdue_pending:
+                pending_groups[(p["branch"], p["order_date"])].append(p)
+
+            if pending_groups:
+                lines.append("")
+                lines.append("⏳ <b>Ожидают реестр</b>")
+                # Сортировка: больше заказов — выше, потом по branch
+                for (branch, date_iso) in sorted(
+                    pending_groups.keys(),
+                    key=lambda x: (-len(pending_groups[x]), x[0]),
+                ):
+                    group = pending_groups[(branch, date_iso)]
+                    amt = sum(p.get("iiko_amount") or 0 for p in group)
+                    lines.append(f"{html.escape(branch)} · {_fmt_date(date_iso)} — {_plural_orders(len(group))} ({_fmt_money(amt)} р)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Drill-down: branch list (State 1) and branch detail (State 2)
+# ---------------------------------------------------------------------------
+
+def build_branch_list(all_pending: list[dict], overdue: list[dict]) -> tuple[str, list]:
+    """Возвращает (text, keyboard) для экрана выбора точки (State 1)."""
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+
+    branch_overdue: dict[str, list] = defaultdict(list)
+    for p in overdue:
+        if p["order_date"] != today_iso:
+            branch_overdue[p["branch"]].append(p)
+
+    branch_pending: dict[str, list] = defaultdict(list)
+    for p in all_pending:
+        if p["order_date"] != today_iso and _days_ago(p["order_date"]) < OVERDUE_DAYS:
+            branch_pending[p["branch"]].append(p)
+
+    all_branches = set(list(branch_overdue.keys()) + list(branch_pending.keys()))
+    back_btn = [{"text": "← Назад к отчёту", "callback_data": "tbank:back"}]
+
+    if not all_branches:
+        return "✅ Нет ожидающих заказов", [back_btn]
+
+    def _sort_key(b: str) -> tuple:
+        return (-len(branch_overdue.get(b, [])), -len(branch_pending.get(b, [])), b)
+
+    keyboard: list[list[dict]] = []
+    for branch in sorted(all_branches, key=_sort_key):
+        ov = len(branch_overdue.get(branch, []))
+        pend = len(branch_pending.get(branch, []))
+        icons = ""
+        if ov:
+            icons += f"🔴 {ov}"
+        if pend:
+            icons += f" · ⏳ {pend}" if icons else f"⏳ {pend}"
+        label = f"{branch}  {icons}".strip()
+        cb = f"tbank:branch:{branch}"
+        keyboard.append([{"text": label, "callback_data": cb[:64]}])
+
+    keyboard.append(back_btn)
+    text = "📋 <b>Онлайн-оплаты · детализация</b>\n\nВыбери точку:"
+    return text, keyboard
+
+
+def build_branch_detail(branch: str, all_pending: list[dict], overdue: list[dict]) -> tuple[str, list]:
+    """Возвращает (text, keyboard) для детального экрана точки (State 2)."""
+    today_iso = datetime.now(timezone.utc).date().isoformat()
+
+    br_overdue = [p for p in overdue if p["branch"] == branch and p["order_date"] != today_iso]
+    br_pending = [
+        p for p in all_pending
+        if p["branch"] == branch and p["order_date"] != today_iso and _days_ago(p["order_date"]) < OVERDUE_DAYS
+    ]
+
+    keyboard = [[
+        {"text": "← К точкам", "callback_data": "tbank:branches"},
+        {"text": "← К отчёту", "callback_data": "tbank:back"},
+    ]]
+
+    if not br_overdue and not br_pending:
+        return f"📋 <b>{html.escape(branch)}</b>\n\n✅ Нет ожидающих заказов", keyboard
+
+    lines = [f"📋 <b>{html.escape(branch)}</b> · ожидают подтверждения"]
+
+    def _render_group(items: list[dict]) -> None:
+        by_date: dict[str, list] = defaultdict(list)
+        for p in items:
+            by_date[p["order_date"]].append(p)
+        for date_iso in sorted(by_date.keys()):
+            group = by_date[date_iso]
+            amt = sum(p.get("iiko_amount") or 0 for p in group)
+            lines.append(f"{_fmt_date(date_iso)} — {_plural_orders(len(group))} · {_fmt_money(amt)} р")
+            for p in group[:5]:
+                lines.append(f"  └ #{p['order_number']}: {_fmt_money(p.get('iiko_amount') or 0)} р")
+            if len(group) > 5:
+                lines.append(f"  └ ... ещё {len(group) - 5}")
+
+    if br_overdue:
+        lines.append("")
+        lines.append("🔴 <b>Просрочено:</b>")
+        _render_group(br_overdue)
+
+    if br_pending:
+        lines.append("")
+        lines.append("⏳ <b>Ожидают реестр:</b>")
+        _render_group(br_pending)
+
+    return "\n".join(lines), keyboard

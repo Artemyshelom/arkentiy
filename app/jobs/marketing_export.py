@@ -413,6 +413,11 @@ def build_sql(params: dict) -> tuple[str, list]:
     post_where = " AND ".join(post_cte_conds)
 
     join_block = "\n        ".join(joins)
+    period_expr = (
+        "COALESCE(po.period_count, ct.total_orders, 1)"
+        if need_period_orders
+        else "COALESCE(ct.total_orders, 1)"
+    )
 
     inner_sql = f"""
         {cte_block}
@@ -431,7 +436,7 @@ def build_sql(params: dict) -> tuple[str, list]:
                 ELSE 'Старый'
             END                                         AS customer_type,
             COALESCE(ct.total_orders, 1)                AS total_orders,
-            COALESCE(po.period_count, ct.total_orders, 1) AS orders_in_period,
+            {period_expr}                               AS orders_in_period,
             COALESCE(o.payment_type, '')                AS payment_type,
             COALESCE(o.source, '')                      AS source
         FROM orders_raw o

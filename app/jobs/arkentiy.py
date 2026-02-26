@@ -763,10 +763,6 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
         )
         return
 
-    if BACKEND != "sqlite":
-        await _send(chat_id, "❌ Поиск недоступен: PG backend не реализован.")
-        return
-
     # Парсинг ручного фильтра города/филиала (последний токен)
     tokens = query.strip().split()
     manual_filter: str | None = None
@@ -808,55 +804,114 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif city_filter:
         city_branch_names = list(allowed_set)
 
-    def _city_clause() -> tuple[str, list]:
-        if city_branch_names:
-            placeholders = ",".join("?" * len(city_branch_names))
-            return f"AND branch_name IN ({placeholders})", list(city_branch_names)
-        return "", []
-
-    city_sql, city_params = _city_clause()
+    rows: list[dict] = []
     total = 0
+    query_type = "text"
 
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    if BACKEND == "postgresql":
+        pool = get_pool()
+        has_city = bool(city_branch_names)
 
         if is_numeric:
-            async with db.execute(
-                f"SELECT {COLS} FROM orders_raw WHERE delivery_num = ? {city_sql} ORDER BY planned_time DESC",
-                (query, *city_params),
-            ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
+            if has_city:
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = $1 AND branch_name = ANY($2) ORDER BY planned_time DESC",
+                    query, city_branch_names,
+                )
+            else:
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = $1 ORDER BY planned_time DESC",
+                    query,
+                )
             query_type = "numeric"
 
         elif is_phone:
             phone_q = query.lstrip("+")
-            async with db.execute(
-                f"""SELECT {COLS} FROM orders_raw
-                    WHERE (client_phone LIKE ? OR client_phone LIKE ?)
-                    {city_sql}
-                    ORDER BY planned_time DESC LIMIT 30""",
-                (f"%{phone_q}%", f"%{query}%", *city_params),
-            ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
+            if has_city:
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE (client_phone LIKE $1 OR client_phone LIKE $2) AND branch_name = ANY($3) ORDER BY planned_time DESC LIMIT 30",
+                    f"%{phone_q}%", f"%{query}%", city_branch_names,
+                )
+            else:
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE (client_phone LIKE $1 OR client_phone LIKE $2) ORDER BY planned_time DESC LIMIT 30",
+                    f"%{phone_q}%", f"%{query}%",
+                )
             query_type = "phone"
 
         else:
-            async with db.execute(
-                f"""SELECT COUNT(*) FROM orders_raw
-                    WHERE (delivery_num LIKE ? OR client_phone LIKE ?
-                       OR delivery_address LIKE ? OR items LIKE ?) {city_sql}""",
-                (q, q, q, q, *city_params),
-            ) as cur:
-                total = (await cur.fetchone())[0]
-            async with db.execute(
-                f"""SELECT {COLS} FROM orders_raw
-                    WHERE (delivery_num LIKE ? OR client_phone LIKE ?
-                       OR delivery_address LIKE ? OR items LIKE ?) {city_sql}
-                    ORDER BY planned_time DESC LIMIT 20""",
-                (q, q, q, q, *city_params),
-            ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
+            if has_city:
+                count_row = await pool.fetchrow(
+                    "SELECT COUNT(*) FROM orders_raw WHERE (delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1) AND branch_name = ANY($2)",
+                    q, city_branch_names,
+                )
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE (delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1) AND branch_name = ANY($2) ORDER BY planned_time DESC LIMIT 20",
+                    q, city_branch_names,
+                )
+            else:
+                count_row = await pool.fetchrow(
+                    "SELECT COUNT(*) FROM orders_raw WHERE delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1",
+                    q,
+                )
+                pg_rows = await pool.fetch(
+                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1 ORDER BY planned_time DESC LIMIT 20",
+                    q,
+                )
+            total = count_row[0] if count_row else 0
             query_type = "text"
+
+        rows = [dict(r) for r in pg_rows]
+
+    else:
+        def _city_clause() -> tuple[str, list]:
+            if city_branch_names:
+                placeholders = ",".join("?" * len(city_branch_names))
+                return f"AND branch_name IN ({placeholders})", list(city_branch_names)
+            return "", []
+
+        city_sql, city_params = _city_clause()
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            if is_numeric:
+                async with db.execute(
+                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = ? {city_sql} ORDER BY planned_time DESC",
+                    (query, *city_params),
+                ) as cur:
+                    rows = [dict(r) for r in await cur.fetchall()]
+                query_type = "numeric"
+
+            elif is_phone:
+                phone_q = query.lstrip("+")
+                async with db.execute(
+                    f"""SELECT {COLS} FROM orders_raw
+                        WHERE (client_phone LIKE ? OR client_phone LIKE ?)
+                        {city_sql}
+                        ORDER BY planned_time DESC LIMIT 30""",
+                    (f"%{phone_q}%", f"%{query}%", *city_params),
+                ) as cur:
+                    rows = [dict(r) for r in await cur.fetchall()]
+                query_type = "phone"
+
+            else:
+                async with db.execute(
+                    f"""SELECT COUNT(*) FROM orders_raw
+                        WHERE (delivery_num LIKE ? OR client_phone LIKE ?
+                           OR delivery_address LIKE ? OR items LIKE ?) {city_sql}""",
+                    (q, q, q, q, *city_params),
+                ) as cur:
+                    total = (await cur.fetchone())[0]
+                async with db.execute(
+                    f"""SELECT {COLS} FROM orders_raw
+                        WHERE (delivery_num LIKE ? OR client_phone LIKE ?
+                           OR delivery_address LIKE ? OR items LIKE ?) {city_sql}
+                        ORDER BY planned_time DESC LIMIT 20""",
+                    (q, q, q, q, *city_params),
+                ) as cur:
+                    rows = [dict(r) for r in await cur.fetchall()]
+                query_type = "text"
 
     if not rows:
         await _send(chat_id, f"🔍 <code>{html.escape(query)}</code> — ничего не найдено.")
@@ -1352,9 +1407,6 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
     Исторические опоздания за день из БД (группировка по точкам).
     Вызывается из /опоздания [дата].
     """
-    if BACKEND != "sqlite":
-        await _send(chat_id, "❌ Опоздания из БД недоступны: PG backend не реализован.")
-        return
     import re
     from collections import defaultdict
 
@@ -1389,49 +1441,87 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
         await _send(chat_id, f"❌ Точка или город «{filter_q}» не найдены.")
         return
 
-    placeholders = ",".join("?" * len(branch_names))
-    params_filter = tuple(branch_names)
-
-    async with aiosqlite.connect(DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
-
-        # Статистика: доставки и самовывозы по каждой точке
-        async with db.execute(
-            f"""SELECT branch_name,
-                       SUM(CASE WHEN is_self_service=0 THEN 1 ELSE 0 END) AS delivery_cnt,
-                       SUM(CASE WHEN is_self_service=1 THEN 1 ELSE 0 END) AS pickup_cnt
+    if BACKEND == "postgresql":
+        pool = get_pool()
+        stats_pg = await pool.fetch(
+            """SELECT branch_name,
+                      SUM(CASE WHEN is_self_service=false THEN 1 ELSE 0 END) AS delivery_cnt,
+                      SUM(CASE WHEN is_self_service=true THEN 1 ELSE 0 END) AS pickup_cnt
                FROM orders_raw
-               WHERE date = ?
+               WHERE date::text = $1
                  AND status IN ('Доставлена','Закрыта')
-                 AND branch_name IN ({placeholders})
+                 AND branch_name = ANY($2)
                GROUP BY branch_name""",
-            (date,) + params_filter,
-        ) as cur:
-            stats_rows = {r["branch_name"]: dict(r) for r in await cur.fetchall()}
+            date, branch_names,
+        )
+        stats_rows = {r["branch_name"]: dict(r) for r in stats_pg}
 
-        # Опоздавшие доставки
-        async with db.execute(
-            f"""SELECT branch_name, delivery_num, courier, client_name,
-                       planned_time, late_minutes, sum
+        delivery_pg = await pool.fetch(
+            """SELECT branch_name, delivery_num, courier, client_name,
+                      planned_time, late_minutes, sum
                FROM orders_raw
-               WHERE date = ? AND is_late = 1 AND is_self_service = 0
-                 AND branch_name IN ({placeholders})
+               WHERE date::text = $1 AND is_late = true AND is_self_service = false
+                 AND branch_name = ANY($2)
                ORDER BY branch_name, late_minutes DESC""",
-            (date,) + params_filter,
-        ) as cur:
-            delivery_late = [dict(r) for r in await cur.fetchall()]
+            date, branch_names,
+        )
+        delivery_late = [dict(r) for r in delivery_pg]
 
-        # Опоздавшие самовывозы
-        async with db.execute(
-            f"""SELECT branch_name, delivery_num, client_name,
-                       planned_time, actual_time, late_minutes, sum, ready_time
+        pickup_pg = await pool.fetch(
+            """SELECT branch_name, delivery_num, client_name,
+                      planned_time, actual_time, late_minutes, sum, ready_time
                FROM orders_raw
-               WHERE date = ? AND is_late = 1 AND is_self_service = 1
-                 AND branch_name IN ({placeholders})
+               WHERE date::text = $1 AND is_late = true AND is_self_service = true
+                 AND branch_name = ANY($2)
                ORDER BY branch_name, late_minutes DESC""",
-            (date,) + params_filter,
-        ) as cur:
-            pickup_late = [dict(r) for r in await cur.fetchall()]
+            date, branch_names,
+        )
+        pickup_late = [dict(r) for r in pickup_pg]
+
+    else:
+        placeholders = ",".join("?" * len(branch_names))
+        params_filter = tuple(branch_names)
+
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+
+            # Статистика: доставки и самовывозы по каждой точке
+            async with db.execute(
+                f"""SELECT branch_name,
+                           SUM(CASE WHEN is_self_service=0 THEN 1 ELSE 0 END) AS delivery_cnt,
+                           SUM(CASE WHEN is_self_service=1 THEN 1 ELSE 0 END) AS pickup_cnt
+                   FROM orders_raw
+                   WHERE date = ?
+                     AND status IN ('Доставлена','Закрыта')
+                     AND branch_name IN ({placeholders})
+                   GROUP BY branch_name""",
+                (date,) + params_filter,
+            ) as cur:
+                stats_rows = {r["branch_name"]: dict(r) for r in await cur.fetchall()}
+
+            # Опоздавшие доставки
+            async with db.execute(
+                f"""SELECT branch_name, delivery_num, courier, client_name,
+                           planned_time, late_minutes, sum
+                   FROM orders_raw
+                   WHERE date = ? AND is_late = 1 AND is_self_service = 0
+                     AND branch_name IN ({placeholders})
+                   ORDER BY branch_name, late_minutes DESC""",
+                (date,) + params_filter,
+            ) as cur:
+                delivery_late = [dict(r) for r in await cur.fetchall()]
+
+            # Опоздавшие самовывозы
+            async with db.execute(
+                f"""SELECT branch_name, delivery_num, client_name,
+                           planned_time, actual_time, late_minutes, sum, ready_time
+                   FROM orders_raw
+                   WHERE date = ? AND is_late = 1 AND is_self_service = 1
+                     AND branch_name IN ({placeholders})
+                   ORDER BY branch_name, late_minutes DESC""",
+                (date,) + params_filter,
+            ) as cur:
+                pickup_late = [dict(r) for r in await cur.fetchall()]
 
     total_late_d = len(delivery_late)
     total_late_p = len(pickup_late)

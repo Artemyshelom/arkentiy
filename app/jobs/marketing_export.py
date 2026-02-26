@@ -33,6 +33,21 @@ settings = get_settings()
 DEFAULT_LATE_MINUTES = 5  # базовый порог опоздания (мин)
 
 
+def _pg_args(args: list) -> list:
+    """Конвертирует ISO-строки YYYY-MM-DD в datetime.date для asyncpg."""
+    import datetime as _dt, re as _re
+    result = []
+    for a in args:
+        if isinstance(a, str) and _re.match(r'^\d{4}-\d{2}-\d{2}$', a):
+            try:
+                result.append(_dt.date.fromisoformat(a))
+            except ValueError:
+                result.append(a)
+        else:
+            result.append(a)
+    return result
+
+
 def _to_pg_sql(sql: str) -> str:
     """Конвертирует SQLite-SQL (? placeholders, is_late=1) в PostgreSQL-совместимый."""
     # ? → $1, $2, ...
@@ -781,7 +796,7 @@ async def run_export(chat_id: int, query_text: str, bot_url: str) -> None:
     pg_sql = _to_pg_sql(sql)
     try:
         pool = get_pool()
-        pg_rows = await pool.fetch(pg_sql, *args)
+        pg_rows = await pool.fetch(pg_sql, *_pg_args(args))
         rows = [dict(r) for r in pg_rows]
     except Exception as e:
         logger.error(f"[marketing_export] DB error: {e}\nSQL: {pg_sql}\nArgs: {args}", exc_info=True)

@@ -482,7 +482,7 @@ def _build_report(
     if tracking:
         lines.append("")
         start_display = _fmt_date(TRACKING_START_DATE)
-        lines.append(f"📋 <b>Онлайн-оплаты · с {start_display}</b>")
+        lines.append(f"📋 <b>Онлайн-оплаты в iiko · с {start_display}</b>")
 
         # Pending без сегодня (реестра за сегодня нет по определению)
         non_today_pending = [p for p in all_pending if p["order_date"] != today_iso]
@@ -491,7 +491,7 @@ def _build_report(
         if not non_today_pending:
             lines.append("✅ Все оплаты подтверждены")
         else:
-            lines.append(f"Ожидают: {_plural_orders(len(non_today_pending))} на {_fmt_money(total_pending_amount)} р")
+            lines.append(f"Деньги ещё не в банке: {_plural_orders(len(non_today_pending))} на {_fmt_money(total_pending_amount)} р")
 
             # --- 🔴 Просрочено (> OVERDUE_DAYS) ---
             overdue_groups: dict[tuple, list] = defaultdict(list)
@@ -511,7 +511,7 @@ def _build_report(
                     if len(group) > 3:
                         lines.append(f"  └ ... ещё {len(group) - 3}")
 
-            # --- ⏳ Ожидают реестр (свежие, ≤ OVERDUE_DAYS) ---
+            # --- ⏳ Деньги ещё не в банке (свежие, ≤ OVERDUE_DAYS) ---
             non_overdue_pending = [p for p in non_today_pending if _days_ago(p["order_date"]) < OVERDUE_DAYS]
 
             pending_groups: dict[tuple, list] = defaultdict(list)
@@ -520,7 +520,7 @@ def _build_report(
 
             if pending_groups:
                 lines.append("")
-                lines.append("⏳ <b>Ожидают реестр</b>")
+                lines.append("⏳ <b>Деньги ещё не в банке</b>")
                 # Сортировка: больше заказов — выше, потом по branch
                 for (branch, date_iso) in sorted(
                     pending_groups.keys(),
@@ -606,19 +606,241 @@ def build_branch_detail(branch: str, all_pending: list[dict], overdue: list[dict
             group = by_date[date_iso]
             amt = sum(p.get("iiko_amount") or 0 for p in group)
             lines.append(f"{_fmt_date(date_iso)} — {_plural_orders(len(group))} · {_fmt_money(amt)} р")
-            for p in group[:5]:
+            for p in group:
                 lines.append(f"  └ #{p['order_number']}: {_fmt_money(p.get('iiko_amount') or 0)} р")
-            if len(group) > 5:
-                lines.append(f"  └ ... ещё {len(group) - 5}")
 
     if br_overdue:
         lines.append("")
-        lines.append("🔴 <b>Просрочено:</b>")
+        lines.append("🔴 <b>Просрочено (деньги не пришли):</b>")
         _render_group(br_overdue)
 
     if br_pending:
         lines.append("")
-        lines.append("⏳ <b>Ожидают реестр:</b>")
+        lines.append("⏳ <b>Деньги ещё не в банке:</b>")
         _render_group(br_pending)
 
     return "\n".join(lines), keyboard
+
+
+# ---------------------------------------------------------------------------
+# Payout report (Ежедневный отчёт по выплатам)
+# ---------------------------------------------------------------------------
+
+PAYOUT_DELAY_DAYS = 2  # дней после tbank_confirmed_date до алерта о задержке выплаты
+
+
+@dataclass
+class TBankPayoutTransaction:
+    order_number: str
+    payment_date: str     # DD.MM.YYYY
+    payout_date: str      # DD.MM.YYYY
+    amount: float         # Сумма операции
+    commission: float     # Комиссия МП
+    net_amount: float     # К перечислению
+    operation_type: str   # Debit / Credit
+    payment_system: str   # SBP / Mir / Visa / Mastercard
+
+
+@dataclass
+class TBankPayoutSheet:
+    branch_name: str
+    payout_date: str
+    total_amount: float
+    total_commission: float
+    total_net: float
+    transactions: list[TBankPayoutTransaction] = field(default_factory=list)
+
+
+def is_tbank_payout(data: bytes) -> bool:
+    """Проверяет, является ли xlsx отчётом по выплатам ТБанк."""
+    try:
+        wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+        for sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+            for row in ws.iter_rows(min_row=1, max_row=3, values_only=True):
+                for cell in row:
+                    if cell and "Выплата от" in str(cell):
+                        wb.close()
+                        return True
+        wb.close()
+    except Exception:
+        pass
+    return False
+
+
+def parse_tbank_payout(data: bytes) -> list[TBankPayoutSheet]:
+    """Парсит xlsx отчёта по выплатам ТБанк."""
+    wb = openpyxl.load_workbook(BytesIO(data), read_only=True, data_only=True)
+    sheets: list[TBankPayoutSheet] = []
+
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows_data = list(ws.iter_rows(min_row=1, max_row=200, values_only=True))
+        if len(rows_data) < 8:
+            continue
+
+        # Извлекаем дату выплаты из строки 1: "... Выплата от DD.MM.YYYY."
+        header_text = str(rows_data[0][0] or "")
+        payout_date_str = ""
+        import re as _re
+        m = _re.search(r"Выплата от (\d{2}\.\d{2}\.\d{4})", header_text)
+        if m:
+            payout_date_str = m.group(1)
+
+        branch_name = str(rows_data[1][0] or "").strip()
+        total_amount = float(rows_data[2][1] or 0)
+        total_commission = abs(float(rows_data[3][1] or 0))
+        total_net = float(rows_data[4][1] or 0)
+
+        if total_amount == 0 and total_net == 0:
+            # Пустой лист — пропускаем
+            continue
+
+        transactions: list[TBankPayoutTransaction] = []
+        # Строка 8 (индекс 7) — заголовок, данные с строки 9 (индекс 8)
+        for row in rows_data[8:]:
+            if not row or row[0] is None:
+                continue
+            try:
+                order_number = str(int(row[3]) if isinstance(row[3], (int, float)) else row[3] or "")
+                if not order_number:
+                    continue
+                transactions.append(TBankPayoutTransaction(
+                    order_number=order_number,
+                    payment_date=_parse_date(row[4]),
+                    payout_date=_parse_date(row[9]) if row[9] else payout_date_str,
+                    amount=float(row[11] or 0),
+                    commission=abs(float(row[12] or 0)),
+                    net_amount=float(row[13] or 0),
+                    operation_type=str(row[14] or "Debit").strip(),
+                    payment_system=str(row[2] or "").strip(),
+                ))
+            except (IndexError, ValueError, TypeError):
+                continue
+
+        sheets.append(TBankPayoutSheet(
+            branch_name=branch_name or sheet_name,
+            payout_date=payout_date_str,
+            total_amount=total_amount,
+            total_commission=total_commission,
+            total_net=total_net,
+            transactions=transactions,
+        ))
+
+    wb.close()
+    return sheets
+
+
+async def process_payout(
+    data: bytes,
+    user_id: int = 0,
+    chat_id: int = 0,
+    filename: str = "",
+) -> dict:
+    """Обработка отчёта по выплатам ТБанк."""
+    from app.database import confirm_payout, get_payout_delayed, record_chargeback
+
+    sheets = parse_tbank_payout(data)
+    if not sheets:
+        return {"error": "В файле нет данных о выплатах."}
+
+    mapping = load_branch_mapping()
+    payout_date = sheets[0].payout_date if sheets else ""
+
+    confirmed_count = 0
+    chargeback_list: list[dict] = []
+    not_found_list: list[dict] = []
+    total_amount = 0.0
+    total_net = 0.0
+
+    for sheet in sheets:
+        iiko_dept = _resolve_branch(sheet.branch_name, mapping) or sheet.branch_name
+        total_amount += sheet.total_amount
+        total_net += sheet.total_net
+
+        for tx in sheet.transactions:
+            tx_payout_iso = _date_to_iso(tx.payout_date) if tx.payout_date else ""
+
+            if tx_payout_iso and tx_payout_iso < TRACKING_START_DATE:
+                continue
+
+            if tx.operation_type.lower() == "credit":
+                chargeback_list.append({
+                    "branch": iiko_dept,
+                    "order": tx.order_number,
+                    "date": tx.payment_date,
+                    "amount": tx.amount,
+                })
+                await record_chargeback(
+                    branch=iiko_dept,
+                    order_number=tx.order_number,
+                    chargeback_date=tx_payout_iso or payout_date,
+                    amount=tx.amount,
+                )
+            else:
+                result = await confirm_payout(
+                    branch=iiko_dept,
+                    order_number=tx.order_number,
+                    payout_date=tx_payout_iso or _date_to_iso(payout_date),
+                    payout_amount=tx.net_amount,
+                )
+                if result == "confirmed":
+                    confirmed_count += 1
+                else:
+                    not_found_list.append({
+                        "branch": iiko_dept,
+                        "order": tx.order_number,
+                        "amount": tx.net_amount,
+                    })
+
+    delayed = await get_payout_delayed(PAYOUT_DELAY_DAYS, since_date=TRACKING_START_DATE)
+    report = _build_payout_report(sheets, payout_date, confirmed_count, chargeback_list, delayed, not_found_list, total_amount, total_net)
+    return {"report": report}
+
+
+def _build_payout_report(
+    sheets: list[TBankPayoutSheet],
+    payout_date: str,
+    confirmed: int,
+    chargebacks: list[dict],
+    delayed: list[dict],
+    not_found: list[dict],
+    total_amount: float,
+    total_net: float,
+) -> str:
+    lines: list[str] = []
+
+    lines.append(f"💸 <b>Выплата ТБанк · {html.escape(payout_date)}</b>")
+    lines.append(f"{_fmt_money(total_amount)} р · на счёт: {_fmt_money(total_net)} р")
+
+    # По точкам
+    for sheet in sheets:
+        if sheet.total_amount > 0:
+            lines.append(f"  {html.escape(sheet.branch_name)} — {_fmt_money(sheet.total_net)} р")
+
+    lines.append("")
+    if confirmed:
+        lines.append(f"✅ Подтверждено выплат: {_plural_orders(confirmed)}")
+
+    # Возвраты/чарджбэки
+    if chargebacks:
+        lines.append("")
+        lines.append(f"💥 <b>Возвраты ({len(chargebacks)}):</b>")
+        for cb in chargebacks:
+            lines.append(f"  #{cb['order']} {html.escape(cb['branch'])} · {_fmt_date(_date_to_iso(cb['date']))} — -{_fmt_money(cb['amount'])} р")
+
+    # Задержка перечисления
+    if delayed:
+        lines.append("")
+        lines.append(f"⏰ <b>Задержка перечисления (> {PAYOUT_DELAY_DAYS} дн.):</b>")
+        delayed_groups: dict[tuple, list] = defaultdict(list)
+        for p in delayed:
+            delayed_groups[(p["branch"], p.get("tbank_confirmed_date", "")[:10])].append(p)
+        for (branch, conf_date) in sorted(delayed_groups.keys(), key=lambda x: x[1]):
+            group = delayed_groups[(branch, conf_date)]
+            amt = sum(p.get("tbank_amount") or p.get("iiko_amount") or 0 for p in group)
+            lines.append(f"  {html.escape(branch)} · подтв. {_fmt_date(conf_date)} — {_plural_orders(len(group))} ({_fmt_money(amt)} р)")
+    elif confirmed:
+        lines.append("⏰ Задержек нет")
+
+    return "\n".join(lines)

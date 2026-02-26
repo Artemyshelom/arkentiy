@@ -171,6 +171,8 @@ async def init_online_payments_tables() -> None:
                 tbank_commission    REAL,
                 tbank_confirmed_date TEXT,
                 tbank_transaction_id TEXT,
+                payout_date         TEXT,
+                payout_amount       REAL,
                 created_at          TEXT NOT NULL,
                 updated_at          TEXT NOT NULL,
                 UNIQUE(branch, order_number)
@@ -193,8 +195,94 @@ async def init_online_payments_tables() -> None:
                 new_pending     INTEGER,
                 missing_in_iiko INTEGER
             );
+
+            CREATE TABLE IF NOT EXISTS tbank_payout_logs (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                processed_at    TEXT NOT NULL,
+                user_id         INTEGER,
+                chat_id         INTEGER,
+                filename        TEXT,
+                payout_date     TEXT,
+                total_orders    INTEGER,
+                total_amount    REAL,
+                total_net       REAL,
+                confirmed       INTEGER,
+                chargebacks     INTEGER,
+                not_found       INTEGER
+            );
         """)
+        # Миграция для существующих БД: добавляем колонки если их нет
+        for col_def in [("payout_date", "TEXT"), ("payout_amount", "REAL")]:
+            try:
+                await db.execute(f"ALTER TABLE online_payments ADD COLUMN {col_def[0]} {col_def[1]}")
+            except Exception:
+                pass
         await db.commit()
+
+
+async def confirm_payout(
+    branch: str,
+    order_number: str,
+    payout_date: str,
+    payout_amount: float,
+) -> str:
+    """
+    Фиксирует фактическую выплату от ТБанк (деньги поступили на счёт).
+    Возвращает: 'confirmed' (запись найдена и обновлена), 'not_found' (заказа нет в трекере).
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        row = await (await db.execute(
+            "SELECT id FROM online_payments WHERE branch = ? AND order_number = ?",
+            (branch, order_number),
+        )).fetchone()
+        if row:
+            await db.execute(
+                "UPDATE online_payments SET payout_date = ?, payout_amount = ?, updated_at = ? WHERE branch = ? AND order_number = ?",
+                (payout_date, payout_amount, now, branch, order_number),
+            )
+            await db.commit()
+            return "confirmed"
+        return "not_found"
+
+
+async def record_chargeback(
+    branch: str,
+    order_number: str,
+    chargeback_date: str,
+    amount: float,
+) -> None:
+    """Помечает заказ как возврат/чарджбэк (Credit в выплатах)."""
+    now = datetime.now(timezone.utc).isoformat()
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            """UPDATE online_payments SET status = 'chargeback', payout_date = ?, payout_amount = ?, updated_at = ?
+               WHERE branch = ? AND order_number = ?""",
+            (chargeback_date, -abs(amount), now, branch, order_number),
+        )
+        await db.commit()
+
+
+async def get_payout_delayed(days: int = 2, since_date: str | None = None) -> list[dict]:
+    """
+    Заказы подтверждённые в платежах, но без выплаты > N дней.
+    Это значит ТБанк получил деньги от клиента, но ещё не перечислил нам.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions = [
+            "status = 'confirmed'",
+            "payout_date IS NULL",
+            "tbank_confirmed_date IS NOT NULL",
+            f"julianday('now') - julianday(tbank_confirmed_date) >= {days}",
+        ]
+        if since_date:
+            conditions.append(f"order_date >= '{since_date}'")
+        where = " AND ".join(conditions)
+        rows = await (await db.execute(
+            f"SELECT * FROM online_payments WHERE {where} ORDER BY tbank_confirmed_date",
+        )).fetchall()
+        return [dict(r) for r in rows]
 
 
 async def upsert_online_payment(
@@ -230,41 +318,54 @@ async def confirm_online_payment(
 ) -> str:
     """
     Подтверждает оплату из реестра ТБанк.
-    Возвращает результат: 'confirmed', 'mismatch', 'created_confirmed', 'created_mismatch'.
+    iiko_amount — актуальная сумма из iiko (None = заказа нет в iiko).
+    Возвращает: 'confirmed', 'mismatch', 'missing_in_iiko',
+                'created_confirmed', 'created_mismatch', 'created_missing_in_iiko'.
     """
     now = datetime.now(timezone.utc).isoformat()
     async with aiosqlite.connect(DB_PATH) as db:
         row = await (await db.execute(
-            "SELECT id, iiko_amount FROM online_payments WHERE branch = ? AND order_number = ?",
+            "SELECT id, iiko_amount, status FROM online_payments WHERE branch = ? AND order_number = ?",
             (branch, order_number),
         )).fetchone()
 
         if row:
-            db_iiko_amount = row[1]
-            status = "confirmed" if abs(db_iiko_amount - tbank_amount) < 1.0 else "mismatch"
+            _, db_iiko_amount, db_status = row
+            if iiko_amount is not None:
+                # Есть живые данные из iiko — сравниваем их с TBank
+                compare_amount = iiko_amount
+                status = "confirmed" if abs(compare_amount - tbank_amount) < 1.0 else "mismatch"
+                new_iiko_amount = iiko_amount
+            else:
+                # iiko не вернул заказ — это пропущенный в iiko или ещё не попал в OLAP
+                status = "missing_in_iiko"
+                new_iiko_amount = db_iiko_amount
             await db.execute(
                 """UPDATE online_payments SET
-                     status = ?, tbank_amount = ?, tbank_commission = ?,
+                     status = ?, iiko_amount = ?, tbank_amount = ?, tbank_commission = ?,
                      tbank_confirmed_date = ?, tbank_transaction_id = ?, updated_at = ?
                    WHERE branch = ? AND order_number = ?""",
-                (status, tbank_amount, tbank_commission,
+                (status, new_iiko_amount, tbank_amount, tbank_commission,
                  tbank_confirmed_date, tbank_transaction_id, now,
                  branch, order_number),
             )
             await db.commit()
             return status
         else:
-            amt = iiko_amount if iiko_amount is not None else tbank_amount
-            status = "confirmed" if iiko_amount is not None and abs(iiko_amount - tbank_amount) < 1.0 else "missing_in_iiko"
-            if iiko_amount is None:
+            # Новая запись — ТБанк прислал заказ которого нет в трекере
+            if iiko_amount is not None:
+                status = "confirmed" if abs(iiko_amount - tbank_amount) < 1.0 else "mismatch"
+                stored_iiko = iiko_amount
+            else:
                 status = "missing_in_iiko"
+                stored_iiko = tbank_amount
             await db.execute(
                 """INSERT INTO online_payments
                    (branch, order_number, order_date, iiko_amount, status,
                     tbank_amount, tbank_commission, tbank_confirmed_date, tbank_transaction_id,
                     created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (branch, order_number, tbank_confirmed_date, amt, status,
+                (branch, order_number, tbank_confirmed_date, stored_iiko, status,
                  tbank_amount, tbank_commission, tbank_confirmed_date, tbank_transaction_id,
                  now, now),
             )
@@ -272,28 +373,77 @@ async def confirm_online_payment(
             return f"created_{status}"
 
 
-async def get_pending_payments(max_age_days: int | None = None) -> list[dict]:
-    """Возвращает все pending-оплаты, опционально старше max_age_days."""
+async def get_tracking_summary(since_date: str | None = None) -> dict[str, dict[str, dict]]:
+    """
+    Сводка по онлайн-оплатам: сколько confirmed/pending по точке и дате.
+    since_date — ISO-дата, нижняя граница (включительно). None = без ограничения.
+    Возвращает: {"Барнаул_1 Ана": {"2026-02-24": {"confirmed": 10, "pending": 5, "total": 15, "amount_pending": 8500.0}}}
+    """
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        if max_age_days is not None:
+        if since_date:
             rows = await (await db.execute(
-                """SELECT * FROM online_payments
-                   WHERE status = 'pending'
-                     AND julianday('now') - julianday(order_date) >= ?
-                   ORDER BY order_date""",
-                (max_age_days,),
+                """SELECT branch, order_date, status, COUNT(*) cnt, COALESCE(SUM(iiko_amount), 0) total_amt
+                   FROM online_payments
+                   WHERE order_date >= ?
+                   GROUP BY branch, order_date, status
+                   ORDER BY branch, order_date DESC""",
+                (since_date,),
             )).fetchall()
         else:
             rows = await (await db.execute(
-                "SELECT * FROM online_payments WHERE status = 'pending' ORDER BY order_date",
+                """SELECT branch, order_date, status, COUNT(*) cnt, COALESCE(SUM(iiko_amount), 0) total_amt
+                   FROM online_payments
+                   GROUP BY branch, order_date, status
+                   ORDER BY branch, order_date DESC"""
             )).fetchall()
+        result: dict[str, dict[str, dict]] = {}
+        for r in rows:
+            b, d, s = r["branch"], r["order_date"], r["status"]
+            if b not in result:
+                result[b] = {}
+            if d not in result[b]:
+                result[b][d] = {"confirmed": 0, "pending": 0, "missing": 0, "amount_pending": 0.0}
+            if s == "confirmed":
+                result[b][d]["confirmed"] += r["cnt"]
+            elif s == "pending":
+                result[b][d]["pending"] += r["cnt"]
+                result[b][d]["amount_pending"] += float(r["total_amt"])
+            elif s == "missing_in_iiko":
+                result[b][d]["missing"] += r["cnt"]
+        return result
+
+
+async def get_pending_payments(
+    max_age_days: int | None = None,
+    since_date: str | None = None,
+) -> list[dict]:
+    """
+    Возвращает pending-оплаты.
+    max_age_days — только старше N дней (для overdue).
+    since_date   — нижняя граница order_date (ISO), None = без ограничения.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        conditions = ["status = 'pending'"]
+        params: list = []
+        if since_date:
+            conditions.append("order_date >= ?")
+            params.append(since_date)
+        if max_age_days is not None:
+            conditions.append("julianday('now') - julianday(order_date) >= ?")
+            params.append(max_age_days)
+        where = " AND ".join(conditions)
+        rows = await (await db.execute(
+            f"SELECT * FROM online_payments WHERE {where} ORDER BY order_date",
+            params,
+        )).fetchall()
         return [dict(r) for r in rows]
 
 
-async def get_overdue_payments(days: int = 4) -> list[dict]:
+async def get_overdue_payments(days: int = 4, since_date: str | None = None) -> list[dict]:
     """Заказы pending дольше N дней."""
-    return await get_pending_payments(max_age_days=days)
+    return await get_pending_payments(max_age_days=days, since_date=since_date)
 
 
 async def save_tbank_registry_log(

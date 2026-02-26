@@ -306,19 +306,35 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
         logger.warning(f"[bank_statement] db log: {e}")
 
 
-async def _handle_tbank_registry(chat_id: int, tg_doc: dict, user_id: int = 0) -> None:
-    """Обработка реестра ТБанк: скачать, проверить формат, сверить с iiko."""
-    file_id = tg_doc.get("file_id", "")
-    file_name = tg_doc.get("file_name", "")
+async def _handle_tbank_payout(chat_id: int, file_name: str, raw: bytes, user_id: int = 0) -> None:
+    """Обработка отчёта по выплатам ТБанк."""
+    await _send(chat_id, f"📥 Обрабатываю выплаты ТБанк <b>{html.escape(file_name)}</b>...")
 
-    raw = await _download_tg_file(file_id)
-    if not raw:
-        await _send(chat_id, "❌ Не удалось скачать файл")
+    try:
+        result = await tbank_reconciliation.process_payout(
+            data=raw,
+            user_id=user_id,
+            chat_id=chat_id,
+            filename=file_name,
+        )
+    except Exception as e:
+        logger.error(f"tbank_payout: {e}", exc_info=True)
+        await _send(chat_id, f"❌ Ошибка обработки: {html.escape(str(e))}")
         return
 
-    if not tbank_reconciliation.is_tbank_registry(raw):
+    if "error" in result:
+        await _send(chat_id, f"❌ {html.escape(result['error'])}")
         return
 
+    report = result.get("report", "")
+    if report:
+        await _send(chat_id, report)
+
+    await _send(chat_id, "✅ Выплаты зафиксированы")
+
+
+async def _handle_tbank_registry(chat_id: int, file_name: str, raw: bytes, user_id: int = 0) -> None:
+    """Обработка реестра ТБанк: сверить с iiko."""
     await _send(chat_id, f"📥 Обрабатываю реестр ТБанк <b>{html.escape(file_name)}</b>...")
 
     try:
@@ -1808,9 +1824,15 @@ async def poll_analytics_bot() -> None:
                         await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
                 elif file_name.lower().endswith(".xlsx"):
                     try:
-                        await _handle_tbank_registry(chat_id, tg_doc, user_id=user_id)
+                        raw_xlsx = await _download_tg_file(tg_doc.get("file_id", ""))
+                        if not raw_xlsx:
+                            await _send(chat_id, "❌ Не удалось скачать файл")
+                        elif tbank_reconciliation.is_tbank_payout(raw_xlsx):
+                            await _handle_tbank_payout(chat_id, file_name, raw_xlsx, user_id=user_id)
+                        elif tbank_reconciliation.is_tbank_registry(raw_xlsx):
+                            await _handle_tbank_registry(chat_id, file_name, raw_xlsx, user_id=user_id)
                     except Exception as e:
-                        logger.error(f"[tbank_registry] {e}", exc_info=True)
+                        logger.error(f"[tbank_xlsx] {e}", exc_info=True)
                         await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
             continue
 

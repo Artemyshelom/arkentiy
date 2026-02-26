@@ -41,6 +41,7 @@ from app.clients.iiko_bo_events import (
 )
 from app.config import get_settings
 from app.db import DB_PATH, BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
+from app.database_pg import get_pool
 from app.jobs import access_manager
 from app.jobs.daily_report import _format_branch_report, _fmt_money
 from app.jobs.iiko_status_report import (

@@ -7,6 +7,7 @@ PostgreSQL через asyncpg — мультитенантная версия da
 Экспортирует те же имена что database.py — замена drop-in.
 """
 
+import datetime as _dt
 import hashlib
 import json
 import logging
@@ -14,6 +15,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import asyncpg
+
+
+def _to_date(s: str | None) -> _dt.date | None:
+    """Конвертирует ISO-строку даты в datetime.date для asyncpg."""
+    if not s:
+        return None
+    try:
+        return _dt.date.fromisoformat(str(s)[:10])
+    except (ValueError, TypeError):
+        return None
 
 logger = logging.getLogger(__name__)
 
@@ -199,6 +210,12 @@ async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | 
 async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
     if not rows:
         return
+    # #region agent log
+    _sample = rows[0] if rows else {}
+    _d_raw = _sample.get("date")
+    _d_conv = _to_date(_d_raw)
+    logger.info(f"[DBG-6d218f] upsert_orders_batch rows={len(rows)} date_raw={_d_raw!r} date_type={type(_d_raw).__name__} date_converted={_d_conv!r} date_converted_type={type(_d_conv).__name__}")
+    # #endregion
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
@@ -209,12 +226,12 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                         planned_time, actual_time, is_self_service,
                         date, is_late, late_minutes,
                         client_name, client_phone, delivery_address, items,
-                        ready_time, comment, operator, opened_at,
+                        ready_time, cooked_time, comment, operator, opened_at,
                         has_problem, problem_comment,
                         payment_type, bonus_accrued, source, return_sum, service_charge,
                         cancel_reason, cancel_comment, updated_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,now())
+                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,now())
                        ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
                          status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
                          planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
@@ -223,6 +240,7 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                          client_name=EXCLUDED.client_name, client_phone=EXCLUDED.client_phone,
                          delivery_address=EXCLUDED.delivery_address, items=EXCLUDED.items,
                          ready_time=COALESCE(EXCLUDED.ready_time, orders_raw.ready_time),
+                         cooked_time=COALESCE(EXCLUDED.cooked_time, orders_raw.cooked_time),
                          comment=EXCLUDED.comment, operator=EXCLUDED.operator,
                          opened_at=EXCLUDED.opened_at, has_problem=EXCLUDED.has_problem,
                          problem_comment=EXCLUDED.problem_comment,
@@ -233,21 +251,24 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                          updated_at=now()""",
                     tenant_id,
                     r.get("branch_name"), r.get("delivery_num"), r.get("status"),
-                    r.get("courier"), r.get("sum"),
+                    r.get("courier"), float(r.get("sum") or 0),
                     r.get("planned_time"), r.get("actual_time"),
                     bool(r.get("is_self_service", False)),
-                    r.get("date"),
+                    _to_date(r.get("date")),
                     bool(r.get("is_late", False)),
                     float(r.get("late_minutes") or 0),
                     r.get("client_name"), r.get("client_phone"),
                     r.get("delivery_address"), r.get("items"),
-                    r.get("ready_time"), r.get("comment"), r.get("operator"),
+                    r.get("ready_time"), r.get("cooked_time") or None, r.get("comment"), r.get("operator"),
                     r.get("opened_at"),
                     bool(r.get("has_problem", False)),
-                    r.get("problem_comment"),
-                    r.get("payment_type"), r.get("bonus_accrued"),
-                    r.get("source"), r.get("return_sum"), r.get("service_charge"),
-                    r.get("cancel_reason"), r.get("cancel_comment"),
+                    r.get("problem_comment") or None,
+                    r.get("payment_type"),
+                    float(r.get("bonus_accrued")) if r.get("bonus_accrued") is not None else None,
+                    r.get("source"),
+                    float(r.get("return_sum")) if r.get("return_sum") is not None else None,
+                    float(r.get("service_charge")) if r.get("service_charge") is not None else None,
+                    r.get("cancel_reason"), r.get("cancel_comment") or None,
                 )
 
 
@@ -277,14 +298,14 @@ async def upsert_shifts_batch(rows: list[dict], tenant_id: int = 1) -> None:
                     """INSERT INTO shifts_raw
                        (tenant_id, branch_name, employee_id, employee_name, role_class,
                         date, clock_in, clock_out, updated_at)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+                       VALUES ($1,$2,$3,$4,$5,$6::date,$7,$8,now())
                        ON CONFLICT (tenant_id, branch_name, employee_id, clock_in) DO UPDATE SET
                          employee_name=EXCLUDED.employee_name, role_class=EXCLUDED.role_class,
                          date=EXCLUDED.date, clock_out=EXCLUDED.clock_out, updated_at=now()""",
                     tenant_id,
                     r.get("branch_name"), r.get("employee_id"),
                     r.get("employee_name"), r.get("role_class"),
-                    r.get("date"), r.get("clock_in"), r.get("clock_out"),
+                    _to_date(r.get("date")), r.get("clock_in"), r.get("clock_out"),
                 )
 
 
@@ -294,7 +315,7 @@ async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int = 1) 
         """SELECT employee_id, employee_name, role_class, clock_in, clock_out
            FROM shifts_raw WHERE tenant_id = $1 AND branch_name = $2 AND date = $3
            ORDER BY clock_in""",
-        tenant_id, branch_name, date_iso,
+        tenant_id, branch_name, _to_date(date_iso),
     )
     return [dict(r) for r in rows]
 
@@ -303,7 +324,7 @@ async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
     pool = get_pool()
     result = await pool.execute(
         "UPDATE shifts_raw SET clock_out = clock_in WHERE tenant_id = $1 AND date < $2 AND clock_out IS NULL",
-        tenant_id, today_iso,
+        tenant_id, _to_date(today_iso),
     )
     return int(result.split()[-1])
 
@@ -325,7 +346,7 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                         cogs_pct, sailplay, discount_sum, discount_types,
                         delivery_count, pickup_count, late_count, total_delivered,
                         late_percent, avg_late_min, cooks_count, couriers_count)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
                        ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
                          orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
                          avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
@@ -337,7 +358,7 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                          cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
                          updated_at=now()""",
                     tenant_id,
-                    r.get("branch_name"), r.get("date"),
+                    r.get("branch_name"), _to_date(r.get("date")),
                     r.get("orders_count", 0), r.get("revenue", 0), r.get("avg_check", 0),
                     r.get("cogs_pct"), r.get("sailplay"), r.get("discount_sum"),
                     r.get("discount_types"),
@@ -352,7 +373,7 @@ async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT * FROM daily_stats WHERE tenant_id = $1 AND branch_name = $2 AND date = $3",
-        tenant_id, branch_name, date_iso,
+        tenant_id, branch_name, _to_date(date_iso),
     )
     return dict(row) if row else None
 

@@ -851,6 +851,362 @@ async def upsert_branch_credential(
 
 
 # =====================================================================
+# Агрегаты orders_raw (порт из database.py)
+# =====================================================================
+
+# Условия заказов «на точное время» — PG-совместимые
+_EXACT_TIME_CONDITIONS_PG = """(
+        LOWER(COALESCE(comment, '')) LIKE '%точн%'
+        OR LOWER(COALESCE(comment, '')) LIKE '%тчн%'
+        OR LOWER(COALESCE(comment, '')) LIKE '%предзаказ%'
+        OR (planned_time != '' AND planned_time IS NOT NULL
+            AND opened_at != '' AND opened_at IS NOT NULL
+            AND EXTRACT(EPOCH FROM (planned_time::timestamp
+                - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60 > 150)
+        OR (service_print_time != '' AND service_print_time IS NOT NULL
+            AND opened_at != '' AND opened_at IS NOT NULL
+            AND EXTRACT(EPOCH FROM (service_print_time::timestamp
+                - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60 > 90)
+        OR (cooked_time != '' AND cooked_time IS NOT NULL
+            AND opened_at != '' AND opened_at IS NOT NULL
+            AND EXTRACT(EPOCH FROM (cooked_time::timestamp
+                - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60 > 210)
+        OR (send_time != '' AND send_time IS NOT NULL
+            AND cooked_time != '' AND cooked_time IS NOT NULL
+            AND actual_time != '' AND actual_time IS NOT NULL
+            AND EXTRACT(EPOCH FROM (send_time::timestamp - cooked_time::timestamp)) / 60 > 120
+            AND EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
+                - send_time::timestamp)) / 60 < 5)
+    )"""
+
+_EXACT_TIME_FILTER_PG = f"\n    AND NOT {_EXACT_TIME_CONDITIONS_PG}\n"
+
+
+async def aggregate_orders_today(branch_name: str, date_iso: str) -> dict:
+    """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + времена)."""
+    pool = get_pool()
+
+    time_row = await pool.fetchrow(
+        f"""SELECT
+            AVG(CASE
+                WHEN cooked_time != '' AND cooked_time IS NOT NULL
+                  AND opened_at != '' AND opened_at IS NOT NULL
+                  AND sum >= 200
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (cooked_time::timestamp
+                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                         BETWEEN 1 AND 120
+                    THEN EXTRACT(EPOCH FROM (cooked_time::timestamp
+                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                END
+            END) AS avg_cooking_min,
+            AVG(CASE
+                WHEN send_time != '' AND send_time IS NOT NULL
+                  AND cooked_time != '' AND cooked_time IS NOT NULL
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (send_time::timestamp
+                         - cooked_time::timestamp)) / 60
+                         BETWEEN 0 AND 120
+                    THEN EXTRACT(EPOCH FROM (send_time::timestamp
+                         - cooked_time::timestamp)) / 60
+                END
+            END) AS avg_wait_min,
+            AVG(CASE
+                WHEN actual_time != '' AND actual_time IS NOT NULL
+                  AND send_time != '' AND send_time IS NOT NULL
+                  AND is_self_service = false
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
+                         - send_time::timestamp)) / 60
+                         BETWEEN 1 AND 120
+                    THEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
+                         - send_time::timestamp)) / 60
+                END
+            END) AS avg_delivery_min
+        FROM orders_raw
+        WHERE branch_name = $1 AND date::text = $2
+          AND status != 'Отменена'
+          {_EXACT_TIME_FILTER_PG}""",
+        branch_name, date_iso,
+    )
+
+    result = dict(time_row) if time_row else {}
+
+    dt_rows = await pool.fetch(
+        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text = $2
+             AND discount_type IS NOT NULL AND discount_type != ''
+             AND status != 'Отменена'
+           GROUP BY discount_type
+           ORDER BY total DESC""",
+        branch_name, date_iso,
+    )
+
+    result["discount_types_agg"] = [
+        {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+        for r in dt_rows
+    ] if dt_rows else []
+
+    for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min"):
+        v = result.get(k)
+        if v is not None:
+            result[k] = round(float(v), 1)
+
+    return result
+
+
+async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> dict:
+    """Агрегирует данные из orders_raw для daily_stats."""
+    pool = get_pool()
+
+    row = await pool.fetchrow(
+        """SELECT
+            SUM(CASE WHEN is_late = true AND is_self_service = false THEN 1 ELSE 0 END)
+                AS late_delivery_count,
+            SUM(CASE WHEN is_late = true AND is_self_service = true THEN 1 ELSE 0 END)
+                AS late_pickup_count,
+            SUM(CASE WHEN is_self_service = false
+                     AND status IN ('Доставлена','Закрыта') THEN 1 ELSE 0 END)
+                AS total_delivery_count,
+            AVG(CASE WHEN is_late = true AND is_self_service = false
+                     THEN late_minutes END)
+                AS avg_late_min
+        FROM orders_raw
+        WHERE branch_name = $1 AND date::text = $2
+          AND status != 'Отменена'""",
+        branch_name, date_iso,
+    )
+
+    result = dict(row) if row else {}
+
+    time_row = await pool.fetchrow(
+        f"""SELECT
+            AVG(CASE
+                WHEN cooked_time != '' AND cooked_time IS NOT NULL
+                  AND opened_at != '' AND opened_at IS NOT NULL
+                  AND sum >= 200
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (cooked_time::timestamp
+                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                         BETWEEN 1 AND 120
+                    THEN EXTRACT(EPOCH FROM (cooked_time::timestamp
+                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                END
+            END) AS avg_cooking_min,
+            AVG(CASE
+                WHEN send_time != '' AND send_time IS NOT NULL
+                  AND cooked_time != '' AND cooked_time IS NOT NULL
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (send_time::timestamp
+                         - cooked_time::timestamp)) / 60
+                         BETWEEN 0 AND 120
+                    THEN EXTRACT(EPOCH FROM (send_time::timestamp
+                         - cooked_time::timestamp)) / 60
+                END
+            END) AS avg_wait_min,
+            AVG(CASE
+                WHEN actual_time != '' AND actual_time IS NOT NULL
+                  AND send_time != '' AND send_time IS NOT NULL
+                  AND is_self_service = false
+                THEN CASE
+                    WHEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
+                         - send_time::timestamp)) / 60
+                         BETWEEN 1 AND 120
+                    THEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
+                         - send_time::timestamp)) / 60
+                END
+            END) AS avg_delivery_min
+        FROM orders_raw
+        WHERE branch_name = $1 AND date::text = $2
+          AND status != 'Отменена'
+          {_EXACT_TIME_FILTER_PG}""",
+        branch_name, date_iso,
+    )
+
+    if time_row:
+        result.update(dict(time_row))
+
+    exact_row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS exact_time_count
+        FROM orders_raw
+        WHERE branch_name = $1 AND date::text = $2
+          AND status != 'Отменена'
+          AND {_EXACT_TIME_CONDITIONS_PG}""",
+        branch_name, date_iso,
+    )
+
+    if exact_row:
+        result["exact_time_count"] = exact_row["exact_time_count"] or 0
+
+    dt_rows = await pool.fetch(
+        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text = $2
+             AND discount_type IS NOT NULL AND discount_type != ''
+             AND status != 'Отменена'
+           GROUP BY discount_type
+           ORDER BY total DESC""",
+        branch_name, date_iso,
+    )
+
+    result["discount_types_agg"] = [
+        {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+        for r in dt_rows
+    ] if dt_rows else []
+
+    staff_rows = await pool.fetch(
+        """SELECT role_class, COUNT(DISTINCT employee_id) as cnt
+           FROM shifts_raw
+           WHERE branch_name = $1 AND date::text = $2
+           GROUP BY role_class""",
+        branch_name, date_iso,
+    )
+    staff = {r["role_class"]: r["cnt"] for r in staff_rows}
+    result["cooks_today"] = staff.get("cook", 0)
+    result["couriers_today"] = staff.get("courier", 0)
+
+    for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min"):
+        v = result.get(k)
+        if v is not None:
+            result[k] = round(float(v), 1)
+
+    return result
+
+
+async def get_period_stats(branch_name: str, date_from: str, date_to: str) -> dict | None:
+    """Агрегирует daily_stats за период [date_from, date_to] для одной точки."""
+    import json as _json
+    pool = get_pool()
+
+    row = await pool.fetchrow(
+        """SELECT
+            SUM(orders_count) AS orders_count,
+            SUM(revenue) AS revenue,
+            SUM(discount_sum) AS discount_sum,
+            SUM(sailplay) AS sailplay,
+            SUM(delivery_count) AS delivery_count,
+            SUM(pickup_count) AS pickup_count,
+            SUM(late_count) AS late_count,
+            SUM(total_delivered) AS total_delivered,
+            SUM(COALESCE(late_delivery_count, 0)) AS late_delivery_count,
+            SUM(COALESCE(late_pickup_count, 0)) AS late_pickup_count,
+            SUM(cooks_count) AS cooks_sum,
+            SUM(couriers_count) AS couriers_sum,
+            COUNT(*) AS days_count,
+            CASE WHEN SUM(revenue) > 0
+                 THEN SUM(cogs_pct * revenue) / SUM(revenue)
+            END AS cogs_pct,
+            AVG(avg_late_min) AS avg_late_min,
+            AVG(avg_cooking_min) AS avg_cooking_min,
+            AVG(avg_wait_min) AS avg_wait_min,
+            AVG(avg_delivery_min) AS avg_delivery_min,
+            SUM(COALESCE(exact_time_count, 0)) AS exact_time_count
+        FROM daily_stats
+        WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3""",
+        branch_name, date_from, date_to,
+    )
+
+    if not row or not row["revenue"]:
+        return None
+
+    result = dict(row)
+    rev = result["revenue"] or 0
+    chk = result["orders_count"] or 0
+    result["avg_check"] = round(rev / chk) if chk else 0
+    days = result.pop("days_count", 1) or 1
+    result["cooks_count"] = round((result.pop("cooks_sum", 0) or 0) / days)
+    result["couriers_count"] = round((result.pop("couriers_sum", 0) or 0) / days)
+
+    for k in ("cogs_pct", "avg_late_min", "avg_cooking_min", "avg_wait_min", "avg_delivery_min"):
+        v = result.get(k)
+        if v is not None:
+            result[k] = round(float(v), 1 if k != "cogs_pct" else 2)
+
+    dt_rows = await pool.fetch(
+        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
+             AND discount_type IS NOT NULL AND discount_type != ''
+             AND status != 'Отменена'
+           GROUP BY discount_type
+           ORDER BY total DESC""",
+        branch_name, date_from, date_to,
+    )
+
+    result["discount_types"] = _json.dumps(
+        [{"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+         for r in dt_rows],
+        ensure_ascii=False,
+    ) if dt_rows else "[]"
+
+    return result
+
+
+async def get_exact_time_orders(
+    branch_name: str | None,
+    date_iso: str,
+    branch_names: list[str] | None = None,
+) -> list[dict]:
+    """Возвращает заказы, определённые как 'на точное время' для даты."""
+    pool = get_pool()
+    conditions = [f"date::text = $1", "status != 'Отменена'"]
+    params: list = [date_iso]
+
+    if branch_name:
+        params.append(branch_name)
+        conditions.append(f"branch_name = ${len(params)}")
+    elif branch_names:
+        params.append(branch_names)
+        conditions.append(f"branch_name = ANY(${len(params)})")
+
+    conditions.append(_EXACT_TIME_CONDITIONS_PG)
+    where = " AND ".join(conditions)
+
+    rows = await pool.fetch(
+        f"""SELECT delivery_num, branch_name, sum, comment,
+                   opened_at, planned_time, cooked_time, send_time,
+                   actual_time, service_print_time, is_self_service
+            FROM orders_raw WHERE {where}
+            ORDER BY opened_at""",
+        *params,
+    )
+    return [dict(r) for r in rows]
+
+
+# =====================================================================
+# Стабы tbank-функций (таблицы не в PG-схеме, jobs защищены BACKEND-guard)
+# =====================================================================
+
+async def save_bank_statement_log(*args, **kwargs) -> None:
+    logger.debug("save_bank_statement_log: stub in PG mode")
+
+async def confirm_payout(*args, **kwargs) -> None:
+    logger.debug("confirm_payout: stub in PG mode")
+
+async def record_chargeback(*args, **kwargs) -> None:
+    logger.debug("record_chargeback: stub in PG mode")
+
+async def get_payout_delayed(*args, **kwargs) -> list:
+    return []
+
+async def get_pending_payments(*args, **kwargs) -> list:
+    return []
+
+async def get_overdue_payments(*args, **kwargs) -> list:
+    return []
+
+async def get_tracking_summary(*args, **kwargs) -> dict:
+    return {}
+
+async def upsert_online_payment(*args, **kwargs) -> None:
+    logger.debug("upsert_online_payment: stub in PG mode")
+
+async def confirm_online_payment(*args, **kwargs) -> None:
+    logger.debug("confirm_online_payment: stub in PG mode")
+
+
+# =====================================================================
 # Совместимость: DB_PATH и BACKEND для файлов с BACKEND-guard
 # =====================================================================
 

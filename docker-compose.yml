@@ -7,13 +7,14 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      # Постоянное хранилище — переживает пересборку контейнера
       - ./data:/app/data
       - ./logs:/app/logs
-      # Google Service Account JSON (положить рядом с docker-compose.yml)
       - ./secrets:/app/secrets:ro
     environment:
       - TZ=Europe/Moscow
+    depends_on:
+      postgres:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
@@ -25,3 +26,28 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
+
+  postgres:
+    image: mirror.gcr.io/library/postgres:16-alpine
+    container_name: ebidoebi-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ebidoebi
+      POSTGRES_USER: ebidoebi
+      POSTGRES_PASSWORD: ${PG_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ebidoebi"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  pgdata:

@@ -18,7 +18,7 @@ import httpx
 from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import _states
 from app.config import get_settings
-from app.db import DB_PATH, BACKEND
+from app.db import BACKEND, get_pool
 
 logger = logging.getLogger(__name__)
 
@@ -95,9 +95,6 @@ async def job_cancel_sync() -> None:
     Основной job: опрашивает все BO-серверы, получает отменённые заказы,
     обновляет orders_raw.status + cancel_reason, убирает из _states.
     """
-    if BACKEND != "sqlite":
-        logger.warning("cancel_sync: PG backend не реализован, пропуск")
-        return
     settings = get_settings()
     now_local = (
         datetime.now(tz=timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET)
@@ -120,48 +117,40 @@ async def job_cancel_sync() -> None:
             if c["branch_name"] in branch_names:
                 all_cancelled.append(c)
 
-    import aiosqlite
-
+    pool = get_pool()
     updated = 0
     if all_cancelled:
-        async with aiosqlite.connect(DB_PATH) as db:
+        async with pool.acquire() as conn:
             for c in all_cancelled:
-                now_utc_str = datetime.now(timezone.utc).isoformat()
-                cursor = await db.execute(
+                result = await conn.execute(
                     """UPDATE orders_raw
                        SET status = 'Отменена',
-                           cancel_reason = ?,
-                           payment_type = COALESCE(NULLIF(?, ''), payment_type),
-                           updated_at = ?
-                       WHERE branch_name = ? AND delivery_num = ?
+                           cancel_reason = $1,
+                           payment_type = COALESCE(NULLIF($2, ''), payment_type),
+                           updated_at = now()
+                       WHERE branch_name = $3 AND delivery_num = $4
                          AND status != 'Отменена'""",
-                    (
-                        c["cancel_cause"],
-                        c.get("payment_type", ""),
-                        now_utc_str,
-                        c["branch_name"],
-                        c["delivery_num"],
-                    ),
+                    c["cancel_cause"],
+                    c.get("payment_type", ""),
+                    c["branch_name"],
+                    c["delivery_num"],
                 )
-                updated += cursor.rowcount
-                if cursor.rowcount == 0:
-                    await db.execute(
+                rows_affected = int(result.split()[-1])
+                updated += rows_affected
+                if rows_affected == 0:
+                    await conn.execute(
                         """UPDATE orders_raw
-                           SET cancel_reason = ?,
-                               payment_type = COALESCE(NULLIF(?, ''), payment_type),
-                               updated_at = ?
-                           WHERE branch_name = ? AND delivery_num = ?
+                           SET cancel_reason = $1,
+                               payment_type = COALESCE(NULLIF($2, ''), payment_type),
+                               updated_at = now()
+                           WHERE branch_name = $3 AND delivery_num = $4
                              AND status = 'Отменена'
                              AND (cancel_reason IS NULL OR cancel_reason = '')""",
-                        (
-                            c["cancel_cause"],
-                            c.get("payment_type", ""),
-                            now_utc_str,
-                            c["branch_name"],
-                            c["delivery_num"],
-                        ),
+                        c["cancel_cause"],
+                        c.get("payment_type", ""),
+                        c["branch_name"],
+                        c["delivery_num"],
                     )
-            await db.commit()
 
         for c in all_cancelled:
             state = _states.get(c["branch_name"])
@@ -172,21 +161,15 @@ async def job_cancel_sync() -> None:
             logger.info(f"cancel_sync: обновлено {updated} отменённых заказов из OLAP v2")
 
     # --- Фаза 2: зависшие заказы старше 2 дней ---
-    # Заказы с не-финальным статусом (Новая, В пути, Готовится и т.д.) старше 2 дней
-    # точно завершены в iiko. Проверяем через OLAP: если отменены — ставим "Отменена",
-    # если нет — значит закрыты (доставлены/выданы).
     stale_cutoff = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            cursor = await db.execute(
-                """SELECT branch_name, delivery_num, date
-                   FROM orders_raw
-                   WHERE date < ?
-                     AND status NOT IN ('Закрыта', 'Отменена', 'Не подтверждена')
-                """,
-                (stale_cutoff,),
-            )
-            stale_rows = await cursor.fetchall()
+        stale_rows = await pool.fetch(
+            """SELECT branch_name, delivery_num, date::text AS order_date
+               FROM orders_raw
+               WHERE date::text < $1
+                 AND status NOT IN ('Закрыта', 'Отменена', 'Не подтверждена')""",
+            stale_cutoff,
+        )
 
         if stale_rows:
             cancelled_lookup: dict[tuple[str, str], dict] = {
@@ -194,7 +177,7 @@ async def job_cancel_sync() -> None:
                 for c in all_cancelled
             }
 
-            stale_dates = sorted({r[2] for r in stale_rows})
+            stale_dates = sorted({r["order_date"] for r in stale_rows})
             if stale_dates:
                 extra_from = stale_dates[0]
                 extra_to = stale_cutoff
@@ -204,33 +187,32 @@ async def job_cancel_sync() -> None:
                         if c["branch_name"] in branch_names:
                             cancelled_lookup[(c["branch_name"], c["delivery_num"])] = c
 
-                now_utc = datetime.now(timezone.utc).isoformat()
                 stale_updated = 0
-                async with aiosqlite.connect(DB_PATH) as db:
-                    for branch, dnum, dt in stale_rows:
+                async with pool.acquire() as conn:
+                    for r in stale_rows:
+                        branch, dnum = r["branch_name"], r["delivery_num"]
                         key = (branch, dnum)
                         if key in cancelled_lookup:
                             c = cancelled_lookup[key]
-                            await db.execute(
+                            await conn.execute(
                                 """UPDATE orders_raw
                                    SET status='Отменена',
-                                       cancel_reason=COALESCE(NULLIF(?, ''), cancel_reason),
-                                       payment_type=COALESCE(NULLIF(?, ''), payment_type),
-                                       updated_at=?
-                                   WHERE branch_name=? AND delivery_num=?
+                                       cancel_reason=COALESCE(NULLIF($1, ''), cancel_reason),
+                                       payment_type=COALESCE(NULLIF($2, ''), payment_type),
+                                       updated_at=now()
+                                   WHERE branch_name=$3 AND delivery_num=$4
                                      AND status NOT IN ('Закрыта','Отменена')""",
-                                (c.get("cancel_cause", ""), c.get("payment_type", ""),
-                                 now_utc, branch, dnum),
+                                c.get("cancel_cause", ""), c.get("payment_type", ""),
+                                branch, dnum,
                             )
                         else:
-                            await db.execute(
-                                """UPDATE orders_raw SET status='Закрыта', updated_at=?
-                                   WHERE branch_name=? AND delivery_num=?
+                            await conn.execute(
+                                """UPDATE orders_raw SET status='Закрыта', updated_at=now()
+                                   WHERE branch_name=$1 AND delivery_num=$2
                                      AND status NOT IN ('Закрыта','Отменена')""",
-                                (now_utc, branch, dnum),
+                                branch, dnum,
                             )
                         stale_updated += 1
-                    await db.commit()
 
                 if stale_updated:
                     logger.info(f"cancel_sync: обновлено {stale_updated} зависших заказов")

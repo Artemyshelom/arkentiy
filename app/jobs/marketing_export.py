@@ -22,16 +22,41 @@ import re
 from datetime import date, datetime
 from typing import Optional
 
-import aiosqlite
 import httpx
 
 from app.config import get_settings
-from app.db import DB_PATH, BACKEND
+from app.db import BACKEND, get_pool
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
 DEFAULT_LATE_MINUTES = 5  # базовый порог опоздания (мин)
+
+
+def _to_pg_sql(sql: str) -> str:
+    """Конвертирует SQLite-SQL (? placeholders, is_late=1) в PostgreSQL-совместимый."""
+    # ? → $1, $2, ...
+    counter = 0
+    result = []
+    i = 0
+    while i < len(sql):
+        if sql[i] == "?" and (i == 0 or sql[i - 1] != "'") and (i + 1 >= len(sql) or sql[i + 1] != "'"):
+            counter += 1
+            result.append(f"${counter}")
+        else:
+            result.append(sql[i])
+        i += 1
+    pg = "".join(result)
+    # SQLite boolean 0/1 → PG true/false
+    pg = pg.replace("is_late = 1", "is_late = true")
+    pg = pg.replace("is_late = 0", "is_late = false")
+    pg = pg.replace("has_problem = 1", "has_problem = true")
+    pg = pg.replace("has_problem = 0", "has_problem = false")
+    pg = pg.replace("is_self_service = 0", "is_self_service = false")
+    pg = pg.replace("is_self_service = 1", "is_self_service = true")
+    # ROW_NUMBER() outer WHERE без таблицы — убираем лишние алиасы совместимые с PG
+    pg = pg.replace(") WHERE _rn = 1", ") AS _dedup WHERE _rn = 1")
+    return pg
 
 # ---------------------------------------------------------------------------
 # OpenRouter / LLM
@@ -748,16 +773,13 @@ async def run_export(chat_id: int, query_text: str, bot_url: str) -> None:
         return
 
     # 3. Выполняем запрос к БД
-    if BACKEND != "sqlite":
-        await _send_text(bot_url, chat_id, "❌ Экспорт недоступен: PG backend не реализован.")
-        return
+    pg_sql = _to_pg_sql(sql)
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-            async with db.execute(sql, args) as cursor:
-                rows = [dict(r) for r in await cursor.fetchall()]
+        pool = get_pool()
+        pg_rows = await pool.fetch(pg_sql, *args)
+        rows = [dict(r) for r in pg_rows]
     except Exception as e:
-        logger.error(f"[marketing_export] DB error: {e}\nSQL: {sql}\nArgs: {args}", exc_info=True)
+        logger.error(f"[marketing_export] DB error: {e}\nSQL: {pg_sql}\nArgs: {args}", exc_info=True)
         await _send_text(bot_url, chat_id, f"❌ Ошибка запроса к базе данных: <code>{e}</code>")
         return
 

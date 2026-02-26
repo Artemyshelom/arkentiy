@@ -237,14 +237,14 @@ async def get_payment_breakdown(date_from: str, date_to: str) -> dict[str, dict[
     return {k: dict(v) for k, v in result.items()}
 
 
-async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str, float]]:
+async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str, dict]]:
     """
-    Онлайн-заказы (PayType = "Оплата на сайте") по точкам.
+    Онлайн-заказы (ТБанк: Оплата на сайте + СБП) по точкам.
     date_from/date_to в ISO: "2026-02-17" / "2026-02-25" (to exclusive).
-    Возвращает: {"Барнаул_1 Ана": {"90196": 1850.0, "90200": 2300.0, ...}}
+    Возвращает: {"Барнаул_1 Ана": {"90196": {"amount": 1850.0, "date": "2026-02-24"}, ...}}
     """
     logger.info(f"OLAP v2: online orders {date_from} — {date_to}")
-    ONLINE_PAY_TYPES = {"Оплата на сайте"}
+    ONLINE_PAY_TYPES = {"Оплата на сайте", "СБП"}
 
     by_url: dict[str, set[str]] = defaultdict(set)
     for branch in settings.branches:
@@ -252,14 +252,26 @@ async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str,
         if url:
             by_url[url].add(branch["name"])
 
-    result: dict[str, dict[str, float]] = defaultdict(dict)
+    result: dict[str, dict[str, dict]] = defaultdict(dict)
+
+    def _olap_date_to_iso(val: str) -> str:
+        if not val:
+            return ""
+        val = str(val).strip()
+        if len(val) == 10 and val[4] == "-":
+            return val
+        try:
+            parts = val.split(".")
+            return f"{parts[2]}-{parts[1]}-{parts[0]}"
+        except Exception:
+            return val
 
     async def _fetch_online(bo_url: str, target_names: set[str]):
         token = await get_bo_token(bo_url)
         async with httpx.AsyncClient(verify=False) as client:
             rows = await _query_olap_v2(
                 bo_url, token,
-                ["Department", "Delivery.Number", "PayTypes"],
+                ["Department", "Delivery.Number", "PayTypes", "OpenDate.Typed"],
                 ["DishDiscountSumInt"],
                 date_from, date_to, client,
             )
@@ -268,12 +280,16 @@ async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str,
                 if not dept or dept not in target_names:
                     continue
                 pay_type = row.get("PayTypes", "").strip()
-                if pay_type not in ONLINE_PAY_TYPES:
-                    continue
                 order_num = str(row.get("Delivery.Number", "")).strip()
                 amount = float(row.get("DishDiscountSumInt", 0))
+                order_date = _olap_date_to_iso(str(row.get("OpenDate.Typed", "")))
+                if pay_type not in ONLINE_PAY_TYPES:
+                    continue
                 if order_num and amount:
-                    result[dept][order_num] = result[dept].get(order_num, 0) + amount
+                    if order_num in result[dept]:
+                        result[dept][order_num]["amount"] += amount
+                    else:
+                        result[dept][order_num] = {"amount": amount, "date": order_date}
 
     tasks = [_fetch_online(url, names) for url, names in by_url.items()]
     await asyncio.gather(*tasks, return_exceptions=True)

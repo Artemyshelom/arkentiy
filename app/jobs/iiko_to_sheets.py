@@ -26,7 +26,7 @@ from app.clients.google_sheets import (
 )
 from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
-from app.database import (
+from app.db import (
     log_job_finish,
     log_job_start,
     record_data_update,

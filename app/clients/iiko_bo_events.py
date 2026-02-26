@@ -590,7 +590,7 @@ def _session_to_row(branch_name: str, uid: str, s: dict, now: str) -> dict:
 async def _save_to_db(state: BranchState) -> None:
     """Сохраняет текущее состояние точки в SQLite (orders_raw + shifts_raw)."""
     try:
-        from app.database import upsert_orders_batch, upsert_shifts_batch
+        from app.db import upsert_orders_batch, upsert_shifts_batch
         now = datetime.now(timezone.utc).isoformat()
 
         def _get_ready_time(num: str) -> str | None:
@@ -635,7 +635,7 @@ async def _save_to_db(state: BranchState) -> None:
 
 async def _seed_sessions_from_db(state):
     try:
-        from app.database import get_today_shifts
+        from app.db import get_today_shifts
         from datetime import datetime, timezone, timedelta
         now_local = datetime.now(timezone.utc) + timedelta(hours=7)
         if now_local.hour < 6:
@@ -719,7 +719,7 @@ async def _full_load(state: BranchState, client: httpx.AsyncClient) -> None:
     logger.info(
         f"[{state.branch_name}] Full load: {len(events)} событий, revision={max_revision}"
     )
-    from app.database import close_stale_shifts
+    from app.db import close_stale_shifts
     await close_stale_shifts(__import__("datetime").date.today().isoformat())
     await _seed_sessions_from_db(state)
     await _save_to_db(state)

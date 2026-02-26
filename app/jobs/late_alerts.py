@@ -16,7 +16,7 @@ from app.clients.iiko_bo_events import (
     _states,
 )
 from app.config import get_settings
-from app.database import get_alert_chats_for_city, get_client_order_count
+from app.db import get_alert_chats_for_city, get_client_order_count
 
 logger = logging.getLogger(__name__)
 

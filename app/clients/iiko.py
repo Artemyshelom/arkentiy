@@ -15,7 +15,7 @@ from datetime import datetime, timezone, timedelta
 import httpx
 
 from app.config import get_settings
-from app.database import get_iiko_token, set_iiko_token
+from app.db import get_iiko_token, set_iiko_token
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -154,7 +154,10 @@ async def get_stop_list(city: str) -> list[dict]:
 
 
 async def get_deliveries_today(city: str) -> list[dict]:
-    """Заказы доставки за сегодня для города."""
+    """Заказы доставки за сегодня для города.
+    DEAD CODE: не вызывается нигде. iiko Cloud /deliveries возвращает 0 для ASAP-заказов.
+    Оставлен на случай повторного использования после настройки org_ids.
+    """
     org_id = settings.org_ids.get(city)
     if not org_id:
         return []
@@ -174,9 +177,9 @@ async def get_deliveries_today(city: str) -> list[dict]:
 
 
 async def get_revenue_today(city: str) -> dict:
-    """
-    Выручка за сегодня для города (сумма закрытых заказов доставки).
-    Возвращает: {total: float, orders_count: int, avg_check: float}
+    """Выручка за сегодня для города (сумма закрытых заказов доставки).
+    DEAD CODE: не вызывается нигде. Зависит от get_deliveries_today (тоже не работает).
+    Выручка берётся из OLAP v2 (iiko_bo_olap_v2.py).
     """
     orders = await get_deliveries_today(city)
     total = sum(o.get("sum", 0) for o in orders)

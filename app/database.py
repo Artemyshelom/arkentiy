@@ -30,6 +30,29 @@ from pathlib import Path
 
 
 DB_PATH = Path("/app/data/app.db")
+BACKEND = "sqlite"
+
+
+async def get_active_tenants_with_tokens() -> list[dict]:
+    """SQLite режим: один тенант, токен из переменной окружения."""
+    import os
+    token = os.getenv("TELEGRAM_ANALYTICS_BOT_TOKEN", "")
+    if not token:
+        return []
+    return [{"id": 1, "name": "Ёбидоёби", "slug": "ebidoebi", "bot_token": token}]
+
+
+def get_branches(tenant_id: int = 1) -> list[dict]:
+    """SQLite режим: читает точки из branches.json (tenant_id игнорируется — один тенант)."""
+    import json as _json
+    import os
+    path = Path(os.getenv("BRANCHES_CONFIG_FILE", "/app/secrets/branches.json"))
+    if not path.exists():
+        return []
+    try:
+        return _json.loads(path.read_text(encoding="utf-8"))
+    except (_json.JSONDecodeError, OSError):
+        return []
 
 
 async def init_db() -> None:

@@ -20,7 +20,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 from app.config import get_settings
-from app.database import (
+from app.db import (
     get_all_competitor_items_by_snapshot,
     get_competitor_last_snapshot,
     get_competitor_names,

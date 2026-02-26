@@ -110,9 +110,20 @@ class Settings(BaseSettings):
     @property
     def branches(self) -> list[dict]:
         """
-        Читает конфиг точек из JSON.
-        Каждая точка: {name, dept_id, utc_offset, cloud_org_id?}
+        Читает конфиг точек.
+        PG режим: из in-memory cache (заполняется при init_db из iiko_credentials).
+        SQLite режим: из JSON-файла (обратная совместимость).
         """
+        import os
+        _url = os.getenv("DATABASE_URL", "")
+        if _url.startswith("postgresql://") or _url.startswith("postgres://"):
+            try:
+                from app.db import get_branches as _get_branches
+                cached = _get_branches(1)
+                if cached:
+                    return cached
+            except Exception:
+                pass
         path = Path(self.branches_config_file)
         if not path.exists():
             return []

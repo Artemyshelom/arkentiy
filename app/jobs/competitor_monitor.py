@@ -16,7 +16,7 @@ import httpx
 
 from app.clients.competitor_scraper import MenuItem, scrape_competitor
 from app.config import get_settings
-from app.database import (
+from app.db import (
     create_competitor_snapshot,
     get_second_last_competitor_items,
     log_job_finish,

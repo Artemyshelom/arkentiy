@@ -18,7 +18,7 @@ import httpx
 from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import _states
 from app.config import get_settings
-from app.database import DB_PATH
+from app.db import DB_PATH, BACKEND
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +95,9 @@ async def job_cancel_sync() -> None:
     Основной job: опрашивает все BO-серверы, получает отменённые заказы,
     обновляет orders_raw.status + cancel_reason, убирает из _states.
     """
+    if BACKEND != "sqlite":
+        logger.warning("cancel_sync: PG backend не реализован, пропуск")
+        return
     settings = get_settings()
     now_local = (
         datetime.now(tz=timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET)

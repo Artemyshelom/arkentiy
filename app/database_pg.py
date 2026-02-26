@@ -1,0 +1,858 @@
+"""
+PostgreSQL через asyncpg — мультитенантная версия database.py.
+
+Все функции имеют tenant_id=1 по умолчанию (обратная совместимость).
+Переключение: DATABASE_URL=postgresql://... в .env.
+
+Экспортирует те же имена что database.py — замена drop-in.
+"""
+
+import hashlib
+import json
+import logging
+from datetime import datetime, timezone
+from pathlib import Path
+
+import asyncpg
+
+logger = logging.getLogger(__name__)
+
+_pool: asyncpg.Pool | None = None
+
+MIGRATION_DIR = Path(__file__).parent / "migrations"
+
+
+async def init_db(database_url: str) -> None:
+    """Создаёт пул соединений и применяет миграции."""
+    global _pool
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    logger.info("PostgreSQL pool создан")
+
+    migration_file = MIGRATION_DIR / "001_initial.sql"
+    if migration_file.exists():
+        async with _pool.acquire() as conn:
+            sql = migration_file.read_text()
+            await conn.execute(sql)
+        logger.info("Миграция 001_initial.sql применена")
+
+    await seed_default_tenant()
+
+    import os
+    branches_json = Path(os.getenv("BRANCHES_CONFIG_FILE", "/app/secrets/branches.json"))
+    await seed_branches_from_json(1, branches_json)
+    await load_branches_cache()
+
+
+def get_pool() -> asyncpg.Pool:
+    if _pool is None:
+        raise RuntimeError("PostgreSQL pool не инициализирован — вызовите init_db()")
+    return _pool
+
+
+# =====================================================================
+# iiko_tokens
+# =====================================================================
+
+async def get_iiko_token(city: str, tenant_id: int = 1) -> str | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT token, expires_at FROM iiko_tokens WHERE tenant_id = $1 AND city = $2",
+        tenant_id, city,
+    )
+    if not row:
+        return None
+    if datetime.now(timezone.utc) >= row["expires_at"]:
+        return None
+    return row["token"]
+
+
+async def set_iiko_token(city: str, token: str, expires_at: datetime, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO iiko_tokens (tenant_id, city, token, expires_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT (tenant_id, city) DO UPDATE SET token = $3, expires_at = $4""",
+        tenant_id, city, token, expires_at,
+    )
+
+
+# =====================================================================
+# job_logs
+# =====================================================================
+
+async def log_job_start(job_name: str, tenant_id: int = 1) -> int:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO job_logs (tenant_id, job_name, status) VALUES ($1, $2, 'running')
+           RETURNING id""",
+        tenant_id, job_name,
+    )
+    return row["id"]
+
+
+async def log_job_finish(log_id: int, status: str, error: str | None = None, details: str | None = None) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE job_logs SET finished_at = now(), status = $1, error = $2, details = $3 WHERE id = $4",
+        status, error, details, log_id,
+    )
+
+
+# =====================================================================
+# stoplist_state
+# =====================================================================
+
+def hash_stoplist(items: list) -> str:
+    serialized = json.dumps(items, sort_keys=True, ensure_ascii=False)
+    return hashlib.md5(serialized.encode()).hexdigest()
+
+
+async def get_stoplist_hash(city: str, tenant_id: int = 1) -> str | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT items_hash FROM stoplist_state WHERE tenant_id = $1 AND city = $2",
+        tenant_id, city,
+    )
+    return row["items_hash"] if row else None
+
+
+async def set_stoplist_hash(city: str, items_hash: str, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO stoplist_state (tenant_id, city, items_hash)
+           VALUES ($1, $2, $3)
+           ON CONFLICT (tenant_id, city) DO UPDATE SET items_hash = $3, checked_at = now()""",
+        tenant_id, city, items_hash,
+    )
+
+
+# =====================================================================
+# report_updates
+# =====================================================================
+
+async def record_data_update(date: str, branch: str, field: str, old_value, new_value, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO report_updates (tenant_id, date, branch, field, old_value, new_value)
+           VALUES ($1, $2, $3, $4, $5, $6)""",
+        tenant_id, date, branch, field,
+        str(old_value) if old_value is not None else None,
+        str(new_value) if new_value is not None else None,
+    )
+
+
+async def get_updates_for_date(date: str, tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT * FROM report_updates WHERE tenant_id = $1 AND date = $2 ORDER BY recorded_at",
+        tenant_id, date,
+    )
+    return [dict(r) for r in rows]
+
+
+async def clear_updates_for_date(date: str, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "DELETE FROM report_updates WHERE tenant_id = $1 AND date = $2",
+        tenant_id, date,
+    )
+
+
+# =====================================================================
+# daily_rt_snapshot
+# =====================================================================
+
+async def save_rt_snapshot(
+    branch: str, date: str,
+    delays_late: int, delays_total: int, delays_avg_min: int,
+    cooks_today: int, couriers_today: int,
+    tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO daily_rt_snapshot
+           (tenant_id, branch, date, delays_late, delays_total, delays_avg_min,
+            cooks_today, couriers_today)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           ON CONFLICT (tenant_id, branch, date) DO UPDATE SET
+             delays_late = $4, delays_total = $5, delays_avg_min = $6,
+             cooks_today = $7, couriers_today = $8, saved_at = now()""",
+        tenant_id, branch, date,
+        delays_late, delays_total, delays_avg_min, cooks_today, couriers_today,
+    )
+
+
+async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """SELECT delays_late, delays_total, delays_avg_min, cooks_today, couriers_today
+           FROM daily_rt_snapshot WHERE tenant_id = $1 AND branch = $2 AND date = $3""",
+        tenant_id, branch, date,
+    )
+    return dict(row) if row else None
+
+
+# =====================================================================
+# orders_raw
+# =====================================================================
+
+async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
+    if not rows:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for r in rows:
+                await conn.execute(
+                    """INSERT INTO orders_raw
+                       (tenant_id, branch_name, delivery_num, status, courier, sum,
+                        planned_time, actual_time, is_self_service,
+                        date, is_late, late_minutes,
+                        client_name, client_phone, delivery_address, items,
+                        ready_time, comment, operator, opened_at,
+                        has_problem, problem_comment,
+                        payment_type, bonus_accrued, source, return_sum, service_charge,
+                        cancel_reason, cancel_comment, updated_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,now())
+                       ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
+                         status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
+                         planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
+                         is_self_service=EXCLUDED.is_self_service, date=EXCLUDED.date,
+                         is_late=EXCLUDED.is_late, late_minutes=EXCLUDED.late_minutes,
+                         client_name=EXCLUDED.client_name, client_phone=EXCLUDED.client_phone,
+                         delivery_address=EXCLUDED.delivery_address, items=EXCLUDED.items,
+                         ready_time=COALESCE(EXCLUDED.ready_time, orders_raw.ready_time),
+                         comment=EXCLUDED.comment, operator=EXCLUDED.operator,
+                         opened_at=EXCLUDED.opened_at, has_problem=EXCLUDED.has_problem,
+                         problem_comment=EXCLUDED.problem_comment,
+                         payment_type=EXCLUDED.payment_type, bonus_accrued=EXCLUDED.bonus_accrued,
+                         source=EXCLUDED.source, return_sum=EXCLUDED.return_sum,
+                         service_charge=EXCLUDED.service_charge,
+                         cancel_reason=EXCLUDED.cancel_reason, cancel_comment=EXCLUDED.cancel_comment,
+                         updated_at=now()""",
+                    tenant_id,
+                    r.get("branch_name"), r.get("delivery_num"), r.get("status"),
+                    r.get("courier"), r.get("sum"),
+                    r.get("planned_time"), r.get("actual_time"),
+                    bool(r.get("is_self_service", False)),
+                    r.get("date"),
+                    bool(r.get("is_late", False)),
+                    float(r.get("late_minutes") or 0),
+                    r.get("client_name"), r.get("client_phone"),
+                    r.get("delivery_address"), r.get("items"),
+                    r.get("ready_time"), r.get("comment"), r.get("operator"),
+                    r.get("opened_at"),
+                    bool(r.get("has_problem", False)),
+                    r.get("problem_comment"),
+                    r.get("payment_type"), r.get("bonus_accrued"),
+                    r.get("source"), r.get("return_sum"), r.get("service_charge"),
+                    r.get("cancel_reason"), r.get("cancel_comment"),
+                )
+
+
+async def get_client_order_count(phone: str, tenant_id: int = 1) -> int:
+    if not phone:
+        return 0
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS cnt FROM orders_raw WHERE tenant_id = $1 AND client_phone = $2",
+        tenant_id, phone,
+    )
+    return row["cnt"] if row else 0
+
+
+# =====================================================================
+# shifts_raw
+# =====================================================================
+
+async def upsert_shifts_batch(rows: list[dict], tenant_id: int = 1) -> None:
+    if not rows:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for r in rows:
+                await conn.execute(
+                    """INSERT INTO shifts_raw
+                       (tenant_id, branch_name, employee_id, employee_name, role_class,
+                        date, clock_in, clock_out, updated_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,now())
+                       ON CONFLICT (tenant_id, branch_name, employee_id, clock_in) DO UPDATE SET
+                         employee_name=EXCLUDED.employee_name, role_class=EXCLUDED.role_class,
+                         date=EXCLUDED.date, clock_out=EXCLUDED.clock_out, updated_at=now()""",
+                    tenant_id,
+                    r.get("branch_name"), r.get("employee_id"),
+                    r.get("employee_name"), r.get("role_class"),
+                    r.get("date"), r.get("clock_in"), r.get("clock_out"),
+                )
+
+
+async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT employee_id, employee_name, role_class, clock_in, clock_out
+           FROM shifts_raw WHERE tenant_id = $1 AND branch_name = $2 AND date = $3
+           ORDER BY clock_in""",
+        tenant_id, branch_name, date_iso,
+    )
+    return [dict(r) for r in rows]
+
+
+async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
+    pool = get_pool()
+    result = await pool.execute(
+        "UPDATE shifts_raw SET clock_out = clock_in WHERE tenant_id = $1 AND date < $2 AND clock_out IS NULL",
+        tenant_id, today_iso,
+    )
+    return int(result.split()[-1])
+
+
+# =====================================================================
+# daily_stats
+# =====================================================================
+
+async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None:
+    if not rows:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for r in rows:
+                await conn.execute(
+                    """INSERT INTO daily_stats
+                       (tenant_id, branch_name, date, orders_count, revenue, avg_check,
+                        cogs_pct, sailplay, discount_sum, discount_types,
+                        delivery_count, pickup_count, late_count, total_delivered,
+                        late_percent, avg_late_min, cooks_count, couriers_count)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                       ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
+                         orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
+                         avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
+                         sailplay=EXCLUDED.sailplay, discount_sum=EXCLUDED.discount_sum,
+                         discount_types=EXCLUDED.discount_types,
+                         delivery_count=EXCLUDED.delivery_count, pickup_count=EXCLUDED.pickup_count,
+                         late_count=EXCLUDED.late_count, total_delivered=EXCLUDED.total_delivered,
+                         late_percent=EXCLUDED.late_percent, avg_late_min=EXCLUDED.avg_late_min,
+                         cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
+                         updated_at=now()""",
+                    tenant_id,
+                    r.get("branch_name"), r.get("date"),
+                    r.get("orders_count", 0), r.get("revenue", 0), r.get("avg_check", 0),
+                    r.get("cogs_pct"), r.get("sailplay"), r.get("discount_sum"),
+                    r.get("discount_types"),
+                    r.get("delivery_count", 0), r.get("pickup_count", 0),
+                    r.get("late_count", 0), r.get("total_delivered", 0),
+                    r.get("late_percent", 0), r.get("avg_late_min", 0),
+                    r.get("cooks_count", 0), r.get("couriers_count", 0),
+                )
+
+
+async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM daily_stats WHERE tenant_id = $1 AND branch_name = $2 AND date = $3",
+        tenant_id, branch_name, date_iso,
+    )
+    return dict(row) if row else None
+
+
+# =====================================================================
+# Competitors
+# =====================================================================
+
+async def create_competitor_snapshot(
+    city: str, competitor_name: str, url: str,
+    status: str = "ok", items_count: int = 0, error_msg: str | None = None,
+    tenant_id: int = 1,
+) -> int:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """INSERT INTO competitor_snapshots
+           (tenant_id, city, competitor_name, url, status, items_count, error_msg)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id""",
+        tenant_id, city, competitor_name, url, status, items_count, error_msg,
+    )
+    return row["id"]
+
+
+async def save_competitor_items(
+    snapshot_id: int, city: str, competitor_name: str, items: list[dict],
+    tenant_id: int = 1,
+) -> None:
+    if not items:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for item in items:
+                await conn.execute(
+                    """INSERT INTO competitor_menu_items
+                       (snapshot_id, tenant_id, city, competitor_name, category, name, price, price_old, portion)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                    snapshot_id, tenant_id, city, competitor_name,
+                    item.get("category"), item["name"], item["price"],
+                    item.get("price_old"), item.get("portion"),
+                )
+
+
+async def get_second_last_competitor_items(city: str, competitor_name: str, tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    snapshot_ids = await pool.fetch(
+        """SELECT id FROM competitor_snapshots
+           WHERE tenant_id = $1 AND city = $2 AND competitor_name = $3 AND status = 'ok'
+           ORDER BY scraped_at DESC LIMIT 2""",
+        tenant_id, city, competitor_name,
+    )
+    if len(snapshot_ids) < 2:
+        return []
+    prev_id = snapshot_ids[1]["id"]
+    rows = await pool.fetch(
+        "SELECT name, price, price_old, portion, category FROM competitor_menu_items WHERE snapshot_id = $1",
+        prev_id,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_competitor_names(tenant_id: int = 1) -> list[tuple[str, str]]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT DISTINCT city, competitor_name FROM competitor_snapshots
+           WHERE tenant_id = $1 AND status = 'ok' ORDER BY city, competitor_name""",
+        tenant_id,
+    )
+    return [(r["city"], r["competitor_name"]) for r in rows]
+
+
+async def get_all_competitor_items_by_snapshot(city: str, competitor_name: str, tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT i.name, i.price, i.price_old, s.scraped_at::date AS snapshot_date, i.category
+           FROM competitor_menu_items i
+           JOIN competitor_snapshots s ON i.snapshot_id = s.id
+           WHERE s.tenant_id = $1 AND s.city = $2 AND s.competitor_name = $3 AND s.status = 'ok'
+           ORDER BY s.scraped_at ASC, i.category, i.name""",
+        tenant_id, city, competitor_name,
+    )
+    return [
+        {"name": r["name"], "price": r["price"], "price_old": r["price_old"],
+         "snapshot_date": str(r["snapshot_date"]), "category": r["category"] or ""}
+        for r in rows
+    ]
+
+
+async def get_competitor_last_snapshot(city: str, competitor_name: str, tenant_id: int = 1) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """SELECT scraped_at::date AS date, items_count FROM competitor_snapshots
+           WHERE tenant_id = $1 AND city = $2 AND competitor_name = $3 AND status = 'ok'
+           ORDER BY scraped_at DESC LIMIT 1""",
+        tenant_id, city, competitor_name,
+    )
+    return {"date": str(row["date"]), "items_count": row["items_count"]} if row else None
+
+
+# =====================================================================
+# silence_log
+# =====================================================================
+
+async def log_silence(chat_id: int, duration_min: int, user_id: int, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "INSERT INTO silence_log (tenant_id, chat_id, duration_min, user_id) VALUES ($1,$2,$3,$4)",
+        tenant_id, chat_id, duration_min, user_id,
+    )
+
+
+# =====================================================================
+# audit_events
+# =====================================================================
+
+async def save_audit_events_batch(events: list[dict], tenant_id: int = 1) -> None:
+    if not events:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for e in events:
+                await conn.execute(
+                    """INSERT INTO audit_events
+                       (tenant_id, date, branch_name, city, event_type, severity, description, meta_json, created_at)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)""",
+                    tenant_id,
+                    e.get("date"), e.get("branch_name"), e.get("city"),
+                    e.get("event_type"), e.get("severity", "warning"),
+                    e.get("description"), e.get("meta_json"),
+                    e.get("created_at", datetime.now(timezone.utc).isoformat()),
+                )
+
+
+async def clear_audit_events(date: str, branch_name: str | None = None, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    if branch_name:
+        await pool.execute(
+            "DELETE FROM audit_events WHERE tenant_id = $1 AND date = $2 AND branch_name = $3",
+            tenant_id, date, branch_name,
+        )
+    else:
+        await pool.execute(
+            "DELETE FROM audit_events WHERE tenant_id = $1 AND date = $2",
+            tenant_id, date,
+        )
+
+
+async def get_audit_events(
+    date: str, city: str | None = None, branch_name: str | None = None,
+    tenant_id: int = 1,
+) -> list[dict]:
+    pool = get_pool()
+    query = "SELECT * FROM audit_events WHERE tenant_id = $1 AND date = $2"
+    params: list = [tenant_id, date]
+    idx = 3
+    if branch_name:
+        query += f" AND branch_name = ${idx}"
+        params.append(branch_name)
+        idx += 1
+    elif city:
+        query += f" AND city = ${idx}"
+        params.append(city)
+        idx += 1
+    query += " ORDER BY severity DESC, event_type, branch_name"
+    rows = await pool.fetch(query, *params)
+    return [dict(r) for r in rows]
+
+
+# =====================================================================
+# SaaS — tenants, modules, users, chats, subscriptions
+# =====================================================================
+
+_ALL_MODULES = ["late_alerts", "late_queries", "search", "reports", "marketing", "finance", "admin", "audit"]
+
+
+async def seed_default_tenant() -> None:
+    import os
+    pool = get_pool()
+    bot_token = os.getenv("TELEGRAM_ANALYTICS_BOT_TOKEN", "")
+
+    row = await pool.fetchrow("SELECT id FROM tenants WHERE id = 1")
+    if row:
+        # Обновляем bot_token если он не был записан
+        if bot_token and not row.get("bot_token"):
+            await pool.execute(
+                "UPDATE tenants SET bot_token = $1 WHERE id = 1 AND (bot_token IS NULL OR bot_token = '')",
+                bot_token,
+            )
+        return
+
+    now = datetime.now(timezone.utc)
+    await pool.execute(
+        """INSERT INTO tenants (id, name, slug, bot_token, plan, status, created_at, updated_at)
+           VALUES (1, 'Ёбидоёби', 'ebidoebi', $1, 'owner', 'active', $2, $2)""",
+        bot_token or None, now,
+    )
+    for module in _ALL_MODULES:
+        await pool.execute(
+            """INSERT INTO tenant_modules (tenant_id, module, enabled, updated_at)
+               VALUES (1, $1, true, $2)
+               ON CONFLICT DO NOTHING""",
+            module, now,
+        )
+    await pool.execute(
+        """INSERT INTO subscriptions (tenant_id, status, plan, modules_json, branches_count, started_at, created_at, updated_at)
+           VALUES (1, 'active', 'owner', $1, 9, $2, $2, $2)
+           ON CONFLICT DO NOTHING""",
+        json.dumps(_ALL_MODULES), now,
+    )
+
+
+async def get_tenant(tenant_id: int = 1) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT * FROM tenants WHERE id = $1", tenant_id)
+    return dict(row) if row else None
+
+
+async def get_tenant_modules(tenant_id: int = 1) -> list[str]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT module FROM tenant_modules WHERE tenant_id = $1 AND enabled = true ORDER BY module",
+        tenant_id,
+    )
+    return [r["module"] for r in rows]
+
+
+async def get_subscription(tenant_id: int = 1) -> dict | None:
+    pool = get_pool()
+    row = await pool.fetchrow("SELECT * FROM subscriptions WHERE tenant_id = $1", tenant_id)
+    return dict(row) if row else None
+
+
+async def get_active_tenants_with_tokens() -> list[dict]:
+    """Возвращает активных тенантов у которых есть bot_token — для запуска polling loops."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT id, name, slug, bot_token
+           FROM tenants
+           WHERE status = 'active' AND bot_token IS NOT NULL AND bot_token != ''
+           ORDER BY id"""
+    )
+    return [{"id": r["id"], "name": r["name"], "slug": r["slug"], "bot_token": r["bot_token"]} for r in rows]
+
+
+async def get_all_tenant_users(tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT user_id, name, role, modules_json, city
+           FROM tenant_users WHERE tenant_id = $1 AND is_active = true""",
+        tenant_id,
+    )
+    return [
+        {
+            "user_id": r["user_id"],
+            "name": r["name"] or str(r["user_id"]),
+            "role": r["role"],
+            "modules": r["modules_json"] if isinstance(r["modules_json"], list) else json.loads(r["modules_json"] or "[]"),
+            "city": r["city"],
+        }
+        for r in rows
+    ]
+
+
+async def get_all_tenant_chats(tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT chat_id, name, modules_json, city
+           FROM tenant_chats WHERE tenant_id = $1 AND is_active = true""",
+        tenant_id,
+    )
+    return [
+        {
+            "chat_id": r["chat_id"],
+            "name": r["name"] or str(r["chat_id"]),
+            "modules": r["modules_json"] if isinstance(r["modules_json"], list) else json.loads(r["modules_json"] or "[]"),
+            "city": r["city"],
+        }
+        for r in rows
+    ]
+
+
+async def upsert_tenant_user(
+    user_id: int, name: str,
+    modules: list[str] | None = None, city: str | None = None,
+    role: str = "viewer", tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO tenant_users
+           (tenant_id, user_id, name, role, modules_json, city, is_active)
+           VALUES ($1, $2, $3, $4, $5::jsonb, $6, true)
+           ON CONFLICT (tenant_id, user_id) DO UPDATE SET
+             name = EXCLUDED.name, role = EXCLUDED.role,
+             modules_json = EXCLUDED.modules_json, city = EXCLUDED.city, is_active = true""",
+        tenant_id, user_id, name, role, json.dumps(modules or []), city,
+    )
+
+
+async def upsert_tenant_chat(
+    chat_id: int, name: str,
+    modules: list[str] | None = None, city: str | None = None,
+    tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO tenant_chats
+           (tenant_id, chat_id, name, modules_json, city, is_active)
+           VALUES ($1, $2, $3, $4::jsonb, $5, true)
+           ON CONFLICT (tenant_id, chat_id) DO UPDATE SET
+             name = EXCLUDED.name, modules_json = EXCLUDED.modules_json,
+             city = EXCLUDED.city, is_active = true""",
+        tenant_id, chat_id, name, json.dumps(modules or []), city,
+    )
+
+
+async def delete_tenant_user(user_id: int, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tenant_users SET is_active = false WHERE tenant_id = $1 AND user_id = $2",
+        tenant_id, user_id,
+    )
+
+
+async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
+    pool = get_pool()
+    await pool.execute(
+        "UPDATE tenant_chats SET is_active = false WHERE tenant_id = $1 AND chat_id = $2",
+        tenant_id, chat_id,
+    )
+
+
+async def get_module_chats_for_city(module: str, city: str, tenant_id: int = 1) -> list[int]:
+    chats = await get_all_tenant_chats(tenant_id)
+    result: list[int] = []
+    for chat in chats:
+        if module not in chat.get("modules", []):
+            continue
+        city_raw = chat.get("city")
+        if city_raw is None:
+            result.append(chat["chat_id"])
+            continue
+        try:
+            cities = frozenset(json.loads(city_raw)) if isinstance(city_raw, str) else frozenset()
+        except (ValueError, TypeError):
+            cities = frozenset({city_raw}) if city_raw else frozenset()
+        if city in cities:
+            result.append(chat["chat_id"])
+    return result
+
+
+async def get_alert_chats_for_city(city: str, tenant_id: int = 1) -> list[int]:
+    return await get_module_chats_for_city("late_alerts", city, tenant_id)
+
+
+async def get_access_config_from_db(tenant_id: int = 1) -> dict:
+    users = await get_all_tenant_users(tenant_id)
+    chats = await get_all_tenant_chats(tenant_id)
+    return {
+        "chats": {
+            str(c["chat_id"]): {"name": c["name"], "modules": c["modules"], "city": c["city"]}
+            for c in chats
+        },
+        "users": {
+            str(u["user_id"]): {"name": u["name"], "modules": u["modules"], "city": u["city"]}
+            for u in users
+        },
+    }
+
+
+# =====================================================================
+# iiko_credentials — точки per tenant
+# =====================================================================
+
+_branches_cache: dict[int, list[dict]] = {}
+
+
+def get_branches(tenant_id: int = 1) -> list[dict]:
+    """Sync — из in-memory cache. Заполняется при init_db."""
+    return list(_branches_cache.get(tenant_id, []))
+
+
+async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
+    """Async — прямой запрос к БД (для обновления кеша)."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT branch_name, city, bo_url, bo_login, bo_password, dept_id, utc_offset
+           FROM iiko_credentials
+           WHERE tenant_id = $1 AND is_active = true
+           ORDER BY branch_name""",
+        tenant_id,
+    )
+    return [
+        {
+            "name": r["branch_name"],
+            "city": r["city"] or "",
+            "bo_url": r["bo_url"] or "",
+            "bo_login": r["bo_login"],
+            "bo_password": r["bo_password"],
+            "dept_id": r["dept_id"] or "",
+            "utc_offset": r["utc_offset"],
+        }
+        for r in rows
+    ]
+
+
+async def load_branches_cache(tenant_id: int | None = None) -> None:
+    """Загружает точки из БД в _branches_cache. Если tenant_id=None — все тенанты."""
+    global _branches_cache
+    pool = get_pool()
+    if tenant_id is not None:
+        _branches_cache[tenant_id] = await get_branches_from_db(tenant_id)
+        logger.info(f"Кеш точек загружен: tenant_id={tenant_id}, {len(_branches_cache[tenant_id])} записей")
+    else:
+        rows = await pool.fetch(
+            "SELECT DISTINCT tenant_id FROM iiko_credentials WHERE is_active = true"
+        )
+        for row in rows:
+            tid = row["tenant_id"]
+            _branches_cache[tid] = await get_branches_from_db(tid)
+        logger.info(f"Кеш точек загружен: {len(_branches_cache)} тенантов")
+
+
+async def seed_branches_from_json(tenant_id: int, json_path: str | Path) -> int:
+    """
+    Сеедирует iiko_credentials из branches.json для тенанта.
+    Пропускает если запись уже есть (ON CONFLICT DO NOTHING).
+    """
+    pool = get_pool()
+    path = Path(json_path)
+    if not path.exists():
+        logger.warning(f"seed_branches_from_json: файл {path} не найден, пропуск")
+        return 0
+
+    try:
+        branches: list[dict] = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        logger.error(f"seed_branches_from_json: ошибка чтения {path}: {e}")
+        return 0
+
+    now = datetime.now(timezone.utc)
+    inserted = 0
+    for b in branches:
+        result = await pool.execute(
+            """INSERT INTO iiko_credentials
+               (tenant_id, branch_name, city, bo_url, bo_login, bo_password, dept_id, utc_offset, is_active, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, true, $9)
+               ON CONFLICT (tenant_id, branch_name) DO NOTHING""",
+            tenant_id,
+            b["name"],
+            b.get("city", ""),
+            b.get("bo_url", ""),
+            b.get("bo_login"),
+            b.get("bo_password"),
+            b.get("dept_id", ""),
+            b.get("utc_offset", 7),
+            now,
+        )
+        if result == "INSERT 0 1":
+            inserted += 1
+
+    if inserted:
+        logger.info(f"seed_branches_from_json: {inserted} точек добавлено → iiko_credentials[tenant_id={tenant_id}]")
+    return inserted
+
+
+async def upsert_branch_credential(
+    tenant_id: int,
+    branch_name: str,
+    city: str = "",
+    bo_url: str = "",
+    bo_login: str | None = None,
+    bo_password: str | None = None,
+    dept_id: str = "",
+    utc_offset: int = 7,
+    is_active: bool = True,
+) -> None:
+    """CRUD для управления точками тенанта. Инвалидирует кеш."""
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO iiko_credentials
+           (tenant_id, branch_name, city, bo_url, bo_login, bo_password, dept_id, utc_offset, is_active, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, now())
+           ON CONFLICT (tenant_id, branch_name) DO UPDATE SET
+               city = EXCLUDED.city,
+               bo_url = EXCLUDED.bo_url,
+               bo_login = EXCLUDED.bo_login,
+               bo_password = EXCLUDED.bo_password,
+               dept_id = EXCLUDED.dept_id,
+               utc_offset = EXCLUDED.utc_offset,
+               is_active = EXCLUDED.is_active""",
+        tenant_id, branch_name, city, bo_url, bo_login, bo_password, dept_id, utc_offset, is_active,
+    )
+    _branches_cache.pop(tenant_id, None)
+    await load_branches_cache(tenant_id)
+
+
+# =====================================================================
+# Совместимость: DB_PATH и BACKEND для файлов с BACKEND-guard
+# =====================================================================
+
+DB_PATH = None  # В PG режиме нет SQLite-файла; используется как sentinel
+BACKEND = "postgresql"

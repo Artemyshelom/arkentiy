@@ -139,6 +139,14 @@ def load_acquiring_corr_account(path: Path | None = None) -> str:
     return data.get("acquiring_corr_account", "")
 
 
+def load_commission_counterpart(path: Path | None = None) -> tuple[str, str]:
+    """Возвращает (inn, name) кастомного контрагента для документов на комиссию."""
+    p = path or _ACCOUNTS_PATH
+    with open(p, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    return data.get("commission_counterpart_inn", ""), data.get("commission_counterpart_name", "")
+
+
 # ── парсер 1С ────────────────────────────────────────────────────────────────
 
 def is_1c_statement(content: str) -> bool:
@@ -310,6 +318,8 @@ def generate_1c_file(
     parsed: ParsedStatement,
     acquiring: list[AcquiringEntry] | None = None,
     acquiring_corr_account: str = "",
+    commission_counterpart_inn: str = "",
+    commission_counterpart_name: str = "",
 ) -> str:
     lines: list[str] = []
 
@@ -367,12 +377,12 @@ def generate_1c_file(
                 f"ПлательщикБанк1={acq.bank_name}",
                 f"ПлательщикБИК={acq.bank_bik}",
                 f"ПлательщикКорсчет={acq.bank_korshet}",
-                f"Получатель={acq.sbr_name}",
-                f"ПолучательИНН={acq.sbr_inn}",
-                f"ПолучательРасчСчет={acq.sbr_account}",
-                f"ПолучательБанк1={acq.bank_name}",
-                f"ПолучательБИК={acq.bank_bik}",
-                f"ПолучательКорсчет={acq.bank_korshet}",
+                f"Получатель={commission_counterpart_name or acq.sbr_name}",
+                f"ПолучательИНН={commission_counterpart_inn or acq.sbr_inn}",
+                f"ПолучательРасчСчет={'' if commission_counterpart_inn else acq.sbr_account}",
+                f"ПолучательБанк1={'' if commission_counterpart_inn else acq.bank_name}",
+                f"ПолучательБИК={'' if commission_counterpart_inn else acq.bank_bik}",
+                f"ПолучательКорсчет={'' if commission_counterpart_inn else acq.bank_korshet}",
                 *(
                     [f"КоррСчет={acquiring_corr_account}"]
                     if acquiring_corr_account else []
@@ -521,6 +531,7 @@ async def reconcile_acquiring(
     accounts_map: dict[str, dict],
     date_from: str,
     date_to: str,
+    statement_accounts: set[str] | None = None,
 ) -> str | None:
     """
     Сверяет банковский эквайринг Сбер с iiko OLAP v2.
@@ -547,6 +558,9 @@ async def reconcile_acquiring(
 
     branches_by_city: dict[str, list[dict]] = defaultdict(list)
     for acc, info in accounts_map.items():
+        # Показываем только счета, которые есть в загруженной выписке
+        if statement_accounts and acc not in statement_accounts:
+            continue
         city = info.get("city")
         iiko_branch = info.get("iiko_branch")
         if not city or not iiko_branch:
@@ -664,6 +678,7 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
     """
     accounts_map = load_accounts_map(accounts_path)
     acq_corr_account = load_acquiring_corr_account(accounts_path)
+    comm_inn, comm_name = load_commission_counterpart(accounts_path)
     parsed = parse_1c(content)
 
     logger.info(
@@ -681,7 +696,7 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
         if br.debit_count == 0 and br.credit_count == 0:
             continue
         branch_acq = [a for a in acquiring if a.account == br.account]
-        file_content = generate_1c_file(br, parsed, acquiring=branch_acq or None, acquiring_corr_account=acq_corr_account)
+        file_content = generate_1c_file(br, parsed, acquiring=branch_acq or None, acquiring_corr_account=acq_corr_account, commission_counterpart_inn=comm_inn, commission_counterpart_name=comm_name)
         period = f"{parsed.date_from}-{parsed.date_to}".replace(".", "")
         filename = f"{br.label}_{period}.txt"
         files[filename] = file_content.encode("windows-1251")

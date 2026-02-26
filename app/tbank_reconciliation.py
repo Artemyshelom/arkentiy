@@ -255,7 +255,7 @@ async def process_registry(
     4. Формирует отчёт
     """
     from app.clients.iiko_bo_olap_v2 import get_online_orders
-    from app.db import (
+    from app.database import (
         confirm_online_payment,
         get_overdue_payments,
         get_pending_payments,
@@ -738,7 +738,7 @@ async def process_payout(
     filename: str = "",
 ) -> dict:
     """Обработка отчёта по выплатам ТБанк."""
-    from app.db import confirm_payout, get_payout_delayed, record_chargeback
+    from app.database import confirm_payout, get_payout_delayed, record_chargeback
 
     sheets = parse_tbank_payout(data)
     if not sheets:

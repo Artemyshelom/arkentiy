@@ -16,10 +16,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from datetime import datetime
 from app.clients import telegram
 from app.config import get_settings
-from app.database import (
+from app.db import (
     init_db, get_access_config_from_db,
     get_all_tenant_users, get_all_tenant_chats,
     upsert_tenant_user, upsert_tenant_chat,
+    get_active_tenants_with_tokens,
 )
 from app import access as _access
 from app.monitoring.healthcheck import router as health_router
@@ -232,19 +233,35 @@ async def lifespan(app: FastAPI):
     for job in scheduler.get_jobs():
         logger.info(f"  ✓ {job.name} | следующий запуск: {job.next_run_time}")
 
-    _polling_task = asyncio.create_task(run_polling_loop())
-    logger.info("Аркентий polling task started")
+    # Запускаем polling loop для каждого активного тенанта с bot_token
+    tenants = await get_active_tenants_with_tokens()
+    _polling_tasks: list[asyncio.Task] = []
+    if tenants:
+        for t in tenants:
+            task = asyncio.create_task(
+                run_polling_loop(bot_token=t["bot_token"], tenant_id=t["id"]),
+                name=f"polling:{t['slug']}",
+            )
+            _polling_tasks.append(task)
+        logger.info(f"Аркентий: запущено {len(_polling_tasks)} polling loop(s): {[t['slug'] for t in tenants]}")
+    else:
+        # Fallback: один loop из .env (SQLite режим или PG без тенантов)
+        task = asyncio.create_task(run_polling_loop(), name="polling:default")
+        _polling_tasks.append(task)
+        logger.info("Аркентий: запущен polling loop (fallback, single tenant)")
 
     await telegram.monitor(
         f"🟢 <b>Аркентий запущен</b>\n"
         f"Задач: {len(scheduler.get_jobs())}\n"
+        f"Ботов: {len(_polling_tasks)}\n"
         f"<i>{datetime.now().strftime('%d.%m.%Y %H:%M')}</i>"
     )
 
     yield
 
     logger.info("Остановка приложения...")
-    _polling_task.cancel()
+    for task in _polling_tasks:
+        task.cancel()
     scheduler.shutdown(wait=False)
 
 

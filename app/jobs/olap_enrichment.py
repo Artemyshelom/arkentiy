@@ -21,7 +21,7 @@ import httpx
 
 from app.clients.iiko_auth import get_bo_token
 from app.config import get_settings
-from app.database import DB_PATH, log_job_finish, log_job_start
+from app.db import DB_PATH, BACKEND, log_job_finish, log_job_start
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,9 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
 async def _update_orders_raw(enriched: dict) -> int:
     """Обновляет orders_raw OLAP-полями. Не перезатирает непустые значения."""
     if not enriched:
+        return 0
+    if BACKEND != "sqlite":
+        logger.warning("olap_enrichment._update_orders_raw: PG backend не реализован, пропуск")
         return 0
     updated = 0
     async with aiosqlite.connect(DB_PATH) as db:

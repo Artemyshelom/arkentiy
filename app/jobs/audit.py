@@ -31,8 +31,9 @@ import aiosqlite
 import httpx
 
 from app.config import get_settings
-from app.database import (
+from app.db import (
     DB_PATH,
+    BACKEND,
     clear_audit_events,
     get_audit_events,
     get_module_chats_for_city,
@@ -72,6 +73,10 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     """
     findings: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
+
+    if BACKEND != "sqlite":
+        logger.warning("audit._detect_from_orders_raw: PG backend не реализован, пропуск")
+        return findings
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
@@ -231,6 +236,9 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
 async def _detect_unclosed_in_transit(date_str: str) -> list[dict]:
     """Живая проверка незакрытых заказов 'В пути к клиенту' из прошлых дней."""
     findings: list[dict] = []
+    if BACKEND != "sqlite":
+        logger.warning("audit._detect_unclosed_in_transit: PG backend не реализован, пропуск")
+        return findings
     now_iso = datetime.now(timezone.utc).isoformat()
     branches = settings.branches or []
     branch_to_city = {b["name"]: b.get("city", "") for b in branches}

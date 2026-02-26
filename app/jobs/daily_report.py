@@ -14,7 +14,7 @@ from app.clients import telegram
 from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.jobs.humor import get_morning_quip
-from app.database import (
+from app.db import (
     aggregate_orders_for_daily_stats,
     clear_updates_for_date,
     get_updates_for_date,

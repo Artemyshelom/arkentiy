@@ -15,7 +15,7 @@ from datetime import datetime
 
 from app.clients import iiko, telegram
 from app.config import get_settings
-from app.database import (
+from app.db import (
     hash_stoplist,
     get_stoplist_hash,
     set_stoplist_hash,

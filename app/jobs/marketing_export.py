@@ -26,7 +26,7 @@ import aiosqlite
 import httpx
 
 from app.config import get_settings
-from app.database import DB_PATH
+from app.db import DB_PATH, BACKEND
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -748,6 +748,9 @@ async def run_export(chat_id: int, query_text: str, bot_url: str) -> None:
         return
 
     # 3. Выполняем запрос к БД
+    if BACKEND != "sqlite":
+        await _send_text(bot_url, chat_id, "❌ Экспорт недоступен: PG backend не реализован.")
+        return
     try:
         async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row

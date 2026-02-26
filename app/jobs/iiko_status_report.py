@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 from app.clients.iiko_bo_events import get_branch_rt
 from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats
 from app.config import get_settings
-from app.database import aggregate_orders_today
+from app.db import aggregate_orders_today
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

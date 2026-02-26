@@ -18,11 +18,10 @@
 Будущий analytics_bot.py будет отдельным модулем для глубокой аналитики.
 """
 
-import asyncio
 import html
 import logging
+import random
 import re
-from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -40,7 +39,7 @@ from app.clients.iiko_bo_events import (
     _parse_customer_phone,
 )
 from app.config import get_settings
-from app.db import DB_PATH, BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
+from app.database import DB_PATH, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
 from app.jobs import access_manager
 from app.jobs.daily_report import _format_branch_report, _fmt_money
 from app.jobs.iiko_status_report import (
@@ -59,13 +58,7 @@ from app.jobs.late_alerts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Context variables для мульти-бот режима.
-# Каждый polling loop устанавливает свой контекст — не нужно протаскивать через все функции.
-_ctx_tenant_id: ContextVar[int] = ContextVar("tenant_id", default=1)
-_ctx_bot_token: ContextVar[str] = ContextVar("bot_token", default="")
-
-# Смещение update_id отдельно для каждого токена
-_last_update_id: dict[str, int | None] = {}  # bot_token → last update_id
+_last_update_id: Optional[int] = None
 
 # Маппинг команды → модуль для проверки прав
 _CMD_MODULE: dict[str, str] = {
@@ -85,14 +78,48 @@ _CMD_MODULE: dict[str, str] = {
 }
 
 
+# Kyrgyz режим для Ильи
+_ILYA_ID = 822559806
+
+_KYRGYZ_GREETINGS = [
+    "Салам алейкум, Илья! 🌟",
+    "Саламатсызбы, Илья мырза! 🙏",
+    "Салам, кандайсың? 😄",
+    "Жакшысызбы, Илья мырза! Кабарлар жакшыбы? ✨",
+    "Кош келдиңиз, Илья мырза! 🎉",
+    "О, патрон келди! Бардыгы даяр, мырза! 😄",
+    "Ассалому алайкум, Илья баатыр! Эмне буюрасыз? ⚔️",
+    "Бүгүн кандай? Ишке даярмын, Илья мырза! 💪",
+    "Куттуу болсун бүгүнкү күн, Илья мырза! 🔥",
+]
+
+_KYRGYZ_ACKS = [
+    "Макул, мырза, дароо эле кылам! ⚡",
+    "Ооба, Илья мырза, азыр эле жасап жатам. 🔥",
+    "Буйруңуз, мырза! Дароо орундатам! 🫡",
+    "Дароо эле, Илья мырза! Бир секунд... ⏱",
+    "Сиздин буйрук — менин иш, мырза! 💪",
+    "Эмир кылдыңыз — аткарам, Илья мырза! 🎯",
+    "Жарайт, баш мырза, азыр аткарам! 🚀",
+]
+
+_greeted_today: dict[int, str] = {}
+
+
+def _check_and_mark_ilya_greeting() -> bool:
+    today = datetime.now().date().isoformat()
+    if _greeted_today.get(_ILYA_ID) != today:
+        _greeted_today[_ILYA_ID] = today
+        return True
+    return False
+
 
 # ------------------------------------------------------------------
-# Telegram helpers (берут токен из контекста polling loop)
+# Telegram helpers (используют ANALYTICS токен)
 # ------------------------------------------------------------------
 
 def _bot_url() -> str:
-    token = _ctx_bot_token.get() or settings.telegram_analytics_bot_token
-    return f"https://api.telegram.org/bot{token}"
+    return f"https://api.telegram.org/bot{settings.telegram_analytics_bot_token}"
 
 
 async def _send(chat_id: int, text: str, parse_mode: str = "HTML") -> None:
@@ -157,27 +184,14 @@ async def _edit_message(chat_id: int, message_id: int, text: str, keyboard: list
             if keyboard is not None:
                 payload["reply_markup"] = {"inline_keyboard": keyboard}
             r = await client.post(f"{_bot_url()}/editMessageText", json=payload)
-            resp = r.json()
-            if not resp.get("ok"):
-                desc = resp.get("description", "")
-                if "message is not modified" in desc:
-                    pass  # данные не изменились — норма
-                else:
-                    logger.error(f"editMessageText error: {r.text[:200]}")
+            if not r.json().get("ok"):
+                logger.error(f"editMessageText error: {r.text[:200]}")
     except Exception as e:
         logger.error(f"_edit_message: {e}")
 
 
 # Кеш отчётов ТБанк для drill-down (message_id -> original report text)
 _tbank_report_cache: dict[int, str] = {}
-
-# Кеш поиска для edit_message навигации (chat_id, msg_id) -> {text, keyboard, rows, back_label}
-_search_cache: dict[tuple[int, int], dict] = {}
-_SEARCH_CACHE_MAX = 100
-
-# Кеш статуса для edit_message навигации (chat_id, msg_id) -> {summary_text, summary_keyboard, branches_data, branches}
-_status_cache: dict[tuple[int, int], dict] = {}
-_STATUS_CACHE_MAX = 50
 
 
 async def _download_tg_file(file_id: str) -> bytes | None:
@@ -278,7 +292,7 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
 
     # Логирование в БД
     try:
-        from app.db import save_bank_statement_log
+        from app.database import save_bank_statement_log
         await save_bank_statement_log(
             user_id=user_id,
             chat_id=chat_id,
@@ -462,80 +476,7 @@ def _format_staff_block(branch_name: str, staff: list[dict], role: str) -> str:
 # RT handlers (статус, повара, курьеры) — читают из BranchState
 # ------------------------------------------------------------------
 
-def _status_summary_line(data: dict) -> str:
-    """Двухстрочный блок точки для сводки /статус (вариант А)."""
-    name = html.escape(data["name"])
-    rev = f"{data['revenue']:,} ₽".replace(",", " ") if data.get("revenue") is not None else "—"
-    checks = f"{data['check_count']} чека" if data.get("check_count") is not None else "—"
-
-    # Строка 1: имя · выручка · чеки
-    line1 = f"<b>{name}</b> · {rev} · {checks}"
-
-    # Строка 2: опоздания + активные заказы
-    parts2: list[str] = []
-    delays = data.get("delays")
-    if delays and delays.get("total_delivered", 0) > 0:
-        late = delays["late_count"]
-        total = delays["total_delivered"]
-        pct = round(late / total * 100) if total else 0
-        avg_min = delays.get("avg_delay_min", 0)
-        if late >= 2:
-            parts2.append(f"🔴 {late}/{total} опозд. ({pct}%) ≈{avg_min} мин")
-        elif late == 1:
-            parts2.append(f"🟡 1/{total} опозд. ({pct}%) ≈{avg_min} мин")
-        else:
-            parts2.append(f"✅ 0/{total} опозд.")
-    elif delays is not None:
-        parts2.append("✅ 0 опозд.")
-    elif data.get("revenue") is None and data.get("check_count") is None:
-        parts2.append("⚠️ нет данных")
-    else:
-        parts2.append("⏳ RT загружается")
-
-    active = data.get("active_orders")
-    if active is not None:
-        n_dispatch = data.get("orders_before_dispatch") or 0
-        n_way = data.get("orders_on_way") or 0
-        zak = f"🚚 {active} акт."
-        if n_dispatch:
-            zak += f" · {n_dispatch} до отпр."
-        if n_way:
-            zak += f" · {n_way} в пути"
-        parts2.append(zak)
-
-    line2 = " · ".join(parts2)
-    return f"{line1}\n{line2}"
-
-
-def _build_status_summary(results: list[dict]) -> tuple[str, list]:
-    """Строит сводное сообщение и клавиатуру для нескольких точек."""
-    from datetime import datetime, timezone, timedelta
-    now_str = datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M")
-    blocks = [f"📊 <b>Статус</b> — {now_str}"]
-    for data in results:
-        blocks.append(_status_summary_line(data))
-
-    keyboard: list[list[dict]] = []
-    row_buf: list[dict] = []
-    for data in results:
-        name = data["name"]
-        row_buf.append({"text": f"📍 {name}", "callback_data": f"stat:branch:{name}"})
-        if len(row_buf) == 2:
-            keyboard.append(row_buf)
-            row_buf = []
-    if row_buf:
-        keyboard.append(row_buf)
-    keyboard.append([{"text": "🔄 Обновить", "callback_data": "stat:refresh"}])
-
-    return "\n\n".join(blocks), keyboard
-
-
 async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None) -> None:
-    """
-    /статус [фильтр] — статус точек.
-    Одна точка → сразу карточка + кнопка обновить.
-    Несколько → сводка + кнопки per-точка + обновить (edit_message навигация).
-    """
     all_branches = get_available_branches()
     if not all_branches:
         await _send(chat_id, "⚠️ Нет настроенных точек.")
@@ -549,54 +490,16 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
-    # Параллельный сбор данных
-    async def _safe_get(branch: dict) -> dict:
+    if len(filtered) > 1:
+        await _send(chat_id, f"🔍 Собираю данные по {len(filtered)} точкам...")
+
+    for branch in filtered:
         try:
-            return await get_branch_status(branch)
+            data = await get_branch_status(branch)
+            await _send(chat_id, format_branch_status(data))
         except Exception as e:
-            logger.error(f"[статус] [{branch['name']}]: {e}")
-            return {"name": branch["name"], "revenue": None, "check_count": None,
-                    "avg_check": None, "cogs_pct": None, "discount_sum": None,
-                    "discount_types_agg": [], "sailplay": None, "tz": None,
-                    "active_orders": None, "delivered_today": None,
-                    "orders_before_dispatch": None, "orders_cooking": None,
-                    "orders_ready": None, "orders_on_way": None,
-                    "couriers_on_shift": None, "cooks_on_shift": None,
-                    "delays": None, "avg_cooking_min": None, "avg_wait_min": None,
-                    "avg_delivery_min": None}
-
-    results = await asyncio.gather(*[_safe_get(b) for b in filtered])
-
-    # Одна точка — карточка напрямую
-    if len(results) == 1:
-        data = results[0]
-        card_text = format_branch_status(data)
-        refresh_kb = [[{"text": "🔄 Обновить", "callback_data": f"stat:refresh:{data['name']}"}]]
-        msg_id = await _send_with_keyboard_return_id(chat_id, card_text, refresh_kb)
-        if msg_id:
-            if len(_status_cache) >= _STATUS_CACHE_MAX:
-                del _status_cache[next(iter(_status_cache))]
-            _status_cache[(chat_id, msg_id)] = {
-                "summary_text": None,
-                "summary_keyboard": None,
-                "branches_data": {data["name"]: data},
-                "branches": filtered,
-            }
-        return
-
-    # Несколько точек — сводка
-    branches_data = {d["name"]: d for d in results}
-    summary_text, summary_kb = _build_status_summary(list(results))
-    msg_id = await _send_with_keyboard_return_id(chat_id, summary_text, summary_kb)
-    if msg_id:
-        if len(_status_cache) >= _STATUS_CACHE_MAX:
-            del _status_cache[next(iter(_status_cache))]
-        _status_cache[(chat_id, msg_id)] = {
-            "summary_text": summary_text,
-            "summary_keyboard": summary_kb,
-            "branches_data": branches_data,
-            "branches": filtered,
-        }
+            logger.error(f"[analytics_bot] статус [{branch['name']}]: {e}")
+            await _send(chat_id, f"⚠️ Ошибка по точке {branch['name']}")
 
 
 async def _handle_staff(chat_id: int, arg: str, role: str, city_filter: str | None = None) -> None:
@@ -652,15 +555,6 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
 
     s = r["sum"]
     sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-    pay_raw = (r.get("payment_type") or "").strip()
-    _pay_map = {
-        "наличные": "Наличные",
-        "безналичный расчет": "Безнал", "безналичный расчёт": "Безнал",
-        "онлайн": "Онлайн", "тинькофф": "Онлайн", "т-банк": "Онлайн",
-        "системы лояльности": "Бонусы",
-    }
-    pay_str = _pay_map.get(pay_raw.lower(), pay_raw) if pay_raw else ""
-    sum_line = f"{sum_str} · {html.escape(pay_str)}" if pay_str else sum_str
     client = html.escape(r.get("client_name") or "—")
     phone = html.escape(r.get("client_phone") or "—")
 
@@ -721,7 +615,7 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
         f"   👤 {client}{client_tag} | 📞 <code>{phone}</code>\n"
         f"   🗺 {addr}\n"
         f"   🛵 Курьер: {html.escape(r['courier'] or '—')}\n"
-        f"   💰 {sum_line}\n"
+        f"   💰 {sum_str}\n"
         f"   ⏱ {_fmt_dt(r['planned_time'])} → {_fmt_dt(r['actual_time'])} | {late_str}\n"
         f"🍱 Состав:\n{items_str}"
     )
@@ -733,8 +627,7 @@ def _format_order_compact(r: dict) -> str:
     sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
     client = html.escape(r.get("client_name") or "?")
     if r["is_late"]:
-        mins = r.get("late_minutes")
-        late_icon = f"🔴 +{int(mins)} мин" if mins else "🔴"
+        late_icon = "🔴"
     elif r["actual_time"]:
         late_icon = "✅"
     else:
@@ -748,8 +641,9 @@ def _format_order_compact(r: dict) -> str:
 async def _handle_search(chat_id: int, query: str, city_filter: str | None = None) -> None:
     """
     /поиск <запрос> — универсальный поиск по orders_raw.
-    Все результаты — в одном сообщении с inline-навигацией (edit_message).
-    Типы: numeric (по номеру заказа), phone (по телефону), text (по тексту).
+    Если запрос — только цифры: сначала точное совпадение по номеру заказа (полная карточка),
+    остальные совпадения (телефон, адрес, состав) — компактный список отдельно.
+    Иначе — обычный поиск по всем полям.
     """
     if not query:
         await _send(
@@ -763,10 +657,6 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
         )
         return
 
-    if BACKEND != "sqlite":
-        await _send(chat_id, "❌ Поиск недоступен: PG backend не реализован.")
-        return
-
     # Парсинг ручного фильтра города/филиала (последний токен)
     tokens = query.strip().split()
     manual_filter: str | None = None
@@ -778,15 +668,11 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             tokens = tokens[:-1]
             query = " ".join(tokens)
 
-    # Определяем тип поиска
-    is_phone = bool(re.match(r"^\+?\d{10,11}$", query.replace(" ", "").replace("-", "")))
-    is_numeric = query.isdigit() and not is_phone
+    is_numeric = query.isdigit()
     q = f"%{query}%"
-
     COLS = """branch_name, delivery_num, status, courier, sum,
               planned_time, actual_time, is_late, late_minutes,
-              client_name, client_phone, delivery_address, items, is_self_service, comment,
-              payment_type"""
+              client_name, client_phone, delivery_address, items, is_self_service, comment"""
 
     # Права чата
     allowed_set: set[str] = set()
@@ -808,46 +694,54 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif city_filter:
         city_branch_names = list(allowed_set)
 
-    def _city_clause() -> tuple[str, list]:
+    def _city_clause(alias: str = "") -> tuple[str, list]:
+        """Возвращает (sql_fragment, params) для фильтра по городу."""
+        prefix = f"{alias}." if alias else ""
         if city_branch_names:
             placeholders = ",".join("?" * len(city_branch_names))
-            return f"AND branch_name IN ({placeholders})", list(city_branch_names)
+            return f"AND {prefix}branch_name IN ({placeholders})", list(city_branch_names)
         return "", []
-
-    city_sql, city_params = _city_clause()
-    total = 0
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
+        city_sql, city_params = _city_clause()
 
         if is_numeric:
             async with db.execute(
                 f"SELECT {COLS} FROM orders_raw WHERE delivery_num = ? {city_sql} ORDER BY planned_time DESC",
                 (query, *city_params),
             ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-            query_type = "numeric"
+                exact_rows = [dict(r) for r in await cur.fetchall()]
 
-        elif is_phone:
-            phone_q = query.lstrip("+")
+            async with db.execute(
+                f"""SELECT COUNT(*) FROM orders_raw
+                    WHERE delivery_num != ?
+                      AND (client_phone LIKE ? OR delivery_address LIKE ? OR items LIKE ?)
+                      {city_sql}""",
+                (query, q, q, q, *city_params),
+            ) as cur:
+                other_total = (await cur.fetchone())[0]
+
             async with db.execute(
                 f"""SELECT {COLS} FROM orders_raw
-                    WHERE (client_phone LIKE ? OR client_phone LIKE ?)
-                    {city_sql}
-                    ORDER BY planned_time DESC LIMIT 30""",
-                (f"%{phone_q}%", f"%{query}%", *city_params),
+                    WHERE delivery_num != ?
+                      AND (client_phone LIKE ? OR delivery_address LIKE ? OR items LIKE ?)
+                      {city_sql}
+                    ORDER BY planned_time DESC LIMIT 10""",
+                (query, q, q, q, *city_params),
             ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-            query_type = "phone"
-
+                other_rows = [dict(r) for r in await cur.fetchall()]
         else:
+            exact_rows = []
+            other_total = 0
+            other_rows = []
             async with db.execute(
                 f"""SELECT COUNT(*) FROM orders_raw
                     WHERE (delivery_num LIKE ? OR client_phone LIKE ?
                        OR delivery_address LIKE ? OR items LIKE ?) {city_sql}""",
                 (q, q, q, q, *city_params),
             ) as cur:
-                total = (await cur.fetchone())[0]
+                other_total = (await cur.fetchone())[0]
             async with db.execute(
                 f"""SELECT {COLS} FROM orders_raw
                     WHERE (delivery_num LIKE ? OR client_phone LIKE ?
@@ -855,116 +749,43 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
                     ORDER BY planned_time DESC LIMIT 20""",
                 (q, q, q, q, *city_params),
             ) as cur:
-                rows = [dict(r) for r in await cur.fetchall()]
-            query_type = "text"
+                other_rows = [dict(r) for r in await cur.fetchall()]
 
-    if not rows:
-        await _send(chat_id, f"🔍 <code>{html.escape(query)}</code> — ничего не найдено.")
+    if not exact_rows and not other_rows:
+        await _send(
+            chat_id,
+            f"🔍 <code>{html.escape(query)}</code> — ничего не найдено."
+        )
         return
 
-    # Один результат — сразу карточка, без навигации
-    if len(rows) == 1:
-        r = rows[0]
-        phone = (r.get("client_phone") or "").strip()
-        cnt = await get_client_order_count(phone) if phone else None
-        await _send(chat_id, await _format_order_card(r, client_count=cnt))
-        return
+    # Показываем точные совпадения как полные карточки
+    if exact_rows:
+        header = f"🔍 <b>Заказ #{html.escape(query)}</b> — найдено: {len(exact_rows)}"
+        await _send(chat_id, header)
+        for r in exact_rows:
+            phone_for_count = (r.get("client_phone") or "").strip()
+            cnt = await get_client_order_count(phone_for_count) if phone_for_count else None
+            await _send(chat_id, await _format_order_card(r, client_count=cnt))
 
-    # --- Несколько результатов: одно сообщение + кнопки ---
+    # Показываем остальные совпадения компактно
+    if other_rows:
+        if exact_rows:
+            more_str = f" (показаны 10 из {other_total})" if other_total > 10 else ""
+            other_header = f"\n🔎 <i>Ещё найдено {other_total} совпадений в других полях{more_str}:</i>"
+        else:
+            more_str = f" (показаны 20 из {other_total})" if other_total > 20 else ""
+            other_header = f"🔍 <b>{html.escape(query)}</b> — найдено: {other_total}{more_str}"
 
-    def _late_ico(r: dict) -> str:
-        if (r.get("status") or "").lower() in ("отменена", "отменён"):
-            return "❌"
-        if r["is_late"]:
-            mins = r.get("late_minutes")
-            return f"🔴 +{int(mins)} мин" if mins else "🔴"
-        if r["actual_time"]:
-            return "✅"
-        return "⏳"
-
-    if query_type == "numeric":
-        lines = [f"🔍 <b>#{html.escape(query)}</b> — найдено в {len(rows)} филиалах\n"]
-        for r in rows:
-            s = r["sum"]
-            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-            lines.append(
-                f"📍 {html.escape(r['branch_name'])} · "
-                f"{html.escape(r.get('status') or '?')} · {_late_ico(r)} · {sum_str}"
-            )
-        text = "\n".join(lines)
-        keyboard: list[list[dict]] = []
-        row_buf: list[dict] = []
-        for idx, r in enumerate(rows):
-            row_buf.append({"text": f"📋 {r['branch_name']}", "callback_data": f"srch:card:{query}:{idx}"})
-            if len(row_buf) == 2:
-                keyboard.append(row_buf)
-                row_buf = []
-        if row_buf:
-            keyboard.append(row_buf)
-        back_label = f"← #{query} (все филиалы)"
-
-    elif query_type == "phone":
-        client_name = (rows[0].get("client_name") or "—")
-        branches_set = {r["branch_name"] for r in rows}
-        branch_note = f" · {html.escape(rows[0]['branch_name'])}" if len(branches_set) == 1 else ""
-        lines = [
-            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов",
-            f"👤 {html.escape(client_name)}{branch_note}\n",
-        ]
-        for r in rows:
-            s = r["sum"]
-            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-            branch_part = f" · {html.escape(r['branch_name'].split('_')[0])}" if len(branches_set) > 1 else ""
-            lines.append(
-                f"#{r['delivery_num']}{branch_part} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
-            )
-        text = "\n".join(lines)
+        out_lines = [other_header, ""]
         keyboard = []
-        row_buf = []
-        for idx, r in enumerate(rows):
-            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
-            if len(row_buf) == 3:
-                keyboard.append(row_buf)
-                row_buf = []
-        if row_buf:
-            keyboard.append(row_buf)
-        back_label = "← К клиенту"
-
-    else:
-        more_str = f" (показаны 20 из {total})" if total > 20 else ""
-        lines = [f"🔍 <b>{html.escape(query)}</b> — найдено: {total or len(rows)}{more_str}\n"]
-        for r in rows:
-            s = r["sum"]
-            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-            client = html.escape(r.get("client_name") or "?")
-            lines.append(
-                f"#{r['delivery_num']} · {client} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
-            )
-        if total > 20:
-            lines.append("\n<i>Уточни запрос чтобы сузить выборку.</i>")
-        text = "\n".join(lines)
-        keyboard = []
-        row_buf = []
-        for idx, r in enumerate(rows):
-            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
-            if len(row_buf) == 3:
-                keyboard.append(row_buf)
-                row_buf = []
-        if row_buf:
-            keyboard.append(row_buf)
-        back_label = "← К результатам"
-
-    msg_id = await _send_with_keyboard_return_id(chat_id, text, keyboard)
-    if msg_id:
-        if len(_search_cache) >= _SEARCH_CACHE_MAX:
-            oldest = next(iter(_search_cache))
-            del _search_cache[oldest]
-        _search_cache[(chat_id, msg_id)] = {
-            "text": text,
-            "keyboard": keyboard,
-            "rows": rows,
-            "back_label": back_label,
-        }
+        for r in other_rows:
+            out_lines.append(_format_order_compact(r))
+            num = r["delivery_num"]
+            branch_short = r["branch_name"].split("_")[0]
+            keyboard.append([{"text": f"📋 Открыть #{num} ({branch_short})", "callback_data": f"order:{num}"}])
+        if other_total > (10 if exact_rows else 20):
+            out_lines.append("\n<i>Уточни запрос чтобы сузить выборку.</i>")
+        await _send_with_keyboard(chat_id, "\n".join(out_lines), keyboard)
 
 
 
@@ -1352,9 +1173,6 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
     Исторические опоздания за день из БД (группировка по точкам).
     Вызывается из /опоздания [дата].
     """
-    if BACKEND != "sqlite":
-        await _send(chat_id, "❌ Опоздания из БД недоступны: PG backend не реализован.")
-        return
     import re
     from collections import defaultdict
 
@@ -1883,23 +1701,17 @@ def _build_help(perms) -> str:
     return "\n".join(lines)
 
 
-async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
-    """
-    Polling job для одного тенанта.
-    bot_token и tenant_id устанавливаются в ContextVar — все хелперы используют их автоматически.
-    """
-    token = bot_token or settings.telegram_analytics_bot_token
-    if not token:
+async def poll_analytics_bot() -> None:
+    """Polling job для аналитического бота. Запускается каждые 3 секунды."""
+    global _last_update_id
+
+    if not settings.telegram_analytics_bot_token:
         return
 
-    _ctx_bot_token.set(token)
-    _ctx_tenant_id.set(tenant_id)
-
-    current_offset = _last_update_id.get(token)
-    updates = await _get_updates(offset=current_offset)
+    updates = await _get_updates(offset=_last_update_id)
 
     for update in updates:
-        _last_update_id[token] = update["update_id"] + 1
+        _last_update_id = update["update_id"] + 1
 
         # Автодетект: бот добавлен в новый чат
         my_chat_member = update.get("my_chat_member")
@@ -1933,7 +1745,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                 perms = access.get_permissions(cb_chat_id, cb_user_id)
                 if perms.has("finance"):
                     await _answer_callback(cb_id)
-                    from app.db import get_overdue_payments, get_pending_payments
+                    from app.database import get_overdue_payments, get_pending_payments
                     all_pending = await get_pending_payments(since_date=tbank_reconciliation.TRACKING_START_DATE)
                     overdue = await get_overdue_payments(tbank_reconciliation.OVERDUE_DAYS, since_date=tbank_reconciliation.TRACKING_START_DATE)
 
@@ -1953,107 +1765,6 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                             await _edit_message(cb_chat_id, cb_message_id, cached, keyboard)
                         else:
                             await _answer_callback(cb_id, "Отчёт устарел")
-                else:
-                    await _answer_callback(cb_id, "🚫 Нет доступа")
-            elif cb_data.startswith("stat:"):
-                perms = access.get_permissions(cb_chat_id, cb_user_id)
-                if perms.has("reports"):
-                    await _answer_callback(cb_id)
-                    cached = _status_cache.get((cb_chat_id, cb_message_id))
-
-                    if cb_data.startswith("stat:branch:"):
-                        branch_name = cb_data[len("stat:branch:"):]
-                        if cached and branch_name in cached["branches_data"]:
-                            data = cached["branches_data"][branch_name]
-                            card_text = format_branch_status(data)
-                            back_kb = [
-                                [{"text": "← Назад", "callback_data": "stat:back"},
-                                 {"text": "🔄 Обновить точку", "callback_data": f"stat:refresh:{branch_name}"}],
-                            ]
-                            await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
-                        else:
-                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
-
-                    elif cb_data == "stat:back":
-                        if cached and cached.get("summary_text"):
-                            await _edit_message(cb_chat_id, cb_message_id, cached["summary_text"], cached["summary_keyboard"])
-                        else:
-                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
-
-                    elif cb_data == "stat:refresh":
-                        if cached:
-                            branches = cached["branches"]
-                            async def _safe_get_r(branch: dict) -> dict:
-                                try:
-                                    return await get_branch_status(branch)
-                                except Exception as e:
-                                    logger.error(f"[stat:refresh] [{branch['name']}]: {e}")
-                                    return cached["branches_data"].get(branch["name"], {"name": branch["name"]})
-                            results = await asyncio.gather(*[_safe_get_r(b) for b in branches])
-                            branches_data = {d["name"]: d for d in results}
-                            summary_text, summary_kb = _build_status_summary(list(results))
-                            cached["summary_text"] = summary_text
-                            cached["summary_keyboard"] = summary_kb
-                            cached["branches_data"] = branches_data
-                            await _edit_message(cb_chat_id, cb_message_id, summary_text, summary_kb)
-                        else:
-                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
-
-                    elif cb_data.startswith("stat:refresh:"):
-                        branch_name = cb_data[len("stat:refresh:"):]
-                        if cached:
-                            branch_obj = next((b for b in cached["branches"] if b["name"] == branch_name), None)
-                            if branch_obj:
-                                try:
-                                    data = await get_branch_status(branch_obj)
-                                except Exception as e:
-                                    logger.error(f"[stat:refresh:branch] [{branch_name}]: {e}")
-                                    data = cached["branches_data"].get(branch_name, {"name": branch_name})
-                                cached["branches_data"][branch_name] = data
-                                card_text = format_branch_status(data)
-                                has_summary = cached.get("summary_text") is not None
-                                if has_summary:
-                                    back_kb = [
-                                        [{"text": "← Назад", "callback_data": "stat:back"},
-                                         {"text": "🔄 Обновить точку", "callback_data": f"stat:refresh:{branch_name}"}],
-                                    ]
-                                else:
-                                    back_kb = [[{"text": "🔄 Обновить", "callback_data": f"stat:refresh:{branch_name}"}]]
-                                await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
-                            else:
-                                await _answer_callback(cb_id, "Точка не найдена")
-                        else:
-                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
-                else:
-                    await _answer_callback(cb_id, "🚫 Нет доступа")
-            elif cb_data.startswith("srch:"):
-                perms = access.get_permissions(cb_chat_id, cb_user_id)
-                if perms.has("search"):
-                    await _answer_callback(cb_id)
-                    srch_parts = cb_data.split(":", 3)
-                    if len(srch_parts) >= 4 and srch_parts[1] == "card":
-                        delivery_num = srch_parts[2]
-                        try:
-                            row_idx = int(srch_parts[3])
-                        except ValueError:
-                            row_idx = 0
-                        cached = _search_cache.get((cb_chat_id, cb_message_id))
-                        if cached and row_idx < len(cached["rows"]):
-                            r = cached["rows"][row_idx]
-                            phone = (r.get("client_phone") or "").strip()
-                            cnt = await get_client_order_count(phone) if phone else None
-                            card_text = await _format_order_card(r, client_count=cnt)
-                            back_label = cached.get("back_label", "← Назад")
-                            back_kb = [[{"text": back_label, "callback_data": "srch:back"}]]
-                            await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
-                        else:
-                            await _handle_search(cb_chat_id, delivery_num, city_filter=perms.city)
-                    elif len(srch_parts) >= 2 and srch_parts[1] == "back":
-                        cached = _search_cache.get((cb_chat_id, cb_message_id))
-                        if cached:
-                            await _edit_message(cb_chat_id, cb_message_id, cached["text"], cached["keyboard"])
-                        else:
-                            await _answer_callback(cb_id, "Результаты устарели, повтори поиск")
                 else:
                     await _answer_callback(cb_id, "🚫 Нет доступа")
             elif cb_data.startswith("order:"):
@@ -2148,6 +1859,10 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                 await _send(chat_id, "🚫 Нет доступа.")
             continue
 
+        # Киргизское приветствие Ильи — раз в день
+        if user_id == _ILYA_ID and _check_and_mark_ilya_greeting():
+            await _send(chat_id, random.choice(_KYRGYZ_GREETINGS))
+
         cmd_raw = text.lstrip("/").split("@")[0]
         parts = cmd_raw.split(None, 1)
         cmd = parts[0].lower()
@@ -2166,10 +1881,16 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
         city = perms.city  # None = все города, иначе фильтруем
 
         if cmd in ("статус", "status"):
+            if user_id == _ILYA_ID:
+                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_status(chat_id, arg, city_filter=city)
         elif cmd in ("повара", "cooks"):
+            if user_id == _ILYA_ID:
+                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_staff(chat_id, arg, "cook", city_filter=city)
         elif cmd in ("курьеры", "couriers"):
+            if user_id == _ILYA_ID:
+                await _send(chat_id, random.choice(_KYRGYZ_ACKS))
             await _handle_staff(chat_id, arg, "courier", city_filter=city)
         elif cmd in ("поиск", "search"):
             await _handle_search(chat_id, arg, city_filter=city)
@@ -2204,22 +1925,17 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             await _send(chat_id, f"❓ Неизвестная команда: /{cmd}\n\nНапиши /помощь")
 
 
-async def run_polling_loop(bot_token: str = "", tenant_id: int = 1) -> None:
-    """
-    Continuous polling loop для одного тенанта.
-    Запускается как asyncio.Task в lifespan — по одному на каждый активный тенант.
-    """
+async def run_polling_loop() -> None:
+    """Continuous polling loop. Runs as asyncio.Task in lifespan (replaces APScheduler job)."""
     import asyncio as _asyncio
-    token = bot_token or settings.telegram_analytics_bot_token
-    label = f"tenant_id={tenant_id}"
-    logger.info(f"Аркентий: polling loop started [{label}]")
+    logger.info("Аркентий: polling loop started")
     while True:
         try:
-            await poll_analytics_bot(bot_token=token, tenant_id=tenant_id)
+            await poll_analytics_bot()
             await _asyncio.sleep(0.5)
         except _asyncio.CancelledError:
-            logger.info(f"Аркентий: polling loop cancelled [{label}]")
+            logger.info("Аркентий: polling loop cancelled")
             break
         except Exception as e:
-            logger.error(f"Аркентий polling loop error [{label}]: {e}")
+            logger.error(f"Аркентий polling loop error: {e}")
             await _asyncio.sleep(5)

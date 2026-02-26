@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from app.clients import telegram
 from app.clients.bitrix24 import get_overdue_tasks
-from app.database import log_job_start, log_job_finish
+from app.db import log_job_start, log_job_finish
 
 logger = logging.getLogger(__name__)
 

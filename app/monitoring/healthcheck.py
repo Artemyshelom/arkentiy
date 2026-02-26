@@ -16,7 +16,7 @@ from fastapi import APIRouter
 from app.clients import telegram
 from app.clients.google_sheets import backup_file_to_drive
 from app.config import get_settings
-from app.database import DB_PATH, log_job_start, log_job_finish
+from app.db import DB_PATH, BACKEND, log_job_start, log_job_finish
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -35,11 +35,18 @@ async def health_check():
 
     db_ok = False
     try:
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("SELECT 1")
+        if BACKEND == "sqlite":
+            async with aiosqlite.connect(DB_PATH) as db:
+                await db.execute("SELECT 1")
+                db_ok = True
+        else:
+            from app.db import get_pool
+            pool = get_pool()
+            async with pool.acquire() as conn:
+                await conn.execute("SELECT 1")
             db_ok = True
     except Exception as e:
-        logger.error(f"Health check: SQLite недоступна: {e}")
+        logger.error(f"Health check: БД недоступна: {e}")
 
     return {
         "status": "ok" if db_ok else "degraded",
@@ -58,7 +65,11 @@ async def job_backup_sqlite() -> None:
     """
     Ежедневный бэкап SQLite в Google Drive.
     Запускается в main.py через APScheduler в 02:00.
+    В PG-режиме бэкап пропускается (PG имеет свою стратегию бэкапа).
     """
+    if BACKEND != "sqlite":
+        logger.info("job_backup_sqlite: PG backend — SQLite бэкап не нужен, пропуск")
+        return
     log_id = await log_job_start("backup_sqlite")
     date_str = datetime.now().strftime("%Y%m%d_%H%M")
     backup_path = Path(f"/tmp/ebidoebi_backup_{date_str}.db")

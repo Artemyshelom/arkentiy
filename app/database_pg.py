@@ -1190,35 +1190,212 @@ async def get_exact_time_orders(
 
 
 # =====================================================================
-# Стабы tbank-функций (таблицы не в PG-схеме, jobs защищены BACKEND-guard)
+# TBank — online_payments + tbank_registry_logs
 # =====================================================================
 
 async def save_bank_statement_log(*args, **kwargs) -> None:
-    logger.debug("save_bank_statement_log: stub in PG mode")
+    logger.debug("save_bank_statement_log: not implemented in PG mode")
 
-async def confirm_payout(*args, **kwargs) -> None:
-    logger.debug("confirm_payout: stub in PG mode")
 
-async def record_chargeback(*args, **kwargs) -> None:
-    logger.debug("record_chargeback: stub in PG mode")
+async def save_tbank_registry_log(
+    user_id: int,
+    chat_id: int,
+    filename: str,
+    report_date: str,
+    total_orders: int,
+    confirmed: int,
+    mismatched: int,
+    new_pending: int,
+    missing_in_iiko: int,
+    tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO tbank_registry_logs
+           (tenant_id, user_id, chat_id, filename, report_date,
+            total_orders, confirmed, mismatched, new_pending, missing_in_iiko)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+        tenant_id, user_id, chat_id, filename, report_date,
+        total_orders, confirmed, mismatched, new_pending, missing_in_iiko,
+    )
 
-async def get_payout_delayed(*args, **kwargs) -> list:
-    return []
 
-async def get_pending_payments(*args, **kwargs) -> list:
-    return []
+async def upsert_online_payment(
+    branch: str,
+    order_number: str,
+    order_date: str,
+    iiko_amount: float,
+    tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """INSERT INTO online_payments
+           (tenant_id, branch, order_number, order_date, iiko_amount, status)
+           VALUES ($1,$2,$3,$4,$5,'pending')
+           ON CONFLICT (tenant_id, branch, order_number) DO UPDATE SET
+             iiko_amount = EXCLUDED.iiko_amount,
+             updated_at  = now()
+           WHERE online_payments.status = 'pending'""",
+        tenant_id, branch, order_number, order_date, float(iiko_amount),
+    )
 
-async def get_overdue_payments(*args, **kwargs) -> list:
-    return []
 
-async def get_tracking_summary(*args, **kwargs) -> dict:
-    return {}
+async def confirm_online_payment(
+    branch: str,
+    order_number: str,
+    tbank_amount: float,
+    tbank_commission: float,
+    tbank_confirmed_date: str,
+    tbank_transaction_id: str,
+    iiko_amount: float | None = None,
+    tenant_id: int = 1,
+) -> str:
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, iiko_amount, status FROM online_payments WHERE tenant_id=$1 AND branch=$2 AND order_number=$3",
+            tenant_id, branch, order_number,
+        )
+        if row:
+            db_iiko = row["iiko_amount"]
+            if iiko_amount is not None:
+                status = "confirmed" if abs(iiko_amount - tbank_amount) < 1.0 else "mismatch"
+                new_iiko = iiko_amount
+            else:
+                status = "missing_in_iiko"
+                new_iiko = db_iiko
+            await conn.execute(
+                """UPDATE online_payments SET
+                     status=$1, iiko_amount=$2, tbank_amount=$3, tbank_commission=$4,
+                     tbank_confirmed_date=$5, tbank_transaction_id=$6, updated_at=now()
+                   WHERE tenant_id=$7 AND branch=$8 AND order_number=$9""",
+                status, new_iiko, float(tbank_amount), float(tbank_commission),
+                tbank_confirmed_date, tbank_transaction_id,
+                tenant_id, branch, order_number,
+            )
+            return status
+        else:
+            if iiko_amount is not None:
+                status = "confirmed" if abs(iiko_amount - tbank_amount) < 1.0 else "mismatch"
+                stored_iiko = iiko_amount
+            else:
+                status = "missing_in_iiko"
+                stored_iiko = tbank_amount
+            await conn.execute(
+                """INSERT INTO online_payments
+                   (tenant_id, branch, order_number, order_date, iiko_amount, status,
+                    tbank_amount, tbank_commission, tbank_confirmed_date, tbank_transaction_id)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)""",
+                tenant_id, branch, order_number, tbank_confirmed_date,
+                float(stored_iiko), status, float(tbank_amount), float(tbank_commission),
+                tbank_confirmed_date, tbank_transaction_id,
+            )
+            return f"created_{status}"
 
-async def upsert_online_payment(*args, **kwargs) -> None:
-    logger.debug("upsert_online_payment: stub in PG mode")
 
-async def confirm_online_payment(*args, **kwargs) -> None:
-    logger.debug("confirm_online_payment: stub in PG mode")
+async def confirm_payout(
+    branch: str,
+    order_number: str,
+    payout_date: str,
+    payout_amount: float,
+    tenant_id: int = 1,
+) -> str:
+    pool = get_pool()
+    result = await pool.execute(
+        """UPDATE online_payments SET payout_date=$1, payout_amount=$2, updated_at=now()
+           WHERE tenant_id=$3 AND branch=$4 AND order_number=$5""",
+        payout_date, float(payout_amount), tenant_id, branch, order_number,
+    )
+    return "confirmed" if result.split()[-1] != "0" else "not_found"
+
+
+async def record_chargeback(
+    branch: str,
+    order_number: str,
+    chargeback_date: str,
+    amount: float,
+    tenant_id: int = 1,
+) -> None:
+    pool = get_pool()
+    await pool.execute(
+        """UPDATE online_payments SET status='chargeback', payout_date=$1, payout_amount=$2, updated_at=now()
+           WHERE tenant_id=$3 AND branch=$4 AND order_number=$5""",
+        chargeback_date, -abs(float(amount)), tenant_id, branch, order_number,
+    )
+
+
+async def get_payout_delayed(days: int = 2, since_date: str | None = None, tenant_id: int = 1) -> list[dict]:
+    pool = get_pool()
+    conditions = [
+        "tenant_id = $1",
+        "status = 'confirmed'",
+        "payout_date IS NULL",
+        "tbank_confirmed_date IS NOT NULL",
+        f"NOW() - tbank_confirmed_date::timestamp >= interval '{days} days'",
+    ]
+    params: list = [tenant_id]
+    if since_date:
+        params.append(since_date)
+        conditions.append(f"order_date >= ${len(params)}")
+    rows = await pool.fetch(
+        f"SELECT * FROM online_payments WHERE {' AND '.join(conditions)} ORDER BY tbank_confirmed_date",
+        *params,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_pending_payments(
+    max_age_days: int | None = None,
+    since_date: str | None = None,
+    tenant_id: int = 1,
+) -> list[dict]:
+    pool = get_pool()
+    conditions = ["tenant_id = $1", "status = 'pending'"]
+    params: list = [tenant_id]
+    if since_date:
+        params.append(since_date)
+        conditions.append(f"order_date >= ${len(params)}")
+    if max_age_days is not None:
+        conditions.append(f"NOW() - order_date::timestamp >= interval '{max_age_days} days'")
+    rows = await pool.fetch(
+        f"SELECT * FROM online_payments WHERE {' AND '.join(conditions)} ORDER BY order_date",
+        *params,
+    )
+    return [dict(r) for r in rows]
+
+
+async def get_overdue_payments(days: int = 4, since_date: str | None = None, tenant_id: int = 1) -> list[dict]:
+    return await get_pending_payments(max_age_days=days, since_date=since_date, tenant_id=tenant_id)
+
+
+async def get_tracking_summary(since_date: str | None = None, tenant_id: int = 1) -> dict[str, dict[str, dict]]:
+    pool = get_pool()
+    params: list = [tenant_id]
+    where = "tenant_id = $1"
+    if since_date:
+        params.append(since_date)
+        where += f" AND order_date >= ${len(params)}"
+    rows = await pool.fetch(
+        f"""SELECT branch, order_date, status, COUNT(*) cnt, COALESCE(SUM(iiko_amount), 0) total_amt
+            FROM online_payments WHERE {where}
+            GROUP BY branch, order_date, status ORDER BY branch, order_date DESC""",
+        *params,
+    )
+    result: dict[str, dict[str, dict]] = {}
+    for r in rows:
+        b, d, s = r["branch"], r["order_date"], r["status"]
+        if b not in result:
+            result[b] = {}
+        if d not in result[b]:
+            result[b][d] = {"confirmed": 0, "pending": 0, "missing": 0, "amount_pending": 0.0}
+        if s == "confirmed":
+            result[b][d]["confirmed"] += r["cnt"]
+        elif s == "pending":
+            result[b][d]["pending"] += r["cnt"]
+            result[b][d]["amount_pending"] += float(r["total_amt"])
+        elif s == "missing_in_iiko":
+            result[b][d]["missing"] += r["cnt"]
+    return result
 
 
 # =====================================================================

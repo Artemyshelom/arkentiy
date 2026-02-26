@@ -193,6 +193,10 @@ async def _edit_message(chat_id: int, message_id: int, text: str, keyboard: list
 # Кеш отчётов ТБанк для drill-down (message_id -> original report text)
 _tbank_report_cache: dict[int, str] = {}
 
+# Кеш поиска для edit_message навигации (chat_id, msg_id) -> {text, keyboard, rows, back_label}
+_search_cache: dict[tuple[int, int], dict] = {}
+_SEARCH_CACHE_MAX = 100
+
 
 async def _download_tg_file(file_id: str) -> bytes | None:
     """Скачивает файл из Telegram по file_id."""
@@ -555,6 +559,15 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
 
     s = r["sum"]
     sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
+    pay_raw = (r.get("payment_type") or "").strip()
+    _pay_map = {
+        "наличные": "Наличные",
+        "безналичный расчет": "Безнал", "безналичный расчёт": "Безнал",
+        "онлайн": "Онлайн", "тинькофф": "Онлайн", "т-банк": "Онлайн",
+        "системы лояльности": "Бонусы",
+    }
+    pay_str = _pay_map.get(pay_raw.lower(), pay_raw) if pay_raw else ""
+    sum_line = f"{sum_str} · {html.escape(pay_str)}" if pay_str else sum_str
     client = html.escape(r.get("client_name") or "—")
     phone = html.escape(r.get("client_phone") or "—")
 
@@ -615,7 +628,7 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
         f"   👤 {client}{client_tag} | 📞 <code>{phone}</code>\n"
         f"   🗺 {addr}\n"
         f"   🛵 Курьер: {html.escape(r['courier'] or '—')}\n"
-        f"   💰 {sum_str}\n"
+        f"   💰 {sum_line}\n"
         f"   ⏱ {_fmt_dt(r['planned_time'])} → {_fmt_dt(r['actual_time'])} | {late_str}\n"
         f"🍱 Состав:\n{items_str}"
     )
@@ -627,7 +640,8 @@ def _format_order_compact(r: dict) -> str:
     sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
     client = html.escape(r.get("client_name") or "?")
     if r["is_late"]:
-        late_icon = "🔴"
+        mins = r.get("late_minutes")
+        late_icon = f"🔴 +{int(mins)} мин" if mins else "🔴"
     elif r["actual_time"]:
         late_icon = "✅"
     else:
@@ -641,9 +655,8 @@ def _format_order_compact(r: dict) -> str:
 async def _handle_search(chat_id: int, query: str, city_filter: str | None = None) -> None:
     """
     /поиск <запрос> — универсальный поиск по orders_raw.
-    Если запрос — только цифры: сначала точное совпадение по номеру заказа (полная карточка),
-    остальные совпадения (телефон, адрес, состав) — компактный список отдельно.
-    Иначе — обычный поиск по всем полям.
+    Все результаты — в одном сообщении с inline-навигацией (edit_message).
+    Типы: numeric (по номеру заказа), phone (по телефону), text (по тексту).
     """
     if not query:
         await _send(
@@ -668,11 +681,15 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             tokens = tokens[:-1]
             query = " ".join(tokens)
 
-    is_numeric = query.isdigit()
+    # Определяем тип поиска
+    is_phone = bool(re.match(r"^\+?\d{10,11}$", query.replace(" ", "").replace("-", "")))
+    is_numeric = query.isdigit() and not is_phone
     q = f"%{query}%"
+
     COLS = """branch_name, delivery_num, status, courier, sum,
               planned_time, actual_time, is_late, late_minutes,
-              client_name, client_phone, delivery_address, items, is_self_service, comment"""
+              client_name, client_phone, delivery_address, items, is_self_service, comment,
+              payment_type"""
 
     # Права чата
     allowed_set: set[str] = set()
@@ -694,54 +711,46 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif city_filter:
         city_branch_names = list(allowed_set)
 
-    def _city_clause(alias: str = "") -> tuple[str, list]:
-        """Возвращает (sql_fragment, params) для фильтра по городу."""
-        prefix = f"{alias}." if alias else ""
+    def _city_clause() -> tuple[str, list]:
         if city_branch_names:
             placeholders = ",".join("?" * len(city_branch_names))
-            return f"AND {prefix}branch_name IN ({placeholders})", list(city_branch_names)
+            return f"AND branch_name IN ({placeholders})", list(city_branch_names)
         return "", []
+
+    city_sql, city_params = _city_clause()
+    total = 0
 
     async with aiosqlite.connect(DB_PATH) as db:
         db.row_factory = aiosqlite.Row
-        city_sql, city_params = _city_clause()
 
         if is_numeric:
             async with db.execute(
                 f"SELECT {COLS} FROM orders_raw WHERE delivery_num = ? {city_sql} ORDER BY planned_time DESC",
                 (query, *city_params),
             ) as cur:
-                exact_rows = [dict(r) for r in await cur.fetchall()]
+                rows = [dict(r) for r in await cur.fetchall()]
+            query_type = "numeric"
 
-            async with db.execute(
-                f"""SELECT COUNT(*) FROM orders_raw
-                    WHERE delivery_num != ?
-                      AND (client_phone LIKE ? OR delivery_address LIKE ? OR items LIKE ?)
-                      {city_sql}""",
-                (query, q, q, q, *city_params),
-            ) as cur:
-                other_total = (await cur.fetchone())[0]
-
+        elif is_phone:
+            phone_q = query.lstrip("+")
             async with db.execute(
                 f"""SELECT {COLS} FROM orders_raw
-                    WHERE delivery_num != ?
-                      AND (client_phone LIKE ? OR delivery_address LIKE ? OR items LIKE ?)
-                      {city_sql}
-                    ORDER BY planned_time DESC LIMIT 10""",
-                (query, q, q, q, *city_params),
+                    WHERE (client_phone LIKE ? OR client_phone LIKE ?)
+                    {city_sql}
+                    ORDER BY planned_time DESC LIMIT 30""",
+                (f"%{phone_q}%", f"%{query}%", *city_params),
             ) as cur:
-                other_rows = [dict(r) for r in await cur.fetchall()]
+                rows = [dict(r) for r in await cur.fetchall()]
+            query_type = "phone"
+
         else:
-            exact_rows = []
-            other_total = 0
-            other_rows = []
             async with db.execute(
                 f"""SELECT COUNT(*) FROM orders_raw
                     WHERE (delivery_num LIKE ? OR client_phone LIKE ?
                        OR delivery_address LIKE ? OR items LIKE ?) {city_sql}""",
                 (q, q, q, q, *city_params),
             ) as cur:
-                other_total = (await cur.fetchone())[0]
+                total = (await cur.fetchone())[0]
             async with db.execute(
                 f"""SELECT {COLS} FROM orders_raw
                     WHERE (delivery_num LIKE ? OR client_phone LIKE ?
@@ -749,43 +758,116 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
                     ORDER BY planned_time DESC LIMIT 20""",
                 (q, q, q, q, *city_params),
             ) as cur:
-                other_rows = [dict(r) for r in await cur.fetchall()]
+                rows = [dict(r) for r in await cur.fetchall()]
+            query_type = "text"
 
-    if not exact_rows and not other_rows:
-        await _send(
-            chat_id,
-            f"🔍 <code>{html.escape(query)}</code> — ничего не найдено."
-        )
+    if not rows:
+        await _send(chat_id, f"🔍 <code>{html.escape(query)}</code> — ничего не найдено.")
         return
 
-    # Показываем точные совпадения как полные карточки
-    if exact_rows:
-        header = f"🔍 <b>Заказ #{html.escape(query)}</b> — найдено: {len(exact_rows)}"
-        await _send(chat_id, header)
-        for r in exact_rows:
-            phone_for_count = (r.get("client_phone") or "").strip()
-            cnt = await get_client_order_count(phone_for_count) if phone_for_count else None
-            await _send(chat_id, await _format_order_card(r, client_count=cnt))
+    # Один результат — сразу карточка, без навигации
+    if len(rows) == 1:
+        r = rows[0]
+        phone = (r.get("client_phone") or "").strip()
+        cnt = await get_client_order_count(phone) if phone else None
+        await _send(chat_id, await _format_order_card(r, client_count=cnt))
+        return
 
-    # Показываем остальные совпадения компактно
-    if other_rows:
-        if exact_rows:
-            more_str = f" (показаны 10 из {other_total})" if other_total > 10 else ""
-            other_header = f"\n🔎 <i>Ещё найдено {other_total} совпадений в других полях{more_str}:</i>"
-        else:
-            more_str = f" (показаны 20 из {other_total})" if other_total > 20 else ""
-            other_header = f"🔍 <b>{html.escape(query)}</b> — найдено: {other_total}{more_str}"
+    # --- Несколько результатов: одно сообщение + кнопки ---
 
-        out_lines = [other_header, ""]
+    def _late_ico(r: dict) -> str:
+        if (r.get("status") or "").lower() in ("отменена", "отменён"):
+            return "❌"
+        if r["is_late"]:
+            mins = r.get("late_minutes")
+            return f"🔴 +{int(mins)} мин" if mins else "🔴"
+        if r["actual_time"]:
+            return "✅"
+        return "⏳"
+
+    if query_type == "numeric":
+        lines = [f"🔍 <b>#{html.escape(query)}</b> — найдено в {len(rows)} филиалах\n"]
+        for r in rows:
+            s = r["sum"]
+            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
+            lines.append(
+                f"📍 {html.escape(r['branch_name'])} · "
+                f"{html.escape(r.get('status') or '?')} · {_late_ico(r)} · {sum_str}"
+            )
+        text = "\n".join(lines)
+        keyboard: list[list[dict]] = []
+        row_buf: list[dict] = []
+        for idx, r in enumerate(rows):
+            row_buf.append({"text": f"📋 {r['branch_name']}", "callback_data": f"srch:card:{query}:{idx}"})
+            if len(row_buf) == 2:
+                keyboard.append(row_buf)
+                row_buf = []
+        if row_buf:
+            keyboard.append(row_buf)
+        back_label = f"← #{query} (все филиалы)"
+
+    elif query_type == "phone":
+        client_name = (rows[0].get("client_name") or "—")
+        branches_set = {r["branch_name"] for r in rows}
+        branch_note = f" · {html.escape(rows[0]['branch_name'])}" if len(branches_set) == 1 else ""
+        lines = [
+            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов",
+            f"👤 {html.escape(client_name)}{branch_note}\n",
+        ]
+        for r in rows:
+            s = r["sum"]
+            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
+            branch_part = f" · {html.escape(r['branch_name'].split('_')[0])}" if len(branches_set) > 1 else ""
+            lines.append(
+                f"#{r['delivery_num']}{branch_part} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
+            )
+        text = "\n".join(lines)
         keyboard = []
-        for r in other_rows:
-            out_lines.append(_format_order_compact(r))
-            num = r["delivery_num"]
-            branch_short = r["branch_name"].split("_")[0]
-            keyboard.append([{"text": f"📋 Открыть #{num} ({branch_short})", "callback_data": f"order:{num}"}])
-        if other_total > (10 if exact_rows else 20):
-            out_lines.append("\n<i>Уточни запрос чтобы сузить выборку.</i>")
-        await _send_with_keyboard(chat_id, "\n".join(out_lines), keyboard)
+        row_buf = []
+        for idx, r in enumerate(rows):
+            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
+            if len(row_buf) == 3:
+                keyboard.append(row_buf)
+                row_buf = []
+        if row_buf:
+            keyboard.append(row_buf)
+        back_label = "← К клиенту"
+
+    else:
+        more_str = f" (показаны 20 из {total})" if total > 20 else ""
+        lines = [f"🔍 <b>{html.escape(query)}</b> — найдено: {total or len(rows)}{more_str}\n"]
+        for r in rows:
+            s = r["sum"]
+            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
+            client = html.escape(r.get("client_name") or "?")
+            lines.append(
+                f"#{r['delivery_num']} · {client} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
+            )
+        if total > 20:
+            lines.append("\n<i>Уточни запрос чтобы сузить выборку.</i>")
+        text = "\n".join(lines)
+        keyboard = []
+        row_buf = []
+        for idx, r in enumerate(rows):
+            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
+            if len(row_buf) == 3:
+                keyboard.append(row_buf)
+                row_buf = []
+        if row_buf:
+            keyboard.append(row_buf)
+        back_label = "← К результатам"
+
+    msg_id = await _send_with_keyboard_return_id(chat_id, text, keyboard)
+    if msg_id:
+        if len(_search_cache) >= _SEARCH_CACHE_MAX:
+            oldest = next(iter(_search_cache))
+            del _search_cache[oldest]
+        _search_cache[(chat_id, msg_id)] = {
+            "text": text,
+            "keyboard": keyboard,
+            "rows": rows,
+            "back_label": back_label,
+        }
 
 
 
@@ -1765,6 +1847,36 @@ async def poll_analytics_bot() -> None:
                             await _edit_message(cb_chat_id, cb_message_id, cached, keyboard)
                         else:
                             await _answer_callback(cb_id, "Отчёт устарел")
+                else:
+                    await _answer_callback(cb_id, "🚫 Нет доступа")
+            elif cb_data.startswith("srch:"):
+                perms = access.get_permissions(cb_chat_id, cb_user_id)
+                if perms.has("search"):
+                    await _answer_callback(cb_id)
+                    srch_parts = cb_data.split(":", 3)
+                    if len(srch_parts) >= 4 and srch_parts[1] == "card":
+                        delivery_num = srch_parts[2]
+                        try:
+                            row_idx = int(srch_parts[3])
+                        except ValueError:
+                            row_idx = 0
+                        cached = _search_cache.get((cb_chat_id, cb_message_id))
+                        if cached and row_idx < len(cached["rows"]):
+                            r = cached["rows"][row_idx]
+                            phone = (r.get("client_phone") or "").strip()
+                            cnt = await get_client_order_count(phone) if phone else None
+                            card_text = await _format_order_card(r, client_count=cnt)
+                            back_label = cached.get("back_label", "← Назад")
+                            back_kb = [[{"text": back_label, "callback_data": "srch:back"}]]
+                            await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
+                        else:
+                            await _handle_search(cb_chat_id, delivery_num, city_filter=perms.city)
+                    elif len(srch_parts) >= 2 and srch_parts[1] == "back":
+                        cached = _search_cache.get((cb_chat_id, cb_message_id))
+                        if cached:
+                            await _edit_message(cb_chat_id, cb_message_id, cached["text"], cached["keyboard"])
+                        else:
+                            await _answer_callback(cb_id, "Результаты устарели, повтори поиск")
                 else:
                     await _answer_callback(cb_id, "🚫 Нет доступа")
             elif cb_data.startswith("order:"):

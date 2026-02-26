@@ -163,13 +163,13 @@ def format_branch_status(data: dict) -> str:
         delivery = data.get("avg_delivery_min")
         time_parts = []
         if cook is not None:
-            time_parts.append(f"Готовка: {cook}")
+            time_parts.append(f"готовка {cook}")
         if wait is not None:
-            time_parts.append(f"Ожидание: {wait}")
+            time_parts.append(f"ожидание {wait}")
         if delivery is not None:
-            time_parts.append(f"В пути: {delivery}")
+            time_parts.append(f"в пути {delivery}")
         if time_parts:
-            lines.append(f"🕐 {' | '.join(time_parts)} мин")
+            lines.append(f"🕐 {' → '.join(time_parts)} мин")
 
         active = data.get("active_orders", 0) or 0
         delivered = data.get("delivered_today", 0) or 0

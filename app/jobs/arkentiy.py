@@ -18,6 +18,7 @@
 Будущий analytics_bot.py будет отдельным модулем для глубокой аналитики.
 """
 
+import asyncio
 import html
 import logging
 import random
@@ -196,6 +197,10 @@ _tbank_report_cache: dict[int, str] = {}
 # Кеш поиска для edit_message навигации (chat_id, msg_id) -> {text, keyboard, rows, back_label}
 _search_cache: dict[tuple[int, int], dict] = {}
 _SEARCH_CACHE_MAX = 100
+
+# Кеш статуса для edit_message навигации (chat_id, msg_id) -> {summary_text, summary_keyboard, branches_data, branches}
+_status_cache: dict[tuple[int, int], dict] = {}
+_STATUS_CACHE_MAX = 50
 
 
 async def _download_tg_file(file_id: str) -> bytes | None:
@@ -480,7 +485,59 @@ def _format_staff_block(branch_name: str, staff: list[dict], role: str) -> str:
 # RT handlers (статус, повара, курьеры) — читают из BranchState
 # ------------------------------------------------------------------
 
+def _status_summary_line(data: dict) -> str:
+    """Компактная строка точки для сводки /статус."""
+    name = html.escape(data["name"])
+    rev = f"{data['revenue']:,} ₽".replace(",", " ") if data.get("revenue") is not None else "—"
+    checks = f"{data['check_count']} чеков" if data.get("check_count") is not None else "—"
+    delays = data.get("delays")
+    if delays and delays.get("total_delivered", 0) > 0:
+        late = delays["late_count"]
+        if late >= 2:
+            late_ico = f"🔴 {late} опозд."
+        elif late == 1:
+            late_ico = "🟡 1 опозд."
+        else:
+            late_ico = "✅"
+    elif delays is not None:
+        late_ico = "✅"
+    else:
+        late_ico = "⏳"
+    if data.get("revenue") is None and data.get("check_count") is None:
+        late_ico = "⚠️"
+    return f"{name}  {rev}  {checks}  {late_ico}"
+
+
+def _build_status_summary(results: list[dict]) -> tuple[str, list]:
+    """Строит сводное сообщение и клавиатуру для нескольких точек."""
+    from datetime import datetime, timezone, timedelta
+    now_str = datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M")
+    lines = [f"📊 <b>Статус</b> — {now_str}\n"]
+    for data in results:
+        lines.append(_status_summary_line(data))
+
+    keyboard: list[list[dict]] = []
+    row_buf: list[dict] = []
+    for data in results:
+        name = data["name"]
+        short = name.split("_")[0] + " " + "_".join(name.split("_")[1:]) if "_" in name else name
+        row_buf.append({"text": f"📍 {name}", "callback_data": f"stat:branch:{name}"})
+        if len(row_buf) == 2:
+            keyboard.append(row_buf)
+            row_buf = []
+    if row_buf:
+        keyboard.append(row_buf)
+    keyboard.append([{"text": "🔄 Обновить", "callback_data": "stat:refresh"}])
+
+    return "\n".join(lines), keyboard
+
+
 async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None) -> None:
+    """
+    /статус [фильтр] — статус точек.
+    Одна точка → сразу карточка + кнопка обновить.
+    Несколько → сводка + кнопки per-точка + обновить (edit_message навигация).
+    """
     all_branches = get_available_branches()
     if not all_branches:
         await _send(chat_id, "⚠️ Нет настроенных точек.")
@@ -494,16 +551,54 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
-    if len(filtered) > 1:
-        await _send(chat_id, f"🔍 Собираю данные по {len(filtered)} точкам...")
-
-    for branch in filtered:
+    # Параллельный сбор данных
+    async def _safe_get(branch: dict) -> dict:
         try:
-            data = await get_branch_status(branch)
-            await _send(chat_id, format_branch_status(data))
+            return await get_branch_status(branch)
         except Exception as e:
-            logger.error(f"[analytics_bot] статус [{branch['name']}]: {e}")
-            await _send(chat_id, f"⚠️ Ошибка по точке {branch['name']}")
+            logger.error(f"[статус] [{branch['name']}]: {e}")
+            return {"name": branch["name"], "revenue": None, "check_count": None,
+                    "avg_check": None, "cogs_pct": None, "discount_sum": None,
+                    "discount_types_agg": [], "sailplay": None, "tz": None,
+                    "active_orders": None, "delivered_today": None,
+                    "orders_before_dispatch": None, "orders_cooking": None,
+                    "orders_ready": None, "orders_on_way": None,
+                    "couriers_on_shift": None, "cooks_on_shift": None,
+                    "delays": None, "avg_cooking_min": None, "avg_wait_min": None,
+                    "avg_delivery_min": None}
+
+    results = await asyncio.gather(*[_safe_get(b) for b in filtered])
+
+    # Одна точка — карточка напрямую
+    if len(results) == 1:
+        data = results[0]
+        card_text = format_branch_status(data)
+        refresh_kb = [[{"text": "🔄 Обновить", "callback_data": f"stat:refresh:{data['name']}"}]]
+        msg_id = await _send_with_keyboard_return_id(chat_id, card_text, refresh_kb)
+        if msg_id:
+            if len(_status_cache) >= _STATUS_CACHE_MAX:
+                del _status_cache[next(iter(_status_cache))]
+            _status_cache[(chat_id, msg_id)] = {
+                "summary_text": None,
+                "summary_keyboard": None,
+                "branches_data": {data["name"]: data},
+                "branches": filtered,
+            }
+        return
+
+    # Несколько точек — сводка
+    branches_data = {d["name"]: d for d in results}
+    summary_text, summary_kb = _build_status_summary(list(results))
+    msg_id = await _send_with_keyboard_return_id(chat_id, summary_text, summary_kb)
+    if msg_id:
+        if len(_status_cache) >= _STATUS_CACHE_MAX:
+            del _status_cache[next(iter(_status_cache))]
+        _status_cache[(chat_id, msg_id)] = {
+            "summary_text": summary_text,
+            "summary_keyboard": summary_kb,
+            "branches_data": branches_data,
+            "branches": filtered,
+        }
 
 
 async def _handle_staff(chat_id: int, arg: str, role: str, city_filter: str | None = None) -> None:
@@ -1847,6 +1942,77 @@ async def poll_analytics_bot() -> None:
                             await _edit_message(cb_chat_id, cb_message_id, cached, keyboard)
                         else:
                             await _answer_callback(cb_id, "Отчёт устарел")
+                else:
+                    await _answer_callback(cb_id, "🚫 Нет доступа")
+            elif cb_data.startswith("stat:"):
+                perms = access.get_permissions(cb_chat_id, cb_user_id)
+                if perms.has("reports"):
+                    await _answer_callback(cb_id)
+                    cached = _status_cache.get((cb_chat_id, cb_message_id))
+
+                    if cb_data.startswith("stat:branch:"):
+                        branch_name = cb_data[len("stat:branch:"):]
+                        if cached and branch_name in cached["branches_data"]:
+                            data = cached["branches_data"][branch_name]
+                            card_text = format_branch_status(data)
+                            back_kb = [
+                                [{"text": "← Назад", "callback_data": "stat:back"},
+                                 {"text": "🔄 Обновить точку", "callback_data": f"stat:refresh:{branch_name}"}],
+                            ]
+                            await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
+                        else:
+                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
+
+                    elif cb_data == "stat:back":
+                        if cached and cached.get("summary_text"):
+                            await _edit_message(cb_chat_id, cb_message_id, cached["summary_text"], cached["summary_keyboard"])
+                        else:
+                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
+
+                    elif cb_data == "stat:refresh":
+                        if cached:
+                            branches = cached["branches"]
+                            async def _safe_get_r(branch: dict) -> dict:
+                                try:
+                                    return await get_branch_status(branch)
+                                except Exception as e:
+                                    logger.error(f"[stat:refresh] [{branch['name']}]: {e}")
+                                    return cached["branches_data"].get(branch["name"], {"name": branch["name"]})
+                            results = await asyncio.gather(*[_safe_get_r(b) for b in branches])
+                            branches_data = {d["name"]: d for d in results}
+                            summary_text, summary_kb = _build_status_summary(list(results))
+                            cached["summary_text"] = summary_text
+                            cached["summary_keyboard"] = summary_kb
+                            cached["branches_data"] = branches_data
+                            await _edit_message(cb_chat_id, cb_message_id, summary_text, summary_kb)
+                        else:
+                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
+
+                    elif cb_data.startswith("stat:refresh:"):
+                        branch_name = cb_data[len("stat:refresh:"):]
+                        if cached:
+                            branch_obj = next((b for b in cached["branches"] if b["name"] == branch_name), None)
+                            if branch_obj:
+                                try:
+                                    data = await get_branch_status(branch_obj)
+                                except Exception as e:
+                                    logger.error(f"[stat:refresh:branch] [{branch_name}]: {e}")
+                                    data = cached["branches_data"].get(branch_name, {"name": branch_name})
+                                cached["branches_data"][branch_name] = data
+                                card_text = format_branch_status(data)
+                                has_summary = cached.get("summary_text") is not None
+                                if has_summary:
+                                    back_kb = [
+                                        [{"text": "← Назад", "callback_data": "stat:back"},
+                                         {"text": "🔄 Обновить точку", "callback_data": f"stat:refresh:{branch_name}"}],
+                                    ]
+                                else:
+                                    back_kb = [[{"text": "🔄 Обновить", "callback_data": f"stat:refresh:{branch_name}"}]]
+                                await _edit_message(cb_chat_id, cb_message_id, card_text, back_kb)
+                            else:
+                                await _answer_callback(cb_id, "Точка не найдена")
+                        else:
+                            await _answer_callback(cb_id, "Данные устарели, повтори /статус")
                 else:
                     await _answer_callback(cb_id, "🚫 Нет доступа")
             elif cb_data.startswith("srch:"):

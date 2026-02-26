@@ -486,41 +486,62 @@ def _format_staff_block(branch_name: str, staff: list[dict], role: str) -> str:
 # ------------------------------------------------------------------
 
 def _status_summary_line(data: dict) -> str:
-    """Компактная строка точки для сводки /статус."""
+    """Двухстрочный блок точки для сводки /статус (вариант А)."""
     name = html.escape(data["name"])
     rev = f"{data['revenue']:,} ₽".replace(",", " ") if data.get("revenue") is not None else "—"
-    checks = f"{data['check_count']} чеков" if data.get("check_count") is not None else "—"
+    checks = f"{data['check_count']} чека" if data.get("check_count") is not None else "—"
+
+    # Строка 1: имя · выручка · чеки
+    line1 = f"<b>{name}</b> · {rev} · {checks}"
+
+    # Строка 2: опоздания + активные заказы
+    parts2: list[str] = []
     delays = data.get("delays")
     if delays and delays.get("total_delivered", 0) > 0:
         late = delays["late_count"]
+        total = delays["total_delivered"]
+        pct = round(late / total * 100) if total else 0
+        avg_min = delays.get("avg_delay_min", 0)
         if late >= 2:
-            late_ico = f"🔴 {late} опозд."
+            parts2.append(f"🔴 {late}/{total} опозд. ({pct}%) ≈{avg_min} мин")
         elif late == 1:
-            late_ico = "🟡 1 опозд."
+            parts2.append(f"🟡 1/{total} опозд. ({pct}%) ≈{avg_min} мин")
         else:
-            late_ico = "✅"
+            parts2.append(f"✅ 0/{total} опозд.")
     elif delays is not None:
-        late_ico = "✅"
+        parts2.append("✅ 0 опозд.")
+    elif data.get("revenue") is None and data.get("check_count") is None:
+        parts2.append("⚠️ нет данных")
     else:
-        late_ico = "⏳"
-    if data.get("revenue") is None and data.get("check_count") is None:
-        late_ico = "⚠️"
-    return f"{name}  {rev}  {checks}  {late_ico}"
+        parts2.append("⏳ RT загружается")
+
+    active = data.get("active_orders")
+    if active is not None:
+        n_dispatch = data.get("orders_before_dispatch") or 0
+        n_way = data.get("orders_on_way") or 0
+        zak = f"🚚 {active} акт."
+        if n_dispatch:
+            zak += f" · {n_dispatch} до отпр."
+        if n_way:
+            zak += f" · {n_way} в пути"
+        parts2.append(zak)
+
+    line2 = " · ".join(parts2)
+    return f"{line1}\n{line2}"
 
 
 def _build_status_summary(results: list[dict]) -> tuple[str, list]:
     """Строит сводное сообщение и клавиатуру для нескольких точек."""
     from datetime import datetime, timezone, timedelta
     now_str = datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M")
-    lines = [f"📊 <b>Статус</b> — {now_str}\n"]
+    blocks = [f"📊 <b>Статус</b> — {now_str}"]
     for data in results:
-        lines.append(_status_summary_line(data))
+        blocks.append(_status_summary_line(data))
 
     keyboard: list[list[dict]] = []
     row_buf: list[dict] = []
     for data in results:
         name = data["name"]
-        short = name.split("_")[0] + " " + "_".join(name.split("_")[1:]) if "_" in name else name
         row_buf.append({"text": f"📍 {name}", "callback_data": f"stat:branch:{name}"})
         if len(row_buf) == 2:
             keyboard.append(row_buf)
@@ -529,7 +550,7 @@ def _build_status_summary(results: list[dict]) -> tuple[str, list]:
         keyboard.append(row_buf)
     keyboard.append([{"text": "🔄 Обновить", "callback_data": "stat:refresh"}])
 
-    return "\n".join(lines), keyboard
+    return "\n\n".join(blocks), keyboard
 
 
 async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None) -> None:

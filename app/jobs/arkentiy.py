@@ -1847,9 +1847,10 @@ async def _handle_payment_changes(chat_id: int, arg: str, city_filter=None) -> N
     )]
 
     try:
-        from app.db import get_pool_or_none
-        pool = get_pool_or_none()
-        if pool:
+        from app.db import BACKEND
+        if BACKEND == "postgresql":
+            from app.db import get_pool
+            pool = get_pool()
             rows = await pool.fetch(
                 """SELECT branch_name, delivery_num, planned_time, sum, comment
                    FROM orders_raw 

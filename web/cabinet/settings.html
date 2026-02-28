@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Настройки — Аркентий</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={theme:{extend:{colors:{brand:{50:"#eef2ff",100:"#e0e7ff",500:"#6366f1",600:"#4f46e5",700:"#4338ca"}}}}}</script>
+  <style>
+    .sidebar-link{display:flex;align-items:center;gap:0.75rem;padding:0.75rem 1rem;border-radius:0.5rem;color:#4b5563;transition:all 0.15s}
+    .sidebar-link:hover{background:#f3f4f6;color:#1f2937}.sidebar-link.active{background:#eef2ff;color:#4f46e5;font-weight:500}
+    .card{background:#fff;border:1px solid #e5e7eb;border-radius:1rem;padding:1.25rem}
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen">
+  <header class="lg:hidden fixed top-0 left-0 right-0 bg-white border-b z-50 px-4 h-14 flex items-center justify-between">
+    <a href="/" class="text-lg font-bold text-brand-600">Аркентий</a>
+    <button onclick="toggleMenu()" class="p-2"><svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg></button>
+  </header>
+  <div id="menu-overlay" class="lg:hidden fixed inset-0 bg-black/50 z-40 hidden" onclick="toggleMenu()"></div>
+  <aside id="sidebar" class="fixed top-0 left-0 h-full w-64 bg-white border-r flex flex-col z-50 transform -translate-x-full lg:translate-x-0 transition-transform">
+    <div class="p-6 border-b hidden lg:block"><a href="/" class="text-xl font-bold text-brand-600">Аркентий</a></div>
+    <div class="p-6 border-b lg:hidden flex items-center justify-between"><span class="text-lg font-bold text-brand-600">Меню</span><button onclick="toggleMenu()">✕</button></div>
+    <nav class="flex-1 p-4 space-y-1">
+      <a href="/cabinet/" class="sidebar-link">🏠 Обзор</a>
+      <a href="/cabinet/subscription.html" class="sidebar-link ">📦 Подписка</a>
+      <a href="/cabinet/connections.html" class="sidebar-link">🔗 Подключения</a>
+      <a href="/cabinet/billing.html" class="sidebar-link ">💳 Платежи</a>
+      <a href="/cabinet/settings.html" class="sidebar-link active">⚙️ Настройки</a>
+    </nav>
+    <div class="p-4 border-t"><button onclick="logout()" class="text-sm text-gray-500">Выйти</button></div>
+  </aside>
+  <main class="pt-14 lg:pt-0 lg:ml-64 p-4 lg:p-8">
+    <div class="max-w-4xl">
+      <h1 class="text-xl lg:text-2xl font-bold mb-4 lg:mb-6">Настройки</h1>
+      <div class="card">
+        <p class="text-gray-500">Настройки профиля</p>
+      </div>
+    </div>
+  </main>
+  <script src="/js/cabinet.js"></script>
+  <script>
+    function toggleMenu(){document.getElementById("sidebar").classList.toggle("-translate-x-full");document.getElementById("menu-overlay").classList.toggle("hidden")}
+    document.addEventListener("DOMContentLoaded",()=>{if(!checkAuth())return});
+  </script>
+</body>
+</html>

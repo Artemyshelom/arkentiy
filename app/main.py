@@ -5,6 +5,7 @@
 
 import asyncio
 import logging
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -25,6 +26,7 @@ from app.db import (
 from app import access as _access
 from app.monitoring.healthcheck import router as health_router
 from app.webhooks.bitrix import router as bitrix_router
+from app.routers.cabinet import router as cabinet_router
 
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
@@ -281,6 +283,8 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(bitrix_router, prefix="/webhook")
+app.include_router(cabinet_router)
+app.mount("/", StaticFiles(directory="web", html=True), name="static")
 
 
 # --- Ручные триггеры (для отладки и тестирования) ---

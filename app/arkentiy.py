@@ -623,20 +623,29 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
 
 def _format_order_compact(r: dict) -> str:
     """Компактная строка для больших выборок."""
+    # Тип заказа
+    type_icon = "🚶" if r.get("is_self_service") else "🛵"
+    
+    # Город из branch_name
+    city = r["branch_name"].split("_")[0] if r.get("branch_name") else "?"
+    
+    # Сумма без пробелов
     s = r["sum"]
-    sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-    client = html.escape(r.get("client_name") or "?")
+    sum_str = f"{int(float(s))}₽" if s else "—"
+    
+    # Статус с минутами
     if r["is_late"]:
-        late_icon = "🔴"
+        mins = int(r.get("late_minutes") or 0)
+        late_icon = f"🔴 +{mins}м" if mins else "🔴"
     elif r["actual_time"]:
         late_icon = "✅"
     else:
         late_icon = "⏳"
+    
     return (
-        f"  #{r['delivery_num']} {html.escape(r['branch_name'])}\n"
-        f"  👤 {client} | 💰 {sum_str} | {late_icon} {_fmt_dt(r['planned_time'])}"
+        f"{type_icon} #{r['delivery_num']} {html.escape(city)}\n"
+        f"   {_fmt_dt(r['planned_time'])} · {sum_str} · {late_icon}"
     )
-
 
 async def _handle_search(chat_id: int, query: str, city_filter: str | None = None) -> None:
     """

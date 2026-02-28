@@ -339,16 +339,27 @@ ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
 
 | Где | Что хранится | Примеры |
 |-----|-------------|---------|
-| **`app/`** | Production-код, только релизные модули | `app/jobs/`, `app/clients/`, `app/database.py` |
+| **`app/`** | Production-код, только релизные модули | `app/jobs/`, `app/clients/`, `app/database.py`, `app/main.py` |
 | **`tests/`** | Юнит-тесты, интеграционные тесты | `tests/test_orders.py`, `tests/conftest.py` |
-| **`dev/`** (новая) | Скрипты для отладки, экспериментальный код | `dev/test_api.py`, `dev/scrape_test.py` |
-| **Корень** | Только production: `Dockerfile`, `docker-compose.yml`, `.gitignore`, `README.md`, `pyproject.toml` | ❌ Не кладём `test_*.py` в корень |
+| **`dev/`** | Скрипты для отладки, экспериментальный код | `dev/test_api.py`, `dev/scrape_test.py` |
+| **`docs/`** | Документация: Журнал, Дорожная карта, Модули и команды | `docs/CHANGELOG.md`, `docs/BACKLOG.md` |
+| **`specs/`** | Контракты UX: specs TG-бота и веб-интерфейса | `specs/tg/`, `specs/web/` |
+| **`web/`** | Frontend: HTML, CSS, JS для кабинета и лендинга | `web/cabinet/`, `web/js/`, `web/index.html` |
+| **`Корень`** | Только infrastructure: `Dockerfile`, `docker-compose.yml`, `.gitignore`, `README.md`, `pyproject.toml` | ❌ Не кладём `test_*.py` в корень |
 
 **Когда создаёшь test/debug-скрипт:**
 1. Создай в `dev/test_название.py` (автоматически в `.gitignore`)
 2. Добавь docstring: что это скрипт тестирует, как запускать
 3. После того как отладил — можно удалить или архивировать в папку
 4. **Никогда** не пушим debug-скрипты в git (они в `.gitignore`)
+
+**Что где живёт (краткая маршрутизация):**
+- **Новая команда бота / изменение логики?** → обнови `docs/Модули_и_команды_бота.md`
+- **Дизайн/макет TG-бота?** → обнови `specs/tg/НАЗВАНИЕ.md` + скажи @ux-бот
+- **Дизайн/макет веб-страницы?** → обнови `specs/web/НАЗВАНИЕ.md` + скажи @веб
+- **Frontend-код?** → `web/js/`, `web/cabinet/`, `web/*.html`
+- **История разработки / что сделано?** → `docs/CHANGELOG.md` и `docs/Журнал_ИИ_автоматизаций.md`
+- **Бэклог / что планируем?** → `docs/BACKLOG.md`
 
 **Структура `.gitignore`:**
 ```gitignore

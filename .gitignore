@@ -36,3 +36,7 @@ logs/*.log
 
 # VPS-бэкапы кода — не в git
 *.bak.*
+
+# Development & debug scripts
+dev/
+test_*.py

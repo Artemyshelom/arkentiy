@@ -1405,6 +1405,21 @@ async def get_tracking_summary(since_date: str | None = None, tenant_id: int = 1
     return result
 
 
+async def get_payment_changed_orders(branch_names: list[str], date_iso: str) -> list[dict]:
+    """Заказы со сменой оплаты за дату по указанным точкам."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT branch_name, delivery_num, planned_time, sum, comment
+           FROM orders_raw
+           WHERE date::text = $1
+             AND COALESCE(payment_changed, false) = true
+             AND branch_name = ANY($2)
+           ORDER BY branch_name, planned_time""",
+        date_iso, branch_names,
+    )
+    return [dict(r) for r in rows]
+
+
 # =====================================================================
 # Совместимость: DB_PATH и BACKEND для файлов с BACKEND-guard
 # =====================================================================

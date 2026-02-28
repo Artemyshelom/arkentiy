@@ -1463,6 +1463,26 @@ async def get_today_shifts(branch_name: str, date_iso: str) -> list[dict]:
             return [dict(r) for r in rows]
 
 
+async def get_payment_changed_orders(branch_names: list[str], date_iso: str) -> list[dict]:
+    """Заказы со сменой оплаты за дату по указанным точкам."""
+    if not branch_names:
+        return []
+    placeholders = ",".join(["?"] * len(branch_names))
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            f"""SELECT branch_name, delivery_num, planned_time, sum, comment
+                FROM orders_raw
+                WHERE date = ?
+                  AND COALESCE(payment_changed, 0) = 1
+                  AND branch_name IN ({placeholders})
+                ORDER BY branch_name, planned_time""",
+            [date_iso, *branch_names],
+        ) as cur:
+            rows = await cur.fetchall()
+            return [dict(r) for r in rows]
+
+
 async def get_client_order_count(phone: str) -> int:
     """Количество заказов клиента по номеру телефона в orders_raw."""
     if not phone:

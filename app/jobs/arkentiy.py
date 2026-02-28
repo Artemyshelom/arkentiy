@@ -1847,35 +1847,8 @@ async def _handle_payment_changes(chat_id: int, arg: str, city_filter=None) -> N
     )]
 
     try:
-        from app.db import BACKEND
-        if BACKEND == "postgresql":
-            from app.db import get_pool
-            pool = get_pool()
-            rows = await pool.fetch(
-                """SELECT branch_name, delivery_num, planned_time, sum, comment
-                   FROM orders_raw 
-                   WHERE date::text = $1 
-                     AND COALESCE(payment_changed, false) = true
-                     AND branch_name = ANY($2)
-                   ORDER BY branch_name, planned_time""",
-                date_iso, branch_names
-            )
-        else:
-            import aiosqlite
-            from app.database import DB_PATH
-            async with aiosqlite.connect(DB_PATH) as db:
-                db.row_factory = aiosqlite.Row
-                placeholders = ",".join(["?"]*len(branch_names))
-                cur = await db.execute(
-                    f"""SELECT branch_name, delivery_num, planned_time, sum, comment
-                       FROM orders_raw 
-                       WHERE date = ? 
-                         AND COALESCE(payment_changed, 0) = 1
-                         AND branch_name IN ({placeholders})
-                       ORDER BY branch_name, planned_time""",
-                    [date_iso] + branch_names
-                )
-                rows = await cur.fetchall()
+        from app.db import get_payment_changed_orders
+        rows = await get_payment_changed_orders(branch_names, date_iso)
     except Exception as e:
         await _send(chat_id, f"Ошибка: {e}")
         return
@@ -1887,12 +1860,12 @@ async def _handle_payment_changes(chat_id: int, arg: str, city_filter=None) -> N
         await _send(chat_id, f"📋 Смены оплаты: {date_display}{filter_label}\n\nНет заказов со сменой оплаты")
         return
 
-    by_branch = {}
+    by_branch: dict[str, list[dict]] = {}
     for r in rows:
-        branch = dict(r)["branch_name"]
+        branch = r["branch_name"]
         if branch not in by_branch:
             by_branch[branch] = []
-        by_branch[branch].append(dict(r))
+        by_branch[branch].append(r)
 
     lines = [f"📋 <b>Смены оплаты: {date_display}{filter_label}</b>\n"]
     total = 0

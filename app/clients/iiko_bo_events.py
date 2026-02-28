@@ -205,6 +205,8 @@ class BranchState:
                 continue
             if d.get("is_self_service"):
                 continue
+            if "смен" in (d.get("comment") or "").lower():
+                continue  # смена оплаты — iiko пересоздаёт заказ, время доставки = 0
             total_delivered += 1
             planned = d.get("planned_time")
             actual = d.get("actual_time")

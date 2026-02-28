@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Оплата прошла — Аркентий</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',500:'#6366f1',600:'#4f46e5',700:'#4338ca' } } } } }
+  </script>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+    </div>
+  </header>
+
+  <main class="flex-1 flex items-center justify-center px-4 pt-16">
+    <div class="w-full max-w-md text-center">
+      <div class="bg-white rounded-2xl border border-gray-100 p-8 shadow-sm">
+        <div class="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-5">
+          <svg class="w-8 h-8 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>
+        </div>
+        <h1 class="text-2xl font-bold text-gray-900 mb-2">Оплата прошла успешно!</h1>
+        <div id="payment-details" class="text-sm text-gray-600 space-y-1 mb-6">
+          <p>Загружаем данные...</p>
+        </div>
+
+        <div class="bg-gray-50 rounded-xl p-5 text-left text-sm space-y-2 mb-6">
+          <p class="font-semibold text-gray-900">Что дальше:</p>
+          <p class="text-gray-600">1. Бот уже настраивает вашу систему</p>
+          <p class="text-gray-600">2. В течение часа данные за месяц будут загружены</p>
+          <p class="text-gray-600">3. Алерты и отчёты начнут приходить завтра утром</p>
+        </div>
+
+        <a href="/login.html" class="inline-flex items-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+          Перейти в личный кабинет
+        </a>
+      </div>
+    </div>
+  </main>
+
+  <footer class="py-6 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 text-center text-xs text-gray-400">
+      <p>&copy; 2026 Аркентий</p>
+    </div>
+  </footer>
+</body>
+</html>

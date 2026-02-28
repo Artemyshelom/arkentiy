@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Аркентий — контроль доставки в реальном времени</title>
+  <meta name="description" content="Аркентий — SaaS-бот для автоматизации доставки на базе iiko. Алерты опозданий, отчёты, аудит, финансы — в Telegram.">
+  <meta property="og:title" content="Аркентий — контроль доставки в реальном времени">
+  <meta property="og:description" content="Для ресторанов и сетей доставки на iiko. Опоздания, отчёты, аудит — в Telegram-боте.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="https://arkentiy.ru">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+    .hero-gradient { background: linear-gradient(135deg, #eef2ff 0%, #e0e7ff 50%, #f5f3ff 100%); }
+    .card-hover { transition: transform 0.2s, box-shadow 0.2s; }
+    .card-hover:hover { transform: translateY(-2px); box-shadow: 0 8px 25px rgba(0,0,0,0.1); }
+  </style>
+</head>
+<body class="bg-white text-gray-900 antialiased">
+
+  <!-- Header -->
+  <header id="header" class="fixed top-0 w-full z-50 transition-all duration-300 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+      <nav class="hidden md:flex items-center gap-8">
+        <a href="#features" class="text-sm text-gray-600 hover:text-gray-900 transition-colors">Возможности</a>
+        <a href="#pricing-preview" class="text-sm text-gray-600 hover:text-gray-900 transition-colors">Тарифы</a>
+        <a href="#how" class="text-sm text-gray-600 hover:text-gray-900 transition-colors">Как работает</a>
+        <a href="/pricing.html" class="inline-flex items-center px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors">
+          Попробовать бесплатно
+        </a>
+      </nav>
+      <button id="burger" class="md:hidden p-2 text-gray-600" onclick="document.getElementById('mobile-menu').classList.toggle('hidden')">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
+    <div id="mobile-menu" class="hidden md:hidden border-t border-gray-100 bg-white px-4 pb-4">
+      <a href="#features" class="block py-3 text-gray-600">Возможности</a>
+      <a href="#pricing-preview" class="block py-3 text-gray-600">Тарифы</a>
+      <a href="#how" class="block py-3 text-gray-600">Как работает</a>
+      <a href="/pricing.html" class="block mt-2 text-center px-4 py-2 bg-brand-600 text-white rounded-lg font-medium">Попробовать бесплатно</a>
+    </div>
+  </header>
+
+  <!-- Hero -->
+  <section class="hero-gradient pt-28 pb-20 sm:pt-36 sm:pb-28">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 text-center">
+      <h1 class="text-3xl sm:text-5xl font-extrabold tracking-tight text-gray-900 leading-tight">
+        Контроль доставки<br class="hidden sm:block"> в реальном времени
+      </h1>
+      <p class="mt-4 sm:mt-6 text-lg sm:text-xl text-gray-600 max-w-2xl mx-auto leading-relaxed">
+        Для ресторанов и сетей на iiko. Опоздания, отчёты, аудит, финансы — в&nbsp;Telegram&#8209;боте. Подключение за&nbsp;5&nbsp;минут.
+      </p>
+      <div class="mt-8 sm:mt-10 flex flex-col sm:flex-row gap-3 justify-center">
+        <a href="/pricing.html" class="inline-flex items-center justify-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors text-base shadow-lg shadow-brand-600/20">
+          Попробовать 7 дней бесплатно
+        </a>
+        <a href="/pricing.html" class="inline-flex items-center justify-center px-6 py-3 bg-white text-brand-600 font-semibold rounded-xl border border-brand-200 hover:border-brand-300 hover:bg-brand-50 transition-colors text-base">
+          Рассчитать стоимость &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- Проблема / Решение -->
+  <section class="py-16 sm:py-24 bg-white">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6">
+      <div class="grid gap-6 sm:gap-8">
+        <div class="flex items-start gap-4 sm:gap-6 p-5 sm:p-6 rounded-2xl bg-gray-50">
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+            <span class="text-red-500 text-lg">&#10007;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-500 text-sm sm:text-base">Узнаёте об опоздании от клиента</p>
+          </div>
+          <div class="flex-shrink-0 text-gray-300 text-xl">&rarr;</div>
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+            <span class="text-green-500 text-lg">&#10003;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-900 font-medium text-sm sm:text-base">Алерт в Telegram через 15 минут</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-4 sm:gap-6 p-5 sm:p-6 rounded-2xl bg-gray-50">
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+            <span class="text-red-500 text-lg">&#10007;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-500 text-sm sm:text-base">Отчёт за вчера — в конце недели</p>
+          </div>
+          <div class="flex-shrink-0 text-gray-300 text-xl">&rarr;</div>
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+            <span class="text-green-500 text-lg">&#10003;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-900 font-medium text-sm sm:text-base">Автоматически в 9:00 каждый день</p>
+          </div>
+        </div>
+        <div class="flex items-start gap-4 sm:gap-6 p-5 sm:p-6 rounded-2xl bg-gray-50">
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-red-100 flex items-center justify-center">
+            <span class="text-red-500 text-lg">&#10007;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-500 text-sm sm:text-base">Подозрительные отмены видны случайно</p>
+          </div>
+          <div class="flex-shrink-0 text-gray-300 text-xl">&rarr;</div>
+          <div class="flex-shrink-0 w-10 h-10 rounded-full bg-green-100 flex items-center justify-center">
+            <span class="text-green-500 text-lg">&#10003;</span>
+          </div>
+          <div class="flex-1">
+            <p class="text-gray-900 font-medium text-sm sm:text-base">Ежедневный аудит — аномалии выделены</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Возможности / Модули -->
+  <section id="features" class="py-16 sm:py-24 bg-gray-50">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6">
+      <div class="text-center mb-12">
+        <h2 class="text-2xl sm:text-3xl font-bold text-gray-900">Что умеет Аркентий</h2>
+        <p class="mt-3 text-gray-500">Базовый пакет — всё что нужно для контроля доставки</p>
+      </div>
+      <div class="grid sm:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6">
+        <!-- Базовые модули -->
+        <div class="card-hover bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="w-10 h-10 rounded-xl bg-red-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Алерты опозданий</h3>
+          <p class="text-sm text-gray-500">Уведомления в Telegram при опоздании +15, +30, +45 минут. Сразу видно кто и где задерживается.</p>
+        </div>
+        <div class="card-hover bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="w-10 h-10 rounded-xl bg-blue-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-2m3 2v-4m3 4v-6m2 10H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Отчёты</h3>
+          <p class="text-sm text-gray-500">Утренний отчёт по всем точкам с выручкой, заказами и динамикой. Статус в реальном времени.</p>
+        </div>
+        <div class="card-hover bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="w-10 h-10 rounded-xl bg-indigo-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-indigo-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Поиск заказов</h3>
+          <p class="text-sm text-gray-500">Найти заказ по номеру или телефону за секунды. По всем точкам и городам одновременно.</p>
+        </div>
+        <div class="card-hover bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="w-10 h-10 rounded-xl bg-amber-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-amber-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Аудит операций</h3>
+          <p class="text-sm text-gray-500">Ежедневная проверка подозрительных отмен, удалений и корректировок. Аномалии выделены.</p>
+        </div>
+        <div class="card-hover bg-white rounded-2xl p-6 border border-gray-100">
+          <div class="w-10 h-10 rounded-xl bg-green-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Выгрузка в Sheets</h3>
+          <p class="text-sm text-gray-500">Автоматическая выгрузка заказов в Google Sheets. Данные для маркетинга и аналитики.</p>
+        </div>
+        <!-- Add-ons -->
+        <div class="card-hover bg-white rounded-2xl p-6 border-2 border-brand-100 relative">
+          <span class="absolute top-4 right-4 text-xs font-medium text-brand-600 bg-brand-50 px-2 py-1 rounded-full">Доп. модуль</span>
+          <div class="w-10 h-10 rounded-xl bg-brand-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Финансы</h3>
+          <p class="text-sm text-gray-500">Сверка банковских выписок с кассой iiko. Автоматический поиск расхождений и недостач.</p>
+          <p class="text-xs text-brand-600 mt-3 font-medium">+2 000 ₽/точка/мес</p>
+        </div>
+        <div class="card-hover bg-white rounded-2xl p-6 border-2 border-brand-100 relative sm:col-span-2 lg:col-span-1">
+          <span class="absolute top-4 right-4 text-xs font-medium text-brand-600 bg-brand-50 px-2 py-1 rounded-full">Доп. модуль</span>
+          <div class="w-10 h-10 rounded-xl bg-brand-50 flex items-center justify-center mb-4">
+            <svg class="w-5 h-5 text-brand-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6"/></svg>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Мониторинг конкурентов</h3>
+          <p class="text-sm text-gray-500">Автоматическое отслеживание цен и меню конкурентов в вашем городе. Алерты при изменениях.</p>
+          <p class="text-xs text-brand-600 mt-3 font-medium">+1 000 ₽/город/мес</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Как это работает -->
+  <section id="how" class="py-16 sm:py-24 bg-white">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6">
+      <h2 class="text-2xl sm:text-3xl font-bold text-gray-900 text-center mb-12">Подключение за 5 минут</h2>
+      <div class="grid sm:grid-cols-3 gap-8 sm:gap-12">
+        <div class="text-center">
+          <div class="w-14 h-14 rounded-2xl bg-brand-50 flex items-center justify-center mx-auto mb-5">
+            <span class="text-2xl font-bold text-brand-600">1</span>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Подключите iiko</h3>
+          <p class="text-sm text-gray-500">Укажите URL и логин API — мы проверим подключение за 30 секунд</p>
+        </div>
+        <div class="text-center">
+          <div class="w-14 h-14 rounded-2xl bg-brand-50 flex items-center justify-center mx-auto mb-5">
+            <span class="text-2xl font-bold text-brand-600">2</span>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Добавьте бота</h3>
+          <p class="text-sm text-gray-500">Добавьте @arkentiy_bot в рабочий чат вашей команды в Telegram</p>
+        </div>
+        <div class="text-center">
+          <div class="w-14 h-14 rounded-2xl bg-brand-50 flex items-center justify-center mx-auto mb-5">
+            <span class="text-2xl font-bold text-brand-600">3</span>
+          </div>
+          <h3 class="font-semibold text-gray-900 mb-2">Получайте данные</h3>
+          <p class="text-sm text-gray-500">Алерты, отчёты, аудит — автоматически каждый день без ручной работы</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Социальное доказательство -->
+  <section class="py-16 sm:py-20 bg-gray-50">
+    <div class="max-w-4xl mx-auto px-4 sm:px-6 text-center">
+      <div class="flex flex-wrap justify-center gap-6 sm:gap-10 mb-10">
+        <div>
+          <p class="text-3xl sm:text-4xl font-bold text-brand-600">9</p>
+          <p class="text-sm text-gray-500 mt-1">точек подключено</p>
+        </div>
+        <div>
+          <p class="text-3xl sm:text-4xl font-bold text-brand-600">4</p>
+          <p class="text-sm text-gray-500 mt-1">города</p>
+        </div>
+        <div>
+          <p class="text-3xl sm:text-4xl font-bold text-brand-600">1&nbsp;год</p>
+          <p class="text-sm text-gray-500 mt-1">в работе</p>
+        </div>
+      </div>
+      <blockquote class="max-w-2xl mx-auto">
+        <p class="text-lg sm:text-xl text-gray-700 italic leading-relaxed">
+          &laquo;Аркентий заменил ежедневную рутину по сбору отчётов. Менеджеры видят проблемы в реальном времени, не в конце дня.&raquo;
+        </p>
+        <footer class="mt-4 text-sm text-gray-500">Ёбидоёби — сеть доставки суши</footer>
+      </blockquote>
+    </div>
+  </section>
+
+  <!-- Тарифы (превью) -->
+  <section id="pricing-preview" class="py-16 sm:py-24 bg-white">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6">
+      <h2 class="text-2xl sm:text-3xl font-bold text-gray-900 text-center mb-12">Простое ценообразование</h2>
+      <div class="grid sm:grid-cols-2 gap-6 sm:gap-8 max-w-3xl mx-auto">
+        <div class="bg-gray-50 rounded-2xl p-6 sm:p-8">
+          <h3 class="font-bold text-lg text-gray-900 mb-1">Базовый пакет</h3>
+          <div class="flex items-baseline gap-1 mb-4">
+            <span class="text-3xl font-extrabold text-gray-900">5 000</span>
+            <span class="text-gray-500">₽/точка/мес</span>
+          </div>
+          <ul class="space-y-3 text-sm text-gray-600">
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>Алерты опозданий</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>Отчёты и статистика</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>Поиск заказов</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>Аудит операций</li>
+            <li class="flex items-center gap-2"><svg class="w-4 h-4 text-green-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/></svg>Выгрузка в Sheets</li>
+          </ul>
+        </div>
+        <div class="bg-gray-50 rounded-2xl p-6 sm:p-8">
+          <h3 class="font-bold text-lg text-gray-900 mb-4">Дополнительно</h3>
+          <div class="space-y-5">
+            <div>
+              <p class="font-medium text-gray-900">Финансы</p>
+              <p class="text-sm text-gray-500">Сверка выписок с кассой</p>
+              <p class="text-sm font-semibold text-brand-600 mt-1">+2 000 ₽/точка/мес</p>
+            </div>
+            <div>
+              <p class="font-medium text-gray-900">Конкуренты</p>
+              <p class="text-sm text-gray-500">Мониторинг цен в вашем городе</p>
+              <p class="text-sm font-semibold text-brand-600 mt-1">+1 000 ₽/город/мес</p>
+            </div>
+            <div class="pt-4 border-t border-gray-200">
+              <p class="text-sm text-gray-500 mb-1">Скидки:</p>
+              <p class="text-sm text-gray-600">4+ точек &mdash; <b>10%</b> &nbsp;&middot;&nbsp; 7+ &mdash; <b>15%</b> &nbsp;&middot;&nbsp; Год &mdash; <b>20%</b></p>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div class="text-center mt-8">
+        <a href="/pricing.html" class="inline-flex items-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20">
+          Рассчитать для моей сети &rarr;
+        </a>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-16 sm:py-20 bg-gray-900">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6 text-center">
+      <h2 class="text-2xl sm:text-3xl font-bold text-white mb-4">Попробуйте бесплатно 7 дней</h2>
+      <p class="text-gray-400 mb-8 text-lg">Данные за последний месяц уже в боте — увидите реальную картину сразу</p>
+      <a href="/pricing.html" class="inline-flex items-center px-8 py-4 bg-white text-gray-900 font-semibold rounded-xl hover:bg-gray-100 transition-colors text-lg">
+        Начать бесплатно
+      </a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="py-10 bg-gray-50 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <p class="font-bold text-gray-900">Аркентий</p>
+          <p class="text-sm text-gray-500">Контроль доставки для iiko</p>
+        </div>
+        <div class="flex gap-6 text-sm text-gray-500">
+          <a href="https://t.me/artemiy_shelomentsev" class="hover:text-gray-900 transition-colors">Telegram</a>
+          <a href="mailto:support@arkentiy.ru" class="hover:text-gray-900 transition-colors">support@arkentiy.ru</a>
+        </div>
+      </div>
+      <div class="mt-6 pt-6 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-gray-400">
+        <p>&copy; 2026 Аркентий</p>
+        <div class="flex gap-4">
+          <a href="#" class="hover:text-gray-600">Политика конфиденциальности</a>
+          <a href="#" class="hover:text-gray-600">Оферта</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Тарифы — Аркентий</title>
+  <meta name="description" content="Рассчитайте стоимость Аркентия для вашей сети доставки. Базовый пакет от 5 000 ₽/точка.">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    html { scroll-behavior: smooth; }
+  </style>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased">
+
+  <!-- Header -->
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+      <nav class="hidden md:flex items-center gap-8">
+        <a href="/" class="text-sm text-gray-600 hover:text-gray-900">Главная</a>
+        <a href="#faq" class="text-sm text-gray-600 hover:text-gray-900">Вопросы</a>
+        <a href="#" class="inline-flex items-center px-4 py-2 bg-brand-600 text-white text-sm font-medium rounded-lg hover:bg-brand-700 transition-colors">
+          Начать триал
+        </a>
+      </nav>
+      <button class="md:hidden p-2 text-gray-600" onclick="document.getElementById('mobile-menu-p').classList.toggle('hidden')">
+        <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/></svg>
+      </button>
+    </div>
+    <div id="mobile-menu-p" class="hidden md:hidden border-t border-gray-100 bg-white px-4 pb-4">
+      <a href="/" class="block py-3 text-gray-600">Главная</a>
+      <a href="#faq" class="block py-3 text-gray-600">Вопросы</a>
+      <a href="#" class="block mt-2 text-center px-4 py-2 bg-brand-600 text-white rounded-lg font-medium">Начать триал</a>
+    </div>
+  </header>
+
+  <!-- Calculator -->
+  <section class="pt-28 pb-16 sm:pt-36 sm:pb-24">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6">
+      <div class="text-center mb-10 sm:mb-14">
+        <h1 class="text-2xl sm:text-4xl font-extrabold text-gray-900">Рассчитайте стоимость для вашей сети</h1>
+        <p class="mt-3 text-gray-500 text-base sm:text-lg">Базовый пакет + дополнительные модули. Платите только за то, что используете.</p>
+      </div>
+
+      <div class="grid lg:grid-cols-5 gap-8">
+        <!-- Left: Parameters -->
+        <div class="lg:col-span-3 space-y-8">
+
+          <!-- Branches -->
+          <div class="bg-white rounded-2xl p-6 border border-gray-100">
+            <label class="block text-sm font-medium text-gray-700 mb-3">Количество точек</label>
+            <div class="flex items-center gap-4">
+              <button onclick="adjustValue('branches', -1)" class="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-xl font-medium text-gray-600 transition-colors">&minus;</button>
+              <input id="branches" type="number" min="1" max="50" value="2" oninput="calculate()" class="w-20 text-center text-2xl font-bold border-0 focus:outline-none focus:ring-0 bg-transparent">
+              <button onclick="adjustValue('branches', 1)" class="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-xl font-medium text-gray-600 transition-colors">+</button>
+              <span id="volume-badge" class="hidden ml-2 text-xs font-medium text-green-700 bg-green-50 px-2.5 py-1 rounded-full"></span>
+            </div>
+          </div>
+
+          <!-- Cities -->
+          <div class="bg-white rounded-2xl p-6 border border-gray-100">
+            <label class="block text-sm font-medium text-gray-700 mb-3">Количество городов</label>
+            <div class="flex items-center gap-4">
+              <button onclick="adjustValue('cities', -1)" class="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-xl font-medium text-gray-600 transition-colors">&minus;</button>
+              <input id="cities" type="number" min="1" max="50" value="1" oninput="calculate()" class="w-20 text-center text-2xl font-bold border-0 focus:outline-none focus:ring-0 bg-transparent">
+              <button onclick="adjustValue('cities', 1)" class="w-10 h-10 rounded-xl bg-gray-100 hover:bg-gray-200 flex items-center justify-center text-xl font-medium text-gray-600 transition-colors">+</button>
+            </div>
+          </div>
+
+          <!-- Period -->
+          <div class="bg-white rounded-2xl p-6 border border-gray-100">
+            <label class="block text-sm font-medium text-gray-700 mb-3">Период оплаты</label>
+            <div class="grid grid-cols-2 gap-3">
+              <button id="btn-monthly" onclick="setPeriod('monthly')" class="p-3 rounded-xl border-2 border-brand-600 bg-brand-50 text-brand-700 font-medium text-sm text-center transition-all">
+                Ежемесячно
+              </button>
+              <button id="btn-annual" onclick="setPeriod('annual')" class="p-3 rounded-xl border-2 border-gray-200 text-gray-600 font-medium text-sm text-center hover:border-gray-300 transition-all">
+                Ежегодно <span class="text-green-600 font-semibold">&minus;20%</span>
+              </button>
+            </div>
+          </div>
+
+          <!-- Add-ons -->
+          <div class="bg-white rounded-2xl p-6 border border-gray-100">
+            <label class="block text-sm font-medium text-gray-700 mb-4">Дополнительные модули</label>
+            <div class="space-y-4">
+              <label class="flex items-start gap-3 cursor-pointer group">
+                <input type="checkbox" id="addon-finance" onchange="calculate()" class="mt-1 w-5 h-5 rounded border-gray-300 text-brand-600 focus:ring-brand-500">
+                <div>
+                  <p class="font-medium text-gray-900 group-hover:text-brand-600 transition-colors">Финансы <span class="text-gray-400 font-normal">&mdash; +2 000 ₽/точка/мес</span></p>
+                  <p class="text-sm text-gray-500">Сверка банковских выписок с кассой iiko</p>
+                </div>
+              </label>
+              <label class="flex items-start gap-3 cursor-pointer group">
+                <input type="checkbox" id="addon-competitors" onchange="calculate()" class="mt-1 w-5 h-5 rounded border-gray-300 text-brand-600 focus:ring-brand-500">
+                <div>
+                  <p class="font-medium text-gray-900 group-hover:text-brand-600 transition-colors">Конкуренты <span class="text-gray-400 font-normal">&mdash; +1 000 ₽/город/мес</span></p>
+                  <p class="text-sm text-gray-500">Мониторинг цен и меню конкурентов в вашем городе</p>
+                  <p class="text-xs text-gray-400 mt-1">+ 3 000 ₽ разово за настройку каждого города</p>
+                </div>
+              </label>
+            </div>
+          </div>
+
+          <!-- Promo code -->
+          <div class="bg-white rounded-2xl p-6 border border-gray-100">
+            <label class="block text-sm font-medium text-gray-700 mb-3">Промокод</label>
+            <div class="flex gap-3">
+              <input id="promo-input" type="text" placeholder="Введите промокод" class="flex-1 px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" onkeydown="if(event.key==='Enter')validatePromo()">
+              <button onclick="validatePromo()" class="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-xl transition-colors">Применить</button>
+            </div>
+            <div id="promo-result" class="mt-2 text-sm hidden"></div>
+          </div>
+        </div>
+
+        <!-- Right: Total (sticky) -->
+        <div class="lg:col-span-2">
+          <div class="lg:sticky lg:top-24">
+            <div class="bg-white rounded-2xl border border-gray-100 p-6 sm:p-8 shadow-sm">
+              <h3 class="font-bold text-lg text-gray-900 mb-5">Ваш тариф</h3>
+
+              <div id="breakdown" class="space-y-3 text-sm">
+                <!-- Filled by JS -->
+              </div>
+
+              <div class="border-t border-gray-100 mt-5 pt-5">
+                <div id="discounts-section" class="space-y-2 text-sm mb-4">
+                  <!-- Filled by JS -->
+                </div>
+                <div class="flex items-baseline justify-between">
+                  <span class="text-base font-medium text-gray-500">Итого</span>
+                  <div class="text-right">
+                    <span id="total-price" class="text-3xl font-extrabold text-gray-900">10 000</span>
+                    <span class="text-gray-400 text-sm"> ₽/мес</span>
+                  </div>
+                </div>
+                <div id="onetime-row" class="mt-2 flex items-baseline justify-between text-sm">
+                  <span class="text-gray-500">Разовое подключение</span>
+                  <span id="onetime-price" class="font-semibold text-gray-700">10 000 ₽</span>
+                </div>
+              </div>
+
+              <div class="mt-6 space-y-3">
+                <a id="cta-connect" href="#" class="block w-full text-center px-6 py-3.5 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20">
+                  Подключить
+                </a>
+                <a id="cta-trial" href="#" class="block w-full text-center px-6 py-3 text-brand-600 font-medium rounded-xl border border-brand-200 hover:bg-brand-50 transition-colors text-sm">
+                  Попробовать 7 дней бесплатно
+                </a>
+              </div>
+            </div>
+
+            <!-- Individual offer -->
+            <div id="individual-offer" class="hidden mt-6 bg-brand-50 rounded-2xl p-6 text-center">
+              <p class="font-semibold text-brand-800 mb-2">Индивидуальное предложение</p>
+              <p class="text-sm text-brand-600 mb-4">Для сетей с 11+ точками — свяжитесь с нами</p>
+              <a href="https://t.me/artemiy_shelomentsev" class="text-sm font-medium text-brand-700 hover:underline">Написать в Telegram &rarr;</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- Features included -->
+  <section class="py-16 sm:py-20 bg-white">
+    <div class="max-w-5xl mx-auto px-4 sm:px-6">
+      <h2 class="text-xl sm:text-2xl font-bold text-gray-900 text-center mb-10">Что входит в базовый пакет за 5 000 ₽/точка</h2>
+      <div class="grid sm:grid-cols-3 lg:grid-cols-5 gap-4">
+        <div class="bg-gray-50 rounded-xl p-5 text-center">
+          <p class="font-semibold text-gray-900 text-sm">Алерты</p>
+          <p class="text-xs text-gray-500 mt-1">Опоздания +15/+30/+45 мин в Telegram</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-5 text-center">
+          <p class="font-semibold text-gray-900 text-sm">Отчёты</p>
+          <p class="text-xs text-gray-500 mt-1">Утренний отчёт по всем точкам с динамикой</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-5 text-center">
+          <p class="font-semibold text-gray-900 text-sm">Поиск</p>
+          <p class="text-xs text-gray-500 mt-1">По номеру или телефону по всем точкам</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-5 text-center">
+          <p class="font-semibold text-gray-900 text-sm">Аудит</p>
+          <p class="text-xs text-gray-500 mt-1">Отмены, удаления, аномалии — ежедневно</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-5 text-center sm:col-span-3 lg:col-span-1">
+          <p class="font-semibold text-gray-900 text-sm">Выгрузка</p>
+          <p class="text-xs text-gray-500 mt-1">Заказы → Google Sheets автоматически</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- FAQ -->
+  <section id="faq" class="py-16 sm:py-24 bg-gray-50">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6">
+      <h2 class="text-2xl sm:text-3xl font-bold text-gray-900 text-center mb-10">Частые вопросы</h2>
+      <div class="space-y-3">
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Как считается стоимость?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">Базовый пакет &times; количество точек + дополнительные модули. Скидки за объём и годовую оплату применяются к итоговой сумме.</p>
+        </details>
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Что входит в бесплатный триал?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">7 дней базового пакета. Загрузка данных за последний месяц — вы сразу увидите реальные отчёты и алерты. Если не понравится — данные удаляются через 7 дней после окончания триала.</p>
+        </details>
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Можно ли оплатить по счёту?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">Да, выставляем счёт для юридических лиц с актом выполненных работ.</p>
+        </details>
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Что если у меня больше 10 точек?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">Свяжитесь с нами — предложим индивидуальные условия с персональной скидкой.</p>
+        </details>
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Как добавить модуль после подключения?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">В личном кабинете в один клик. Стоимость пересчитывается пропорционально оставшемуся периоду.</p>
+        </details>
+        <details class="bg-white rounded-xl border border-gray-100 group">
+          <summary class="flex items-center justify-between p-5 cursor-pointer font-medium text-gray-900">
+            Нужен ли iiko для работы?
+            <svg class="w-5 h-5 text-gray-400 group-open:rotate-180 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </summary>
+          <p class="px-5 pb-5 text-sm text-gray-600">Да, Аркентий работает с iiko BO. Поддерживаются все версии iiko с доступом к API.</p>
+        </details>
+      </div>
+    </div>
+  </section>
+
+  <!-- CTA -->
+  <section class="py-16 sm:py-20 bg-gray-900">
+    <div class="max-w-3xl mx-auto px-4 sm:px-6 text-center">
+      <h2 class="text-2xl sm:text-3xl font-bold text-white mb-4">Начните бесплатно — 7 дней без оплаты</h2>
+      <p class="text-gray-400 mb-8">Данные за последний месяц уже в боте</p>
+      <a href="#" class="inline-flex items-center px-8 py-4 bg-white text-gray-900 font-semibold rounded-xl hover:bg-gray-100 transition-colors text-lg">
+        Попробовать бесплатно
+      </a>
+    </div>
+  </section>
+
+  <!-- Footer -->
+  <footer class="py-10 bg-gray-50 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6">
+      <div class="flex flex-col sm:flex-row items-center justify-between gap-4">
+        <div>
+          <p class="font-bold text-gray-900">Аркентий</p>
+          <p class="text-sm text-gray-500">Контроль доставки для iiko</p>
+        </div>
+        <div class="flex gap-6 text-sm text-gray-500">
+          <a href="https://t.me/artemiy_shelomentsev" class="hover:text-gray-900 transition-colors">Telegram</a>
+          <a href="mailto:support@arkentiy.ru" class="hover:text-gray-900 transition-colors">support@arkentiy.ru</a>
+        </div>
+      </div>
+      <div class="mt-6 pt-6 border-t border-gray-200 flex flex-col sm:flex-row items-center justify-between gap-3 text-xs text-gray-400">
+        <p>&copy; 2026 Аркентий</p>
+        <div class="flex gap-4">
+          <a href="#" class="hover:text-gray-600">Политика конфиденциальности</a>
+          <a href="#" class="hover:text-gray-600">Оферта</a>
+        </div>
+      </div>
+    </div>
+  </footer>
+
+  <script src="/js/pricing.js"></script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Вход — Аркентий</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',500:'#6366f1',600:'#4f46e5',700:'#4338ca' } } } } }
+  </script>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+    </div>
+  </header>
+
+  <main class="flex-1 flex items-center justify-center px-4 pt-16">
+    <div class="w-full max-w-sm">
+
+      <!-- Login form -->
+      <div id="login-form" class="bg-white rounded-2xl border border-gray-100 p-6 sm:p-8 shadow-sm">
+        <h1 class="text-xl font-bold text-gray-900 text-center mb-1">Вход в личный кабинет</h1>
+        <p class="text-sm text-gray-500 text-center mb-6">Аркентий</p>
+
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Email</label>
+            <input id="l-email" type="email" required placeholder="you@example.com" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" onkeydown="if(event.key==='Enter')document.getElementById('l-password').focus()">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Пароль</label>
+            <input id="l-password" type="password" required placeholder="Минимум 8 символов" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" onkeydown="if(event.key==='Enter')doLogin()">
+          </div>
+          <div id="login-error" class="text-sm text-red-500 hidden"></div>
+          <button onclick="doLogin()" id="btn-login" class="w-full px-6 py-2.5 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+            Войти
+          </button>
+        </div>
+
+        <div class="mt-4 text-center">
+          <a href="/forgot-password.html" class="text-sm text-brand-600 hover:text-brand-700">Забыли пароль?</a>
+        </div>
+
+        <div class="mt-6 pt-6 border-t border-gray-100 text-center">
+          <p class="text-sm text-gray-500">Нет аккаунта? <a href="/register.html" class="text-brand-600 font-medium hover:text-brand-700">Зарегистрируйтесь &rarr;</a></p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="py-6 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between text-xs text-gray-400">
+      <p>&copy; 2026 Аркентий</p>
+      <a href="https://t.me/artemiy_shelomentsev" class="hover:text-gray-600">Помощь</a>
+    </div>
+  </footer>
+
+  <script>
+    function doLogin() {
+      const email = document.getElementById("l-email").value.trim();
+      const password = document.getElementById("l-password").value;
+      const error = document.getElementById("login-error");
+      if (!email || !password) { error.textContent = "Заполните все поля"; error.classList.remove("hidden"); return; }
+
+      // MVP: replace with POST /api/auth/login
+      error.textContent = "Личный кабинет будет доступен после запуска бэкенда";
+      error.classList.remove("hidden");
+    }
+  </script>
+</body>
+</html>

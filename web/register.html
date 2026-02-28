@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Регистрация — Аркентий</title>
+  <meta name="description" content="Подключите Аркентия к вашей сети доставки за 5 минут. Онбординг, настройка iiko, Telegram — всё в одном визарде.">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef2ff',100:'#e0e7ff',200:'#c7d2fe',300:'#a5b4fc',400:'#818cf8',500:'#6366f1',600:'#4f46e5',700:'#4338ca',800:'#3730a3',900:'#312e81' }
+          }
+        }
+      }
+    }
+  </script>
+  <style>html { scroll-behavior: smooth; }</style>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+
+  <!-- Header -->
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+      <a href="/login.html" class="text-sm text-gray-600 hover:text-gray-900">Уже есть аккаунт? Войти</a>
+    </div>
+  </header>
+
+  <main class="flex-1 pt-28 pb-16 sm:pt-32 sm:pb-20">
+    <div class="max-w-2xl mx-auto px-4 sm:px-6">
+
+      <!-- Resume banner -->
+      <div id="resume-banner" class="hidden mb-6 bg-brand-50 border border-brand-200 rounded-xl p-4 flex items-center justify-between">
+        <div>
+          <p class="text-sm font-medium text-brand-800">У вас есть незавершённая регистрация</p>
+          <p id="resume-info" class="text-xs text-brand-600 mt-0.5"></p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="resumeRegistration()" class="px-3 py-1.5 bg-brand-600 text-white text-xs font-medium rounded-lg hover:bg-brand-700">Продолжить</button>
+          <button onclick="clearSaved()" class="px-3 py-1.5 text-brand-600 text-xs font-medium rounded-lg border border-brand-200 hover:bg-white">Заново</button>
+        </div>
+      </div>
+
+      <!-- Stepper -->
+      <div class="mb-8">
+        <div class="hidden sm:flex items-center justify-between mb-2">
+          <template id="step-labels"></template>
+        </div>
+        <div id="stepper-desktop" class="hidden sm:flex items-center gap-1"></div>
+        <p id="stepper-mobile" class="sm:hidden text-sm text-gray-500 text-center"></p>
+      </div>
+
+      <!-- Step containers -->
+      <div id="wizard-steps">
+
+        <!-- Step 1: Company -->
+        <div class="wizard-step" data-step="0">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Расскажите о вашем бизнесе</h2>
+          <p class="text-gray-500 text-sm mb-6">Эти данные нужны для создания аккаунта</p>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Название сети <span class="text-red-400">*</span></label>
+              <input id="f-company" type="text" required minlength="2" placeholder="Ёбидоёби" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Контактное лицо <span class="text-red-400">*</span></label>
+              <input id="f-contact" type="text" required minlength="2" placeholder="Артемий" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Email <span class="text-red-400">*</span></label>
+              <input id="f-email" type="email" required placeholder="you@example.com" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+              <p class="text-xs text-gray-400 mt-1">Будет использоваться для входа в кабинет</p>
+              <p id="email-error" class="text-xs text-red-500 mt-1 hidden"></p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Телефон</label>
+              <input id="f-phone" type="tel" placeholder="+7 (900) 123-45-67" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Пароль <span class="text-red-400">*</span></label>
+              <input id="f-password" type="password" required minlength="8" placeholder="Минимум 8 символов" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            </div>
+          </div>
+        </div>
+
+        <!-- Step 2: Cities & Branches -->
+        <div class="wizard-step hidden" data-step="1">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Где работает ваша сеть?</h2>
+          <p class="text-gray-500 text-sm mb-6">Выберите города и точки из списка</p>
+          <div id="cities-container" class="space-y-4"></div>
+          <button onclick="addCity()" id="btn-add-city" class="mt-4 inline-flex items-center gap-1.5 px-4 py-2 text-sm font-medium text-brand-600 border border-brand-200 rounded-xl hover:bg-brand-50 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
+            Добавить город
+          </button>
+          <div id="cities-summary" class="mt-4 text-sm text-gray-500"></div>
+          <p class="mt-3 text-xs text-gray-400">Нет вашего города? <a href="https://t.me/artemiy_shelomentsev" class="text-brand-600 hover:text-brand-700">Напишите нам в Telegram</a></p>
+        </div>
+
+        <!-- Step 3: Modules -->
+        <div class="wizard-step hidden" data-step="2">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Выберите модули</h2>
+          <p class="text-gray-500 text-sm mb-6">Базовый пакет всегда включён</p>
+          <div class="space-y-4">
+            <div class="bg-brand-50 border-2 border-brand-200 rounded-xl p-5">
+              <div class="flex items-center gap-3">
+                <input type="checkbox" checked disabled class="w-5 h-5 rounded text-brand-600">
+                <div>
+                  <p class="font-semibold text-gray-900">Базовый пакет — 5 000 ₽/точка/мес</p>
+                  <p class="text-sm text-gray-500 mt-0.5">Всегда включён</p>
+                </div>
+              </div>
+              <ul class="mt-3 ml-8 space-y-1 text-sm text-gray-600">
+                <li>Алерты опозданий в Telegram</li>
+                <li>Утренние отчёты по всем точкам</li>
+                <li>Поиск заказов по номеру/телефону</li>
+                <li>Аудит подозрительных операций</li>
+                <li>Выгрузка заказов в Google Sheets</li>
+              </ul>
+            </div>
+            <label class="block bg-white border border-gray-200 rounded-xl p-5 cursor-pointer hover:border-brand-300 transition-colors">
+              <div class="flex items-center gap-3">
+                <input type="checkbox" id="m-finance" onchange="updateModuleSummary()" class="w-5 h-5 rounded border-gray-300 text-brand-600 focus:ring-brand-500">
+                <div>
+                  <p class="font-semibold text-gray-900">Финансы <span class="text-gray-400 font-normal">— +2 000 ₽/точка/мес</span></p>
+                  <p class="text-sm text-gray-500 mt-0.5">Сверка банковских выписок с кассой iiko</p>
+                </div>
+              </div>
+            </label>
+            <label class="block bg-white border border-gray-200 rounded-xl p-5 cursor-pointer hover:border-brand-300 transition-colors">
+              <div class="flex items-center gap-3">
+                <input type="checkbox" id="m-competitors" onchange="updateModuleSummary()" class="w-5 h-5 rounded border-gray-300 text-brand-600 focus:ring-brand-500">
+                <div>
+                  <p class="font-semibold text-gray-900">Конкуренты <span class="text-gray-400 font-normal">— +1 000 ₽/город/мес</span></p>
+                  <p class="text-sm text-gray-500 mt-0.5">Мониторинг цен и меню конкурентов</p>
+                  <p class="text-xs text-gray-400 mt-1">+ 3 000 ₽ разово за настройку каждого города</p>
+                </div>
+              </div>
+            </label>
+          </div>
+          <div id="module-summary" class="mt-5 p-4 bg-gray-50 rounded-xl text-sm"></div>
+        </div>
+
+        <!-- Step 4: iiko -->
+        <div class="wizard-step hidden" data-step="3">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Подключите iiko</h2>
+          <p class="text-gray-500 text-sm mb-6">Для работы Аркентию нужен доступ к iiko BO</p>
+          <div class="space-y-4">
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">URL вашего iiko BO <span class="text-red-400">*</span></label>
+              <input id="f-iiko-url" type="url" placeholder="https://your-server:443" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+              <p class="text-xs text-gray-400 mt-1">Обычно выглядит как https://your-server:443</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Логин API iiko <span class="text-red-400">*</span></label>
+              <input id="f-iiko-login" type="text" placeholder="api_user" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+              <p class="text-xs text-gray-400 mt-1">Отдельный пользователь для API (не ваш личный логин)</p>
+            </div>
+            <div>
+              <button onclick="testIiko()" id="btn-test-iiko" class="inline-flex items-center gap-2 px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-xl transition-colors">
+                Проверить подключение
+              </button>
+              <div id="iiko-result" class="mt-3 text-sm hidden"></div>
+            </div>
+            <details class="text-sm">
+              <summary class="cursor-pointer text-brand-600 hover:text-brand-700 font-medium">Как создать API-пользователя в iiko?</summary>
+              <div class="mt-2 p-4 bg-gray-50 rounded-xl text-gray-600 space-y-1">
+                <p>1. Откройте iiko BO → Администрирование → Пользователи</p>
+                <p>2. Создайте нового пользователя с ролью «API»</p>
+                <p>3. Скопируйте логин</p>
+              </div>
+            </details>
+          </div>
+          <p class="mt-6 text-xs text-gray-400">Можно пропустить и настроить позже в личном кабинете</p>
+        </div>
+
+        <!-- Step 5: Telegram -->
+        <div class="wizard-step hidden" data-step="4">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Подключите Telegram</h2>
+          <p class="text-gray-500 text-sm mb-6">Аркентий отправляет отчёты и алерты в ваш рабочий чат</p>
+          <div class="space-y-5">
+            <div class="bg-gray-50 rounded-xl p-5 space-y-3 text-sm text-gray-600">
+              <p><span class="font-semibold text-gray-900">Шаг 1:</span> Добавьте бота <code class="text-brand-600 bg-brand-50 px-1 rounded">@arkentiy_bot</code> в ваш рабочий чат</p>
+              <p><span class="font-semibold text-gray-900">Шаг 2:</span> Отправьте команду <code class="text-brand-600 bg-brand-50 px-1 rounded">/start</code> в чате</p>
+            </div>
+            <div>
+              <label class="block text-sm font-medium text-gray-700 mb-1">Chat ID рабочего чата</label>
+              <input id="f-chat-id" type="text" placeholder="-5160506328" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+            </div>
+            <div>
+              <button onclick="testTelegram()" id="btn-test-tg" class="inline-flex items-center gap-2 px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-xl transition-colors">
+                Проверить подключение
+              </button>
+              <div id="tg-result" class="mt-3 text-sm hidden"></div>
+            </div>
+            <details class="text-sm">
+              <summary class="cursor-pointer text-brand-600 hover:text-brand-700 font-medium">Как узнать Chat ID?</summary>
+              <div class="mt-2 p-4 bg-gray-50 rounded-xl text-gray-600">
+                <p>Отправьте <code>/start</code> боту <code>@arkentiy_bot</code> в нужном чате. Бот ответит сообщением с Chat ID.</p>
+              </div>
+            </details>
+          </div>
+          <p class="mt-6 text-xs text-gray-400">Можно пропустить и настроить позже в личном кабинете</p>
+        </div>
+
+        <!-- Step 6: Review & Pay -->
+        <div class="wizard-step hidden" data-step="5">
+          <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-1">Проверьте и оплатите</h2>
+          <p class="text-gray-500 text-sm mb-6">Убедитесь, что всё верно</p>
+
+          <div class="bg-white border border-gray-200 rounded-xl p-5 sm:p-6 space-y-4">
+            <div id="review-company" class="text-sm"></div>
+            <div id="review-cities" class="text-sm"></div>
+            <div id="review-modules" class="text-sm"></div>
+            <div id="review-iiko" class="text-sm"></div>
+            <div id="review-telegram" class="text-sm"></div>
+
+            <div class="border-t border-gray-100 pt-4">
+              <div id="review-breakdown" class="space-y-2 text-sm"></div>
+              <div class="border-t border-gray-100 mt-3 pt-3">
+                <div class="flex items-baseline justify-between">
+                  <span class="font-medium text-gray-500">Итого</span>
+                  <span id="review-total" class="text-2xl font-extrabold text-gray-900"></span>
+                </div>
+                <div id="review-onetime" class="flex items-baseline justify-between text-sm mt-1">
+                  <span class="text-gray-500">Разовое подключение</span>
+                  <span id="review-onetime-price" class="font-semibold text-gray-700"></span>
+                </div>
+              </div>
+            </div>
+
+            <!-- Promo code -->
+            <div class="border-t border-gray-100 pt-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Промокод</label>
+              <div class="flex gap-3">
+                <input id="f-promo" type="text" placeholder="Введите промокод" class="flex-1 px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent" onkeydown="if(event.key==='Enter')validatePromoWizard()">
+                <button onclick="validatePromoWizard()" class="px-5 py-2.5 bg-gray-100 hover:bg-gray-200 text-gray-700 text-sm font-medium rounded-xl transition-colors">Применить</button>
+              </div>
+              <div id="promo-result-w" class="mt-2 text-sm hidden"></div>
+            </div>
+
+            <!-- Period -->
+            <div class="border-t border-gray-100 pt-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Период оплаты</label>
+              <div class="grid grid-cols-2 gap-3">
+                <button id="w-btn-monthly" onclick="setWizardPeriod('monthly')" class="p-3 rounded-xl border-2 border-brand-600 bg-brand-50 text-brand-700 font-medium text-sm text-center">Ежемесячно</button>
+                <button id="w-btn-annual" onclick="setWizardPeriod('annual')" class="p-3 rounded-xl border-2 border-gray-200 text-gray-600 font-medium text-sm text-center hover:border-gray-300">Ежегодно <span class="text-green-600 font-semibold">&minus;20%</span></button>
+              </div>
+            </div>
+
+            <!-- Payment method -->
+            <div class="border-t border-gray-100 pt-4">
+              <label class="block text-sm font-medium text-gray-700 mb-2">Способ оплаты</label>
+              <div class="space-y-2">
+                <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-xl cursor-pointer hover:border-brand-300">
+                  <input type="radio" name="pay-method" value="card" checked class="w-4 h-4 text-brand-600 focus:ring-brand-500">
+                  <span class="text-sm font-medium text-gray-900">Картой (ЮKassa)</span>
+                </label>
+                <label class="flex items-center gap-3 p-3 border border-gray-200 rounded-xl cursor-pointer hover:border-brand-300">
+                  <input type="radio" name="pay-method" value="invoice" class="w-4 h-4 text-brand-600 focus:ring-brand-500">
+                  <span class="text-sm font-medium text-gray-900">Счёт для юрлица</span>
+                </label>
+              </div>
+            </div>
+
+            <!-- Invoice fields (hidden by default) -->
+            <div id="invoice-fields" class="hidden space-y-3 border-t border-gray-100 pt-4">
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">ИНН <span class="text-red-400">*</span></label>
+                <input id="f-inn" type="text" maxlength="12" placeholder="1234567890" class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+              </div>
+              <div>
+                <label class="block text-sm font-medium text-gray-700 mb-1">Название юрлица <span class="text-red-400">*</span></label>
+                <input id="f-legal-name" type="text" placeholder='ООО "Ёбидоёби"' class="w-full px-4 py-2.5 border border-gray-200 rounded-xl text-sm focus:outline-none focus:ring-2 focus:ring-brand-500 focus:border-transparent">
+              </div>
+            </div>
+          </div>
+
+          <!-- Final total & pay button -->
+          <div class="mt-6 bg-white border border-gray-200 rounded-xl p-5 sm:p-6">
+            <div class="flex items-baseline justify-between mb-4">
+              <span class="text-base font-medium text-gray-500">К оплате сейчас</span>
+              <span id="review-pay-now" class="text-2xl font-extrabold text-gray-900"></span>
+            </div>
+            <p id="review-pay-note" class="text-xs text-gray-400 mb-4"></p>
+            <button onclick="submitPayment()" id="btn-pay" class="w-full px-6 py-3.5 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors shadow-lg shadow-brand-600/20 text-center">
+              Оплатить
+            </button>
+          </div>
+
+          <!-- Trial option -->
+          <div class="mt-4 text-center">
+            <div class="inline-flex items-center gap-2 text-sm text-gray-400 mb-2">
+              <div class="h-px w-8 bg-gray-200"></div>или<div class="h-px w-8 bg-gray-200"></div>
+            </div>
+            <div class="bg-gray-50 rounded-xl p-5">
+              <p class="font-medium text-gray-900 mb-1">Попробуйте бесплатно 7 дней</p>
+              <p class="text-sm text-gray-500 mb-3">Базовый пакет, данные за последний месяц</p>
+              <button onclick="submitTrial()" class="px-6 py-2.5 text-brand-600 font-medium rounded-xl border border-brand-200 hover:bg-brand-50 transition-colors text-sm">
+                Начать триал
+              </button>
+            </div>
+          </div>
+        </div>
+
+      </div>
+
+      <!-- Navigation -->
+      <div id="wizard-nav" class="mt-8 flex items-center justify-between">
+        <button onclick="prevStep()" id="btn-back" class="hidden px-5 py-2.5 text-gray-600 font-medium rounded-xl border border-gray-200 hover:bg-gray-100 transition-colors text-sm">
+          &larr; Назад
+        </button>
+        <div class="flex-1"></div>
+        <button onclick="nextStep()" id="btn-next" class="px-6 py-2.5 bg-brand-600 text-white font-medium rounded-xl hover:bg-brand-700 transition-colors text-sm shadow-lg shadow-brand-600/20">
+          Далее &rarr;
+        </button>
+      </div>
+    </div>
+  </main>
+
+  <!-- Footer -->
+  <footer class="py-6 bg-gray-50 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 flex items-center justify-between text-xs text-gray-400">
+      <p>&copy; 2026 Аркентий</p>
+      <a href="https://t.me/artemiy_shelomentsev" class="hover:text-gray-600">Нужна помощь? Telegram</a>
+    </div>
+  </footer>
+
+  <script src="/js/wizard.js"></script>
+</body>
+</html>

@@ -81,6 +81,7 @@ _CMD_MODULE: dict[str, str] = {
     "тишина": "late_alerts", "mute": "late_alerts",
     "выгрузка": "marketing", "export": "marketing",
     "аудит": "audit", "audit": "audit",
+    "смены": "late_queries", "payment_changes": "late_queries",
     "конкуренты": "admin", "competitors": "admin",
     "доступ": "admin", "access": "admin",
 }
@@ -1808,6 +1809,108 @@ async def _handle_pickup(chat_id: int, arg: str, city_filter=None) -> None:
     await _send(chat_id, "\n\n".join(lines))
 
 
+
+
+async def _handle_payment_changes(chat_id: int, arg: str, city_filter=None) -> None:
+    """/смены [фильтр] [дата] — заказы со сменой оплаты (исключённые из статистики)."""
+    from datetime import datetime, timedelta
+    
+    parts = arg.strip().split() if arg else []
+    date_iso = None
+    filter_q = None
+    
+    for p in parts:
+        for fmt in ("%d.%m", "%d.%m.%Y", "%d.%m.%y"):
+            try:
+                dt = datetime.strptime(p, fmt)
+                if dt.year < 2000:
+                    dt = dt.replace(year=datetime.now().year)
+                date_iso = dt.strftime("%Y-%m-%d")
+                break
+            except ValueError:
+                continue
+        else:
+            if p.lower() in ("вчера", "yesterday"):
+                date_iso = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            elif p.lower() in ("сегодня", "today"):
+                date_iso = datetime.now().strftime("%Y-%m-%d")
+            else:
+                filter_q = p
+
+    if filter_q is None and city_filter:
+        filter_q = city_filter
+    if date_iso is None:
+        date_iso = datetime.now().strftime("%Y-%m-%d")
+
+    branch_names = [b["name"] for b in (
+        get_available_branches(filter_q) if filter_q else get_available_branches()
+    )]
+
+    try:
+        from app.db import get_pool_or_none
+        pool = get_pool_or_none()
+        if pool:
+            rows = await pool.fetch(
+                """SELECT branch_name, delivery_num, planned_time, sum, comment
+                   FROM orders_raw 
+                   WHERE date::text = $1 
+                     AND COALESCE(payment_changed, false) = true
+                     AND branch_name = ANY($2)
+                   ORDER BY branch_name, planned_time""",
+                date_iso, branch_names
+            )
+        else:
+            import aiosqlite
+            from app.database import DB_PATH
+            async with aiosqlite.connect(DB_PATH) as db:
+                db.row_factory = aiosqlite.Row
+                placeholders = ",".join(["?"]*len(branch_names))
+                cur = await db.execute(
+                    f"""SELECT branch_name, delivery_num, planned_time, sum, comment
+                       FROM orders_raw 
+                       WHERE date = ? 
+                         AND COALESCE(payment_changed, 0) = 1
+                         AND branch_name IN ({placeholders})
+                       ORDER BY branch_name, planned_time""",
+                    [date_iso] + branch_names
+                )
+                rows = await cur.fetchall()
+    except Exception as e:
+        await _send(chat_id, f"Ошибка: {e}")
+        return
+
+    date_display = datetime.strptime(date_iso, "%Y-%m-%d").strftime("%d.%m.%Y")
+    filter_label = f" ({html.escape(filter_q)})" if filter_q else ""
+
+    if not rows:
+        await _send(chat_id, f"📋 Смены оплаты: {date_display}{filter_label}\n\nНет заказов со сменой оплаты")
+        return
+
+    by_branch = {}
+    for r in rows:
+        branch = dict(r)["branch_name"]
+        if branch not in by_branch:
+            by_branch[branch] = []
+        by_branch[branch].append(dict(r))
+
+    lines = [f"📋 <b>Смены оплаты: {date_display}{filter_label}</b>\n"]
+    total = 0
+    for branch, orders in sorted(by_branch.items()):
+        lines.append(f"<b>{html.escape(branch)}</b> — {len(orders)}")
+        for o in orders:
+            num = o["delivery_num"]
+            planned = o["planned_time"] or ""
+            summ = o["sum"]
+            time_str = planned[11:16] if len(planned) > 16 else "—"
+            sum_str = f"{int(summ):,}".replace(",", " ") + " ₽" if summ else "—"
+            lines.append(f"• #{num} — {time_str} — {sum_str}")
+        total += len(orders)
+        lines.append("")
+
+    lines.append(f"<b>Итого:</b> {total} заказов")
+    await _send(chat_id, "\n".join(lines))
+
+
 def _parse_mute_duration(s: str) -> int | None:
     """Парсим строку длительности в минуты (макс 120). None если не распознано."""
     s = s.strip().lower()
@@ -2272,6 +2375,8 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             await _handle_late(chat_id, arg, city_filter=city)
         elif cmd in ("самовывоз", "pickup"):
             await _handle_pickup(chat_id, arg, city_filter=city)
+        elif cmd in ("смены", "payment_changes"):
+            await _handle_payment_changes(chat_id, arg, city_filter=city)
         elif cmd in ("тишина", "mute"):
             await _handle_mute(chat_id, arg, user_id=user_id)
         elif cmd in ("аудит", "audit"):

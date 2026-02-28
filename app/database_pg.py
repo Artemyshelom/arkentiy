@@ -223,9 +223,9 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                         ready_time, cooked_time, comment, operator, opened_at,
                         has_problem, problem_comment,
                         payment_type, bonus_accrued, source, return_sum, service_charge,
-                        cancel_reason, cancel_comment, updated_at)
+                        cancel_reason, cancel_comment, payment_changed, updated_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,now())
+                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,now())
                        ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
                          status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
                          planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
@@ -242,6 +242,7 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                          source=EXCLUDED.source, return_sum=EXCLUDED.return_sum,
                          service_charge=EXCLUDED.service_charge,
                          cancel_reason=EXCLUDED.cancel_reason, cancel_comment=EXCLUDED.cancel_comment,
+                         payment_changed=EXCLUDED.payment_changed,
                          updated_at=now()""",
                     tenant_id,
                     r.get("branch_name"), r.get("delivery_num"), r.get("status"),
@@ -263,6 +264,7 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                     float(r.get("return_sum")) if r.get("return_sum") is not None else None,
                     float(r.get("service_charge")) if r.get("service_charge") is not None else None,
                     r.get("cancel_reason"), r.get("cancel_comment") or None,
+                    bool(r.get("payment_changed", False)),
                 )
 
 
@@ -977,14 +979,19 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
 
     row = await pool.fetchrow(
         """SELECT
-            SUM(CASE WHEN is_late = true AND is_self_service = false THEN 1 ELSE 0 END)
+            SUM(CASE WHEN is_late = true AND is_self_service = false 
+                     AND COALESCE(payment_changed, false) = false THEN 1 ELSE 0 END)
                 AS late_delivery_count,
-            SUM(CASE WHEN is_late = true AND is_self_service = true THEN 1 ELSE 0 END)
+            SUM(CASE WHEN is_late = true AND is_self_service = true 
+                     AND COALESCE(payment_changed, false) = false THEN 1 ELSE 0 END)
                 AS late_pickup_count,
+            SUM(CASE WHEN COALESCE(payment_changed, false) = true THEN 1 ELSE 0 END)
+                AS payment_changed_count,
             SUM(CASE WHEN is_self_service = false
                      AND status IN ('Доставлена','Закрыта') THEN 1 ELSE 0 END)
                 AS total_delivery_count,
-            AVG(CASE WHEN is_late = true AND is_self_service = false
+            AVG(CASE WHEN is_late = true AND is_self_service = false 
+                     AND COALESCE(payment_changed, false) = false
                      THEN late_minutes END)
                 AS avg_late_min
         FROM orders_raw

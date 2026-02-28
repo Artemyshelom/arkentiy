@@ -538,6 +538,15 @@ def _delivery_to_row(branch_name: str, num: str, d: dict, now: str, ready_time_o
         except Exception:
             pass
 
+    # Определение смены оплаты
+    payment_changed = 0
+    comment_text = (d.get("comment", "") or "").lower()
+    # Признак 1: комментарий содержит "смен"
+    if "смен" in comment_text:
+        payment_changed = 1
+    # Признак 2: ожидание >= 120 мин (ready_time давно) и время доставки = 0
+    # TODO: добавить когда будет ясна логика расчёта ожидания курьера
+
     customer_raw = d.get("customer_raw", "")
     return {
         "branch_name": branch_name,
@@ -569,6 +578,7 @@ def _delivery_to_row(branch_name: str, num: str, d: dict, now: str, ready_time_o
         "service_charge": None,
         "cancel_reason": d.get("cancel_reason", ""),
         "cancel_comment": "",
+        "payment_changed": payment_changed,
         "updated_at": now,
     }
 

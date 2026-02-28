@@ -735,6 +735,7 @@ async def init_analytics_tables() -> None:
             ("discount_types",       "TEXT"),
             ("late_delivery_count",  "INTEGER DEFAULT 0"),
             ("late_pickup_count",    "INTEGER DEFAULT 0"),
+            ("payment_changed",      "INTEGER DEFAULT 0"),
             ("avg_cooking_min",      "REAL"),
             ("avg_wait_min",         "REAL"),
             ("avg_delivery_min",     "REAL"),
@@ -779,6 +780,7 @@ async def init_analytics_tables() -> None:
                 service_charge   REAL,
                 cancel_reason    TEXT,
                 cancel_comment   TEXT,
+                payment_changed  INTEGER DEFAULT 0,
                 updated_at       TEXT NOT NULL,
                 PRIMARY KEY (branch_name, delivery_num)
             );
@@ -843,7 +845,7 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                 comment, operator, opened_at, has_problem, problem_comment,
                 payment_type, bonus_accrued, source, return_sum, service_charge,
                 cancel_reason, cancel_comment,
-                updated_at)
+                payment_changed, updated_at)
                VALUES (:branch_name, :delivery_num, :status, :courier, :sum,
                        :planned_time, :actual_time, :is_self_service,
                        :date, :is_late, :late_minutes,
@@ -852,7 +854,7 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                        :comment, :operator, :opened_at, :has_problem, :problem_comment,
                        :payment_type, :bonus_accrued, :source, :return_sum, :service_charge,
                        :cancel_reason, :cancel_comment,
-                       :updated_at)
+                       :payment_changed, :updated_at)
                ON CONFLICT(branch_name, delivery_num) DO UPDATE SET
                  status=excluded.status, courier=excluded.courier, sum=excluded.sum,
                  planned_time=excluded.planned_time, actual_time=excluded.actual_time,
@@ -872,6 +874,7 @@ async def upsert_orders_batch(rows: list[dict]) -> None:
                  service_charge=COALESCE(excluded.service_charge, orders_raw.service_charge),
                  cancel_reason=COALESCE(NULLIF(excluded.cancel_reason, ''), orders_raw.cancel_reason),
                  cancel_comment=COALESCE(NULLIF(excluded.cancel_comment, ''), orders_raw.cancel_comment),
+                 payment_changed=excluded.payment_changed,
                  updated_at=excluded.updated_at""",
             rows,
         )
@@ -1059,14 +1062,19 @@ async def aggregate_orders_for_daily_stats(
 
         row = await (await db.execute(
             f"""SELECT
-                SUM(CASE WHEN is_late = 1 AND is_self_service = 0 THEN 1 ELSE 0 END)
+                SUM(CASE WHEN is_late = 1 AND is_self_service = 0 
+                         AND COALESCE(payment_changed, 0) = 0 THEN 1 ELSE 0 END)
                     AS late_delivery_count,
-                SUM(CASE WHEN is_late = 1 AND is_self_service = 1 THEN 1 ELSE 0 END)
+                SUM(CASE WHEN is_late = 1 AND is_self_service = 1 
+                         AND COALESCE(payment_changed, 0) = 0 THEN 1 ELSE 0 END)
                     AS late_pickup_count,
+                SUM(CASE WHEN COALESCE(payment_changed, 0) = 1 THEN 1 ELSE 0 END)
+                    AS payment_changed_count,
                 SUM(CASE WHEN is_self_service = 0
                          AND status IN ('Доставлена','Закрыта') THEN 1 ELSE 0 END)
                     AS total_delivery_count,
-                AVG(CASE WHEN is_late = 1 AND is_self_service = 0
+                AVG(CASE WHEN is_late = 1 AND is_self_service = 0 
+                         AND COALESCE(payment_changed, 0) = 0
                          THEN late_minutes END)
                     AS avg_late_min
             FROM orders_raw

@@ -333,6 +333,42 @@ ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
 
 ---
 
+## СТРУКТУРА ПРОЕКТА — НЕ МУСОРИМ В КОРНЕ
+
+**Правило:** экспериментальный код, скрипты для отладки, юнит-тесты — только в `tests/` или `dev/`, никогда в корне репо.
+
+| Где | Что хранится | Примеры |
+|-----|-------------|---------|
+| **`app/`** | Production-код, только релизные модули | `app/jobs/`, `app/clients/`, `app/database.py` |
+| **`tests/`** | Юнит-тесты, интеграционные тесты | `tests/test_orders.py`, `tests/conftest.py` |
+| **`dev/`** (новая) | Скрипты для отладки, экспериментальный код | `dev/test_api.py`, `dev/scrape_test.py` |
+| **Корень** | Только production: `Dockerfile`, `docker-compose.yml`, `.gitignore`, `README.md`, `pyproject.toml` | ❌ Не кладём `test_*.py` в корень |
+
+**Когда создаёшь test/debug-скрипт:**
+1. Создай в `dev/test_название.py` (автоматически в `.gitignore`)
+2. Добавь docstring: что это скрипт тестирует, как запускать
+3. После того как отладил — можно удалить или архивировать в папку
+4. **Никогда** не пушим debug-скрипты в git (они в `.gitignore`)
+
+**Структура `.gitignore`:**
+```gitignore
+# Development
+dev/
+tests/*.pyc
+__pycache__/
+
+# Backup и temp
+*.bak.*
+/backups/
+/tmp/
+
+# Secrets
+.env
+secrets/
+```
+
+---
+
 ## САМООБУЧЕНИЕ
 
 После каждой выполненной задачи — в таком порядке:

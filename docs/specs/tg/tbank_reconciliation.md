@@ -1,3 +1,10 @@
+---
+status: done
+created: 2026-02-25
+updated: 2026-02-26
+author: Cursor
+---
+
 # TG UX Spec — Сверка ТБанк
 
 > Статус: ✅ Готово к реализации

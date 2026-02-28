@@ -1,3 +1,10 @@
+---
+status: done
+created: 2026-02-26
+updated: 2026-02-26
+author: Cursor
+---
+
 # TG UX Spec — /поиск v2
 
 > Статус: ✅ Готово к реализации — 26 февраля 2026

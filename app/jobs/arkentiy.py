@@ -969,17 +969,13 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             f"👤 {html.escape(client_name)}{branch_note}\n",
         ]
         for r in rows:
-            s = r["sum"]
-            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-            branch_part = f" · {html.escape(r['branch_name'].split('_')[0])}" if len(branches_set) > 1 else ""
-            lines.append(
-                f"#{r['delivery_num']}{branch_part} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
-            )
+            lines.append(_format_order_compact(r))
         text = "\n".join(lines)
         keyboard = []
         row_buf = []
         for idx, r in enumerate(rows):
-            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
+            city_short = r["branch_name"].split("_")[0] if r.get("branch_name") else "?"
+            row_buf.append({"text": f"#{r['delivery_num']} ({city_short})", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
             if len(row_buf) == 3:
                 keyboard.append(row_buf)
                 row_buf = []

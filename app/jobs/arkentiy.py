@@ -730,20 +730,21 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
 
 
 def _format_order_compact(r: dict) -> str:
-    """Компактная строка для больших выборок."""
+    """Компактная строка для больших выборок — двухстрочный формат."""
+    type_icon = "🚶" if r.get("is_self_service") else "🛵"
+    city = r["branch_name"].split("_")[0] if r.get("branch_name") else "?"
     s = r["sum"]
-    sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-    client = html.escape(r.get("client_name") or "?")
+    sum_str = f"{int(float(s))}₽" if s else "—"
     if r["is_late"]:
-        mins = r.get("late_minutes")
-        late_icon = f"🔴 +{int(mins)} мин" if mins else "🔴"
+        mins = int(r.get("late_minutes") or 0)
+        late_icon = f"🔴 +{mins}м" if mins else "🔴"
     elif r["actual_time"]:
         late_icon = "✅"
     else:
         late_icon = "⏳"
     return (
-        f"  #{r['delivery_num']} {html.escape(r['branch_name'])}\n"
-        f"  👤 {client} | 💰 {sum_str} | {late_icon} {_fmt_dt(r['planned_time'])}"
+        f"{type_icon} #{r['delivery_num']} {html.escape(city)}\n"
+        f"   {_fmt_dt(r['planned_time'])} · {sum_str} · {late_icon}"
     )
 
 
@@ -963,14 +964,12 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif query_type == "phone":
         client_name = (rows[0].get("client_name") or "—")
         branches_set = {r["branch_name"] for r in rows}
-        branch_note = f" · {html.escape(rows[0]['branch_name'])}" if len(branches_set) == 1 else ""
-        lines = [
-            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов",
-            f"👤 {html.escape(client_name)}{branch_note}\n",
-        ]
-        for r in rows:
-            lines.append(_format_order_compact(r))
-        text = "\n".join(lines)
+        header = (
+            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов\n"
+            f"👤 {html.escape(client_name)}"
+        )
+        order_lines = [_format_order_compact(r) for r in rows]
+        text = header + "\n\n" + "\n\n".join(order_lines)
         keyboard = []
         row_buf = []
         for idx, r in enumerate(rows):

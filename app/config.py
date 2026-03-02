@@ -67,17 +67,6 @@ class Settings(BaseSettings):
     jwt_secret: str = "arkentiy-secret-change-me"
     debug: bool = False
 
-    # OpenClaw AI (@ mention обработчик)
-    # Сервер OpenClaw отдельный: 72.56.107.85:18789 (не тот же хост что Аркентий)
-    openclaw_enabled: bool = True
-    openclaw_api_url: str = "http://72.56.107.85:18789/v1/chat/completions"
-    openclaw_api_token: str = ""
-    openclaw_model: str = "openclaw:arkentiy-brain"
-    openclaw_timeout: float = 60.0
-    # Username бота для точного определения @mention (без @, напр. "arkentiy_bot")
-    # Если пустой — срабатывает на любой @mention в сообщении
-    telegram_bot_username: str = ""
-
     # Мониторинг конкурентов
     competitor_bot_token: str = ""
     competitor_notify_chat: str = ""

@@ -881,6 +881,10 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif city_filter:
         city_branch_names = list(allowed_set)
 
+    # Если нет явного фильтра по городу — ограничиваем ветками текущего тенанта
+    if not city_branch_names:
+        city_branch_names = [b["name"] for b in get_available_branches()]
+
     rows: list[dict] = []
     total = 0
     query_type = "text"

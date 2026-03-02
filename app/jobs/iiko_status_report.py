@@ -207,12 +207,19 @@ def format_branch_status(data: dict) -> str:
 
 def get_available_branches(query: str | frozenset | None = None) -> list[dict]:
     """
-    Возвращает список точек из конфига.
+    Возвращает список точек текущего тенанта (из ctx_tenant_id).
     query=None/"" → все точки
     query=str      → фильтрация по подстроке в названии или городе
     query=frozenset → фильтрация по множеству городов (точное совпадение city)
     """
-    branches = settings.branches
+    try:
+        from app.ctx import ctx_tenant_id
+        from app.db import get_branches
+        tenant_id = ctx_tenant_id.get()
+        branches = get_branches(tenant_id) if tenant_id != 1 else settings.branches
+    except Exception:
+        branches = settings.branches
+
     if not query:
         return branches
     if isinstance(query, frozenset):

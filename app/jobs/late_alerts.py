@@ -18,6 +18,11 @@ from app.clients.iiko_bo_events import (
 from app.config import get_settings
 from app.db import get_alert_chats_for_city, get_client_order_count
 
+try:
+    from app.db import get_all_branches as _get_all_branches
+except ImportError:
+    _get_all_branches = None
+
 logger = logging.getLogger(__name__)
 
 LATE_MAX_MIN = 60   # заказы >60 мин опоздания — стале/отменены, не алертим
@@ -119,14 +124,22 @@ async def job_late_alerts() -> None:
     for k in [k for k, (_, ts) in _alerted.items() if ts < cutoff]:
         del _alerted[k]
 
-    branch_to_city = {b["name"]: b["city"] for b in settings.branches}
+    # Строим словарь branch_name → {city, tenant_id} по всем тенантам
+    if _get_all_branches:
+        all_branches = _get_all_branches()
+    else:
+        all_branches = [{**b, "tenant_id": 1} for b in settings.branches]
+    branch_info = {b["name"]: {"city": b.get("city", ""), "tenant_id": b.get("tenant_id", 1)}
+                   for b in all_branches}
 
     alerts_sent = 0
     for branch_name, state in _states.items():
-        city = branch_to_city.get(branch_name)
+        info = branch_info.get(branch_name, {})
+        city = info.get("city")
+        tenant_id = info.get("tenant_id", 1)
         if not city:
             continue
-        target_chats = await get_alert_chats_for_city(city)
+        target_chats = await get_alert_chats_for_city(city, tenant_id)
         if not target_chats:
             continue  # нет зарегистрированных чатов с алертами для этого города
 

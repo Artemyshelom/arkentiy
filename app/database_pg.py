@@ -763,6 +763,15 @@ def get_branches(tenant_id: int = 1) -> list[dict]:
     return list(_branches_cache.get(tenant_id, []))
 
 
+def get_all_branches() -> list[dict]:
+    """Sync — все точки всех тенантов из кеша, каждая с полем tenant_id."""
+    result: list[dict] = []
+    for tid, branches in _branches_cache.items():
+        for b in branches:
+            result.append({**b, "tenant_id": tid})
+    return result
+
+
 async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
     """Async — прямой запрос к БД (для обновления кеша)."""
     pool = get_pool()
@@ -785,6 +794,26 @@ async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# Маппинг chat_id → tenant_id (sync, заполняется при init_db)
+_chat_tenant_map: dict[int, int] = {}
+
+
+def get_tenant_id_for_chat(chat_id: int) -> int | None:
+    """Sync — возвращает tenant_id для chat_id из in-memory кэша."""
+    return _chat_tenant_map.get(chat_id)
+
+
+async def load_chat_tenant_map() -> None:
+    """Загружает маппинг chat_id → tenant_id из tenant_chats."""
+    global _chat_tenant_map
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT chat_id, tenant_id FROM tenant_chats WHERE is_active = true"
+    )
+    _chat_tenant_map = {r["chat_id"]: r["tenant_id"] for r in rows}
+    logger.info(f"Chat→tenant map загружен: {len(_chat_tenant_map)} чатов")
 
 
 async def load_branches_cache(tenant_id: int | None = None) -> None:

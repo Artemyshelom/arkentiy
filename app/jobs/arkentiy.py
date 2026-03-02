@@ -22,7 +22,6 @@ import asyncio
 import html
 import logging
 import re
-from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -60,10 +59,8 @@ from app.jobs.late_alerts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Context variables для мульти-бот режима.
-# Каждый polling loop устанавливает свой контекст — не нужно протаскивать через все функции.
-_ctx_tenant_id: ContextVar[int] = ContextVar("tenant_id", default=1)
-_ctx_bot_token: ContextVar[str] = ContextVar("bot_token", default="")
+# Context variables для мульти-тенантного режима (определены в app.ctx, импортируем здесь).
+from app.ctx import ctx_tenant_id as _ctx_tenant_id, ctx_bot_token as _ctx_bot_token
 
 # Смещение update_id отдельно для каждого токена
 _last_update_id: dict[str, int | None] = {}  # bot_token → last update_id
@@ -2128,6 +2125,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
     Polling job для одного тенанта.
     bot_token и tenant_id устанавливаются в ContextVar — все хелперы используют их автоматически.
     """
+    global _openclaw_enabled  # объявляем вверху функции, до первого использования
     token = bot_token or settings.telegram_analytics_bot_token
     if not token:
         return
@@ -2164,6 +2162,17 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             cb_user_id = callback.get("from", {}).get("id", 0)
             cb_chat_id = callback["message"]["chat"]["id"]
             cb_message_id = callback["message"]["message_id"]
+
+            # Мульти-тенант: определяем tenant по chat_id колбэка
+            try:
+                from app.database_pg import get_tenant_id_for_chat
+                resolved = get_tenant_id_for_chat(cb_chat_id)
+                if resolved is not None:
+                    _ctx_tenant_id.set(resolved)
+                else:
+                    _ctx_tenant_id.set(tenant_id)
+            except Exception:
+                _ctx_tenant_id.set(tenant_id)
 
             if cb_data.startswith("ac:"):
                 await access_manager.handle_callback(
@@ -2335,6 +2344,18 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
         user_id: int = message.get("from", {}).get("id", 0)
         username: str = message.get("from", {}).get("username", "unknown")
 
+        # Мульти-тенант: определяем tenant по chat_id (группа) или user_id (личка)
+        try:
+            from app.database_pg import get_tenant_id_for_chat
+            if chat_id < 0:
+                resolved = get_tenant_id_for_chat(chat_id)
+            else:
+                from app.database_pg import get_tenant_id_by_admin
+                resolved = await get_tenant_id_by_admin(user_id)
+            _ctx_tenant_id.set(resolved if resolved is not None else tenant_id)
+        except Exception:
+            _ctx_tenant_id.set(tenant_id)
+
         # Личка — только admin. Остальные игнорируются молча.
         if chat_id > 0 and not access.is_admin(user_id):
             continue
@@ -2459,7 +2480,6 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
         elif cmd in ("доступ", "access"):
             await access_manager.handle_command(chat_id, user_id)
         elif cmd == "ai" and perms.is_admin:
-            global _openclaw_enabled
             if arg.lower() == "on":
                 _openclaw_enabled = True
                 await _send(chat_id, "✅ AI включён (@ mention активен).")

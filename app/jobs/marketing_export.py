@@ -307,9 +307,11 @@ def build_sql(params: dict) -> tuple[str, list]:
     elif has_problem is False:
         conditions.append("o.has_problem = 0")
 
-    # --- Филиал или город ---
+    # --- Филиал или город (или дефолт к веткам тенанта) ---
     branch = params.get("branch")
     city = params.get("city")
+    tenant_branches = params.get("_tenant_branch_names")  # fallback для изоляции
+    
     if branch:
         conditions.append("o.branch_name = ?")
         args.append(branch)
@@ -319,6 +321,11 @@ def build_sql(params: dict) -> tuple[str, list]:
             placeholders = ",".join("?" * len(branch_names))
             conditions.append(f"o.branch_name IN ({placeholders})")
             args.extend(branch_names)
+    elif tenant_branches:
+        # Если не указан филиал/город — ограничиваем ветками текущего тенанта
+        placeholders = ",".join("?" * len(tenant_branches))
+        conditions.append(f"o.branch_name IN ({placeholders})")
+        args.extend(tenant_branches)
 
     where_clause = " AND ".join(conditions)
 
@@ -327,16 +334,26 @@ def build_sql(params: dict) -> tuple[str, list]:
     cte_args: list = []  # аргументы для CTE (prepend перед основными args)
 
     # CTE customer_first и customer_total — всегда нужны
-    cte_parts.append("""customer_first AS (
+    # Добавляем фильтр по веткам тенанта сразу в CTE для корректности
+    tenant_branch_filter = ""
+    tenant_branch_args = []
+    if tenant_branches:
+        ph = ",".join("?" * len(tenant_branches))
+        tenant_branch_filter = f" AND branch_name IN ({ph})"
+        tenant_branch_args = list(tenant_branches)
+        # Prepend tenant_branch_args to cte_args since they're used in WITH clause
+        cte_args = tenant_branch_args + cte_args
+    
+    cte_parts.append(f"""customer_first AS (
             SELECT client_phone, MIN(date) AS first_order_date
             FROM orders_raw
-            WHERE client_phone IS NOT NULL AND TRIM(client_phone) != ''
+            WHERE client_phone IS NOT NULL AND TRIM(client_phone) != '' {tenant_branch_filter}
             GROUP BY client_phone
         )""")
-    cte_parts.append("""customer_total AS (
+    cte_parts.append(f"""customer_total AS (
             SELECT client_phone, COUNT(*) AS total_orders
             FROM orders_raw
-            WHERE client_phone IS NOT NULL AND TRIM(client_phone) != ''
+            WHERE client_phone IS NOT NULL AND TRIM(client_phone) != '' {tenant_branch_filter}
             GROUP BY client_phone
         )""")
 
@@ -363,6 +380,10 @@ def build_sql(params: dict) -> tuple[str, list]:
                 ph = ",".join("?" * len(branch_names))
                 period_conds.append(f"branch_name IN ({ph})")
                 cte_args.extend(branch_names)
+        elif tenant_branches:
+            ph = ",".join("?" * len(tenant_branches))
+            period_conds.append(f"branch_name IN ({ph})")
+            cte_args.extend(tenant_branches)
         period_where = " AND ".join(period_conds)
         cte_parts.append(f"""period_orders AS (
             SELECT client_phone, COUNT(*) AS period_count
@@ -384,6 +405,19 @@ def build_sql(params: dict) -> tuple[str, list]:
         if exclude_to:
             excl_conds.append("date <= ?")
             cte_args.append(exclude_to)
+        if branch:
+            excl_conds.append("branch_name = ?")
+            cte_args.append(branch)
+        elif city:
+            branch_names = _get_branches_for_city(city)
+            if branch_names:
+                ph = ",".join("?" * len(branch_names))
+                excl_conds.append(f"branch_name IN ({ph})")
+                cte_args.extend(branch_names)
+        elif tenant_branches:
+            ph = ",".join("?" * len(tenant_branches))
+            excl_conds.append(f"branch_name IN ({ph})")
+            cte_args.extend(tenant_branches)
         excl_where = " AND ".join(excl_conds)
         cte_parts.append(f"""excluded_phones AS (
             SELECT DISTINCT client_phone
@@ -775,6 +809,21 @@ async def run_export(chat_id: int, query_text: str, bot_url: str) -> None:
     # 1. Парсинг запроса через OpenRouter
     try:
         params = await parse_query_with_openrouter(query_text)
+        
+        # Добавляем обязательный фильтр по ветках текущего тенанта для изоляции
+        from app.ctx import ctx_tenant_id
+        from app.jobs.iiko_status_report import get_available_branches
+        tenant_id = ctx_tenant_id.get()
+        tenant_branches = get_available_branches()
+        
+        if not tenant_branches:
+            await _send_text(bot_url, chat_id, "❌ Нет доступных филиалов для вашего тенанта")
+            return
+        
+        # Если не указан явно филиал/город — добавляем все ветки тенанта
+        if not params.get("branch") and not params.get("city"):
+            params["_tenant_branch_names"] = [b["name"] for b in tenant_branches]
+        
     except Exception as e:
         logger.error(f"[marketing_export] OpenRouter error: {e}", exc_info=True)
         await _send_text(

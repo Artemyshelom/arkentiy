@@ -22,7 +22,6 @@ import asyncio
 import html
 import logging
 import re
-from contextvars import ContextVar
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -60,13 +59,15 @@ from app.jobs.late_alerts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
-# Context variables для мульти-бот режима.
-# Каждый polling loop устанавливает свой контекст — не нужно протаскивать через все функции.
-_ctx_tenant_id: ContextVar[int] = ContextVar("tenant_id", default=1)
-_ctx_bot_token: ContextVar[str] = ContextVar("bot_token", default="")
+# Context variables для мульти-тенантного режима (определены в app.ctx, импортируем здесь).
+from app.ctx import ctx_tenant_id as _ctx_tenant_id, ctx_bot_token as _ctx_bot_token
 
 # Смещение update_id отдельно для каждого токена
 _last_update_id: dict[str, int | None] = {}  # bot_token → last update_id
+
+# AI @ mention — in-memory флаг горячего отключения (/ai on|off)
+# При старте берётся из settings.openclaw_enabled; меняется без редеплоя
+_openclaw_enabled: bool = True
 
 # Маппинг команды → модуль для проверки прав
 _CMD_MODULE: dict[str, str] = {
@@ -220,6 +221,79 @@ async def _send_document(chat_id: int, filename: str, data: bytes, caption: str 
     except Exception as e:
         logger.error(f"_send_document: {e}")
         return False
+
+
+async def _react(chat_id: int, message_id: int, emoji: str) -> None:
+    """Ставит emoji-реакцию на сообщение (Bot API 7.0+, setMessageReaction)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{_bot_url()}/setMessageReaction",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": emoji}],
+                    "is_big": False,
+                },
+            )
+    except Exception as e:
+        logger.debug("_react error: %s", e)
+
+
+async def _reply(chat_id: int, message_id: int, text: str, parse_mode: str = "HTML") -> None:
+    """Отправляет reply на конкретное сообщение. Длинный текст разбивает на части."""
+    max_len = 4096
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        cut = text.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+
+    first = True
+    for chunk in chunks:
+        payload: dict = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": parse_mode,
+        }
+        if first:
+            payload["reply_to_message_id"] = message_id
+            payload["allow_sending_without_reply"] = True
+            first = False
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(f"{_bot_url()}/sendMessage", json=payload)
+                if not r.json().get("ok"):
+                    # Если Markdown сломан — повторить без форматирования
+                    if parse_mode != "HTML":
+                        payload["parse_mode"] = "HTML"
+                        await client.post(f"{_bot_url()}/sendMessage", json=payload)
+        except Exception as e:
+            logger.error("_reply error: %s", e)
+
+
+def _is_bot_mentioned(message: dict, text: str) -> bool:
+    """
+    Проверяет что бот упомянут через @username в тексте.
+    Использует entities из Telegram — надёжнее regex.
+    Если telegram_bot_username не задан — срабатывает на любой @mention.
+    """
+    entities = message.get("entities", [])
+    bot_username = settings.telegram_bot_username.lower().lstrip("@")
+    for entity in entities:
+        if entity.get("type") != "mention":
+            continue
+        offset = entity["offset"]
+        length = entity["length"]
+        mentioned = text[offset : offset + length].lstrip("@").lower()
+        if not bot_username or mentioned == bot_username:
+            return True
+    return False
 
 
 async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -> None:
@@ -2051,6 +2125,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
     Polling job для одного тенанта.
     bot_token и tenant_id устанавливаются в ContextVar — все хелперы используют их автоматически.
     """
+    global _openclaw_enabled  # объявляем вверху функции, до первого использования
     token = bot_token or settings.telegram_analytics_bot_token
     if not token:
         return
@@ -2087,6 +2162,17 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             cb_user_id = callback.get("from", {}).get("id", 0)
             cb_chat_id = callback["message"]["chat"]["id"]
             cb_message_id = callback["message"]["message_id"]
+
+            # Мульти-тенант: определяем tenant по chat_id колбэка
+            try:
+                from app.database_pg import get_tenant_id_for_chat
+                resolved = get_tenant_id_for_chat(cb_chat_id)
+                if resolved is not None:
+                    _ctx_tenant_id.set(resolved)
+                else:
+                    _ctx_tenant_id.set(tenant_id)
+            except Exception:
+                _ctx_tenant_id.set(tenant_id)
 
             if cb_data.startswith("ac:"):
                 await access_manager.handle_callback(
@@ -2258,6 +2344,18 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
         user_id: int = message.get("from", {}).get("id", 0)
         username: str = message.get("from", {}).get("username", "unknown")
 
+        # Мульти-тенант: определяем tenant по chat_id (группа) или user_id (личка)
+        try:
+            from app.database_pg import get_tenant_id_for_chat
+            if chat_id < 0:
+                resolved = get_tenant_id_for_chat(chat_id)
+            else:
+                from app.database_pg import get_tenant_id_by_admin
+                resolved = await get_tenant_id_by_admin(user_id)
+            _ctx_tenant_id.set(resolved if resolved is not None else tenant_id)
+        except Exception:
+            _ctx_tenant_id.set(tenant_id)
+
         # Личка — только admin. Остальные игнорируются молча.
         if chat_id > 0 and not access.is_admin(user_id):
             continue
@@ -2288,7 +2386,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                         await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
             continue
 
-        # Не команда — проверяем диалог access_manager (например, ввод ID чата)
+        # Не команда — проверяем диалог access_manager и @ mention
         if text and not text.startswith("/"):
             if access.is_admin(user_id) and chat_id > 0:
                 try:
@@ -2297,6 +2395,31 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                         continue
                 except Exception as e:
                     logger.error(f"[access_manager] handle_text: {e}")
+
+            # AI: @ mention бота → OpenClaw
+            if _openclaw_enabled and _is_bot_mentioned(message, text):
+                perms = access.get_permissions(chat_id, user_id)
+                if perms.has("ai"):
+                    msg_id: int = message.get("message_id", 0)
+                    await _react(chat_id, msg_id, "🤔")
+                    try:
+                        from app.jobs.openclaw_mention import handle_mention
+                        response = await handle_mention(
+                            text=text,
+                            user_id=user_id,
+                            username=username,
+                            city=perms.city,
+                            is_admin=perms.is_admin,
+                        )
+                        if response:
+                            await _reply(chat_id, msg_id, response)
+                            await _react(chat_id, msg_id, "✅")
+                        else:
+                            await _react(chat_id, msg_id, "✅")
+                    except Exception as e:
+                        logger.error("[mention] unhandled error: %s", e, exc_info=True)
+                        await _reply(chat_id, msg_id, "⚠️ Мозги временно недоступны.")
+                        await _react(chat_id, msg_id, "❌")
             continue
 
         if not text.startswith("/"):
@@ -2356,6 +2479,16 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             await run_export(chat_id, arg, _bot_url())
         elif cmd in ("доступ", "access"):
             await access_manager.handle_command(chat_id, user_id)
+        elif cmd == "ai" and perms.is_admin:
+            if arg.lower() == "on":
+                _openclaw_enabled = True
+                await _send(chat_id, "✅ AI включён (@ mention активен).")
+            elif arg.lower() == "off":
+                _openclaw_enabled = False
+                await _send(chat_id, "🔕 AI выключен до рестарта или <code>/ai on</code>.")
+            else:
+                status = "включён ✅" if _openclaw_enabled else "выключен 🔕"
+                await _send(chat_id, f"🤖 AI сейчас: {status}\n\n/ai on — включить\n/ai off — выключить")
         elif cmd in ("конкуренты", "competitors"):
             await _send(chat_id, "⏳ Обновляю таблицы конкурентов...")
             try:
@@ -2375,9 +2508,12 @@ async def run_polling_loop(bot_token: str = "", tenant_id: int = 1) -> None:
     Запускается как asyncio.Task в lifespan — по одному на каждый активный тенант.
     """
     import asyncio as _asyncio
+    global _openclaw_enabled
+    _openclaw_enabled = settings.openclaw_enabled  # берём из .env при старте
+
     token = bot_token or settings.telegram_analytics_bot_token
     label = f"tenant_id={tenant_id}"
-    logger.info(f"Аркентий: polling loop started [{label}]")
+    logger.info(f"Аркентий: polling loop started [{label}], AI={'on' if _openclaw_enabled else 'off'}")
     while True:
         try:
             await poll_analytics_bot(bot_token=token, tenant_id=tenant_id)

@@ -1,228 +1,968 @@
-"""Cabinet API endpoints for Arkentiy web panel - FIXED."""
+"""
+Cabinet API — личный кабинет клиента.
 
+Все эндпоинты требуют JWT (кроме login).
+tenant_id берётся из JWT payload, данные изолированы по тенанту.
+"""
+
+import hashlib
+import json
+import logging
+from datetime import datetime, timedelta
+from typing import Optional
+
+import bcrypt
+import httpx
+import jwt
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
-from typing import Optional
-import jwt
-import hashlib
-from datetime import datetime, timedelta
+
+from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cabinet", tags=["Cabinet"])
 
-JWT_SECRET = "arkentiy-secret-change-me"
 JWT_ALGO = "HS256"
+
+
+# =====================================================================
+# Auth helpers (exported — used by onboarding.py)
+# =====================================================================
+
+def _jwt_secret() -> str:
+    return get_settings().jwt_secret
+
+
+def hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
+
+
+def verify_password(plain: str, hashed: str) -> bool:
+    if len(hashed) == 64 and all(c in "0123456789abcdef" for c in hashed):
+        return hashlib.sha256(plain.encode()).hexdigest() == hashed
+    return bcrypt.checkpw(plain.encode(), hashed.encode())
+
 
 def get_tenant_id(authorization: str = Header(None)) -> int:
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(401, "Missing or invalid token")
     token = authorization[7:]
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGO])
+        payload = jwt.decode(token, _jwt_secret(), algorithms=[JWT_ALGO])
         return payload.get("tenant_id", 1)
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid token")
+
+
+# =====================================================================
+# Pydantic models
+# =====================================================================
 
 class LoginRequest(BaseModel):
     email: str
     password: str
 
+
 class IikoUpdate(BaseModel):
     url: str
     login: str
-    password: Optional[str] = None
+
 
 class ChatCreate(BaseModel):
     chat_id: str
     name: str
+
 
 class ChatUpdate(BaseModel):
     name: str
     cities: list[str] = []
     modules: list[str] = []
 
+
 class ChatVerify(BaseModel):
     chat_id: str
+
 
 class SettingsUpdate(BaseModel):
     name: Optional[str] = None
     contact: Optional[str] = None
     email: Optional[str] = None
+    phone: Optional[str] = None
+
 
 class PasswordUpdate(BaseModel):
     old_password: str
     new_password: str
 
-async def get_pg_pool():
-    """Get postgres pool if available."""
+
+class LegalUpdate(BaseModel):
+    inn: str = ""
+    legal_name: str = ""
+
+
+class SubscriptionUpdate(BaseModel):
+    addons: list[str] = []
+    cities: list[dict] = []
+    period: str = "monthly"
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str
+
+
+# =====================================================================
+# DB pool helper
+# =====================================================================
+
+async def _pool():
     try:
-        from app.database_pg import _pool
-        return _pool
-    except:
+        from app.database_pg import _pool as p
+        return p
+    except Exception:
         return None
+
+
+# =====================================================================
+# 1. POST /api/cabinet/auth/login
+# =====================================================================
 
 @router.post("/auth/login")
 async def login(req: LoginRequest):
-    """Login endpoint."""
-    pool = await get_pg_pool()
+    pool = await _pool()
     if pool:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, name, password_hash FROM tenants WHERE email = $1 AND status = 'active'",
-                req.email
+                "SELECT id, name, password_hash, status FROM tenants WHERE email = $1",
+                req.email,
             )
-            if row:
-                expected = hashlib.sha256(req.password.encode()).hexdigest()
-                if row["password_hash"] == expected:
-                    token = jwt.encode({
-                        "tenant_id": row["id"],
-                        "email": req.email,
-                        "exp": datetime.utcnow() + timedelta(days=30)
-                    }, JWT_SECRET, algorithm=JWT_ALGO)
+            if row and row["password_hash"]:
+                if row["status"] not in ("active", "trial", "pending_payment"):
+                    raise HTTPException(403, "Аккаунт неактивен")
+                if verify_password(req.password, row["password_hash"]):
+                    token = jwt.encode(
+                        {"tenant_id": row["id"], "email": req.email,
+                         "exp": datetime.utcnow() + timedelta(days=30)},
+                        _jwt_secret(), algorithm=JWT_ALGO,
+                    )
                     return {"token": token, "tenant": row["name"]}
-    
-    # Fallback: demo login
-    if req.email == "art@ebidoebi.ru" and req.password == "demo123":
-        token = jwt.encode({
-            "tenant_id": 1,
-            "email": req.email,
-            "exp": datetime.utcnow() + timedelta(days=30)
-        }, JWT_SECRET, algorithm=JWT_ALGO)
+
+    settings = get_settings()
+    if settings.debug and req.email == "art@ebidoebi.ru" and req.password == "demo123":
+        token = jwt.encode(
+            {"tenant_id": 1, "email": req.email,
+             "exp": datetime.utcnow() + timedelta(days=30)},
+            _jwt_secret(), algorithm=JWT_ALGO,
+        )
         return {"token": token, "tenant": "Ёбидоёби"}
-    
-    raise HTTPException(401, "Invalid credentials")
+
+    raise HTTPException(401, "Неверный email или пароль")
+
+
+# =====================================================================
+# 2. GET /api/cabinet/overview
+# =====================================================================
 
 @router.get("/overview")
 async def get_overview(tenant_id: int = Depends(get_tenant_id)):
-    from app.config import get_settings
-    settings = get_settings()
-    
-    branches_count = len(settings.branches)
-    cities = list(set(b.get("city", "") for b in settings.branches if b.get("city")))
-    cities_count = len(cities)
-    
-    data = {
-        "tenant": {"name": "Ёбидоёби", "contact": "Артемий", "email": "art@ebidoebi.ru"},
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchrow(
+            "SELECT name, contact, email FROM tenants WHERE id = $1", tenant_id,
+        )
+        if not tenant:
+            raise HTTPException(404, "Тенант не найден")
+
+        sub = await conn.fetchrow(
+            """SELECT status, plan, modules_json, branches_count,
+                      amount_monthly, next_billing_at, period
+               FROM subscriptions WHERE tenant_id = $1""",
+            tenant_id,
+        )
+
+        trial_row = await conn.fetchval(
+            "SELECT trial_ends_at FROM tenants WHERE id = $1", tenant_id,
+        )
+
+        cities_rows = await conn.fetch(
+            "SELECT DISTINCT city FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true",
+            tenant_id,
+        )
+
+        iiko_cred = await conn.fetchrow(
+            "SELECT bo_url FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true LIMIT 1",
+            tenant_id,
+        )
+
+        tg_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM tenant_chats WHERE tenant_id = $1 AND is_active = true",
+            tenant_id,
+        )
+
+        events = await conn.fetch(
+            """SELECT event_type, text, icon, created_at
+               FROM tenant_events WHERE tenant_id = $1
+               ORDER BY created_at DESC LIMIT 10""",
+            tenant_id,
+        )
+
+    modules = []
+    if sub and sub["modules_json"]:
+        try:
+            modules = json.loads(sub["modules_json"]) if isinstance(sub["modules_json"], str) else sub["modules_json"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    addons = [m for m in modules if m != "base"]
+
+    return {
+        "tenant": dict(tenant),
         "subscription": {
-            "status": "active", "plan": "base", "addons": ["Финансы"],
-            "branches_count": branches_count, "cities_count": cities_count,
-            "next_payment_date": None, "next_payment_amount": None
+            "status": sub["status"] if sub else "none",
+            "plan": sub["plan"] if sub else "base",
+            "addons": addons,
+            "branches_count": sub["branches_count"] if sub else 0,
+            "cities_count": len(cities_rows),
+            "trial_ends_at": trial_row.isoformat() if trial_row else None,
+            "next_payment_date": sub["next_billing_at"].strftime("%Y-%m-%d") if sub and sub["next_billing_at"] else None,
+            "next_payment_amount": sub["amount_monthly"] if sub else None,
         },
         "connections": {
-            "iiko": {"status": "ok" if settings.branches and settings.branches[0].get("bo_url") else "not_configured"},
-            "telegram": {"status": "ok" if settings.telegram_bot_token else "not_configured"}
+            "iiko": {"status": "ok" if iiko_cred else "not_configured"},
+            "telegram": {"status": "ok" if tg_count > 0 else "not_configured"},
         },
-        "recent_events": []
+        "recent_events": [
+            {
+                "date": e["created_at"].isoformat(),
+                "type": e["event_type"],
+                "text": e["text"],
+                "icon": e["icon"],
+            }
+            for e in events
+        ],
     }
-    
-    pool = await get_pg_pool()
-    if pool:
-        async with pool.acquire() as conn:
-            tenant = await conn.fetchrow("SELECT name, contact, email FROM tenants WHERE id = $1", tenant_id)
-            if tenant:
-                data["tenant"] = dict(tenant)
-    
-    return data
 
-@router.get("/connections")
-async def get_connections(tenant_id: int = Depends(get_tenant_id)):
-    from app.config import get_settings
-    settings = get_settings()
-    
-    iiko_data = {"status": "not_configured", "url": None, "login": None, "last_check": None, "response_time_ms": None, "checks_log": []}
-    if settings.branches:
-        b = settings.branches[0]
-        if b.get("bo_url"):
-            iiko_data["status"] = "ok"
-            iiko_data["url"] = b["bo_url"]
-            iiko_data["login"] = b.get("bo_login", "")
-            iiko_data["last_check"] = datetime.utcnow().isoformat()
-    
-    tg_data = {"bot_username": "arkentiy_bot", "chats": []}
-    
-    # Get chats from config
-    if hasattr(settings, "telegram_chats") and settings.telegram_chats:
-        for i, chat_id in enumerate(settings.telegram_chats):
-            tg_data["chats"].append({
-                "id": i + 1, "chat_id": str(chat_id), "name": f"Чат {i+1}",
-                "cities": [], "modules": ["late_alerts", "reports"], "status": "ok"
-            })
-    
-    cities = list(set(b.get("city", "") for b in settings.branches if b.get("city")))
-    return {"iiko": iiko_data, "telegram": tg_data, "cities": cities}
 
-@router.post("/connections/iiko/test")
-async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
-    from app.config import get_settings
-    from app.clients.iiko_auth import get_bo_token
-    settings = get_settings()
-    if not settings.branches or not settings.branches[0].get("bo_url"):
-        return {"status": "error", "error": "iiko not configured"}
-    try:
-        token = await get_bo_token(settings.branches[0]["bo_url"])
-        return {"status": "ok" if token else "error", "response_time_ms": 500}
-    except Exception as e:
-        return {"status": "error", "error": str(e)}
-
-@router.put("/connections/iiko")
-async def update_iiko(data: IikoUpdate, tenant_id: int = Depends(get_tenant_id)):
-    return {"status": "ok"}
-
-@router.get("/chats")
-async def get_chats(tenant_id: int = Depends(get_tenant_id)):
-    return {"chats": []}
-
-@router.post("/chats")
-async def create_chat(data: ChatCreate, tenant_id: int = Depends(get_tenant_id)):
-    return {"id": 1, "chat_id": data.chat_id, "name": data.name}
-
-@router.put("/chats/{chat_id}")
-async def update_chat(chat_id: int, data: ChatUpdate, tenant_id: int = Depends(get_tenant_id)):
-    return {"status": "ok"}
-
-@router.delete("/chats/{chat_id}")
-async def delete_chat(chat_id: int, tenant_id: int = Depends(get_tenant_id)):
-    return {"status": "ok"}
-
-@router.post("/chats/{chat_id}/test")
-async def test_chat(chat_id: int, tenant_id: int = Depends(get_tenant_id)):
-    return {"status": "ok"}
-
-@router.post("/chats/verify")
-async def verify_chat(data: ChatVerify, tenant_id: int = Depends(get_tenant_id)):
-    return {"ok": True}
+# =====================================================================
+# 3. GET /api/cabinet/subscription
+# =====================================================================
 
 @router.get("/subscription")
 async def get_subscription(tenant_id: int = Depends(get_tenant_id)):
-    from app.config import get_settings
-    settings = get_settings()
-    
-    cities_map = {}
-    for b in settings.branches:
-        city = b.get("city", "Другое")
-        if city not in cities_map:
-            cities_map[city] = []
-        cities_map[city].append({"id": b.get("id", ""), "name": b.get("name", "")})
-    
-    cities = [{"name": city, "branches": branches} for city, branches in cities_map.items()]
-    branches_count = sum(len(c["branches"]) for c in cities)
-    
-    base_cost = 5000 * branches_count
-    finance_cost = 2000 * branches_count
-    volume_discount = 0.15 if branches_count >= 7 else 0.10 if branches_count >= 4 else 0
-    subtotal = base_cost + finance_cost
-    monthly_total = int(subtotal * (1 - volume_discount))
-    
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        sub = await conn.fetchrow(
+            """SELECT status, plan, modules_json, branches_count, amount_monthly,
+                      period, next_billing_at, started_at
+               FROM subscriptions WHERE tenant_id = $1""",
+            tenant_id,
+        )
+        if not sub:
+            raise HTTPException(404, "Подписка не найдена")
+
+        trial_ends = await conn.fetchval(
+            "SELECT trial_ends_at FROM tenants WHERE id = $1", tenant_id,
+        )
+
+        branches = await conn.fetch(
+            """SELECT branch_name, city FROM iiko_credentials
+               WHERE tenant_id = $1 AND is_active = true
+               ORDER BY city, branch_name""",
+            tenant_id,
+        )
+
+    modules = []
+    if sub["modules_json"]:
+        try:
+            modules = json.loads(sub["modules_json"]) if isinstance(sub["modules_json"], str) else sub["modules_json"]
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    addons = [m for m in modules if m != "base"]
+
+    cities_map: dict[str, list[dict]] = {}
+    for b in branches:
+        city = b["city"] or "Другое"
+        cities_map.setdefault(city, []).append({"name": b["branch_name"]})
+    cities = [{"name": city, "branches": brs} for city, brs in cities_map.items()]
+
+    branches_count = sub["branches_count"] or sum(len(c["branches"]) for c in cities)
+    cities_count = len(cities)
+
+    base_per_branch = 5000
+    fin_per_branch = 2000
+    comp_per_city = 1000
+
+    base_cost = base_per_branch * branches_count
+    fin_cost = fin_per_branch * branches_count if "finance" in modules else 0
+    comp_cost = comp_per_city * cities_count if "competitors" in modules else 0
+    subtotal = base_cost + fin_cost + comp_cost
+
+    vol_pct = 15 if branches_count >= 7 else (10 if branches_count >= 4 else 0)
+    annual_pct = 20 if sub["period"] == "annual" else 0
+
+    after_vol = int(subtotal * (1 - vol_pct / 100))
+    monthly_total = int(after_vol * (1 - annual_pct / 100))
+
     return {
-        "status": "active", "plan": "base", "addons": ["Финансы"], "period": "monthly",
-        "cities": cities, "branches_count": branches_count, "cities_count": len(cities),
-        "pricing": {"base_per_branch": 5000, "finance_per_branch": 2000, "volume_discount_pct": int(volume_discount * 100), "monthly_total": monthly_total, "next_payment": monthly_total},
-        "next_payment_date": None
+        "status": sub["status"],
+        "plan": sub["plan"],
+        "addons": addons,
+        "period": sub["period"] or "monthly",
+        "cities": cities,
+        "branches_count": branches_count,
+        "cities_count": cities_count,
+        "pricing": {
+            "base_per_branch": base_per_branch,
+            "finance_per_branch": fin_per_branch,
+            "competitors_per_city": comp_per_city,
+            "volume_discount_pct": vol_pct,
+            "annual_discount_pct": annual_pct,
+            "monthly_total": monthly_total,
+            "next_payment": sub["amount_monthly"] or monthly_total,
+            "next_payment_date": sub["next_billing_at"].strftime("%Y-%m-%d") if sub["next_billing_at"] else None,
+        },
+        "trial_ends_at": trial_ends.isoformat() if trial_ends else None,
+        "created_at": sub["started_at"].isoformat() if sub["started_at"] else None,
     }
+
+
+# =====================================================================
+# 4. PUT /api/cabinet/subscription
+# =====================================================================
+
+@router.put("/subscription")
+async def update_subscription(req: SubscriptionUpdate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    modules = ["base"] + req.addons
+    branches_count = sum(len(c.get("branches", [])) for c in req.cities)
+    cities_count = len(req.cities)
+
+    base = 5000 * branches_count
+    fin = 2000 * branches_count if "finance" in modules else 0
+    comp = 1000 * cities_count if "competitors" in modules else 0
+    subtotal = base + fin + comp
+
+    vol_pct = 15 if branches_count >= 7 else (10 if branches_count >= 4 else 0)
+    annual_pct = 20 if req.period == "annual" else 0
+    after_vol = int(subtotal * (1 - vol_pct / 100))
+    new_monthly = int(after_vol * (1 - annual_pct / 100))
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            await conn.execute(
+                """UPDATE subscriptions SET modules_json = $1, branches_count = $2,
+                   amount_monthly = $3, period = $4, updated_at = now()
+                   WHERE tenant_id = $5""",
+                json.dumps(modules), branches_count, new_monthly, req.period, tenant_id,
+            )
+
+            await conn.execute(
+                "UPDATE tenant_modules SET enabled = false, updated_at = now() WHERE tenant_id = $1",
+                tenant_id,
+            )
+            for m in modules:
+                await conn.execute(
+                    """INSERT INTO tenant_modules (tenant_id, module, enabled, updated_at)
+                       VALUES ($1, $2, true, now())
+                       ON CONFLICT (tenant_id, module) DO UPDATE SET enabled = true, updated_at = now()""",
+                    tenant_id, m,
+                )
+
+            await conn.execute(
+                "UPDATE iiko_credentials SET is_active = false WHERE tenant_id = $1", tenant_id,
+            )
+            cred = await conn.fetchrow(
+                "SELECT bo_url, bo_login FROM iiko_credentials WHERE tenant_id = $1 LIMIT 1",
+                tenant_id,
+            )
+            bo_url = cred["bo_url"] if cred else ""
+            bo_login = cred["bo_login"] if cred else ""
+
+            for city_data in req.cities:
+                city_name = city_data.get("name", "")
+                for branch in city_data.get("branches", []):
+                    branch_name = branch.get("name", "") if isinstance(branch, dict) else branch
+                    if not branch_name:
+                        continue
+                    await conn.execute(
+                        """INSERT INTO iiko_credentials (tenant_id, branch_name, city, bo_url, bo_login, is_active)
+                           VALUES ($1, $2, $3, $4, $5, true)
+                           ON CONFLICT (tenant_id, branch_name) DO UPDATE
+                           SET city = $3, is_active = true, bo_url = COALESCE(NULLIF($4, ''), iiko_credentials.bo_url)""",
+                        tenant_id, branch_name, city_name, bo_url, bo_login,
+                    )
+
+            await conn.execute(
+                """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+                   VALUES ($1, 'subscription', $2, 'info')""",
+                tenant_id,
+                f"Подписка обновлена: {branches_count} точек, {new_monthly:,} ₽/мес",
+            )
+
+    return {
+        "new_monthly_total": new_monthly,
+        "branches_count": branches_count,
+        "cities_count": cities_count,
+    }
+
+
+# =====================================================================
+# 5. GET /api/cabinet/connections
+# =====================================================================
+
+@router.get("/connections")
+async def get_connections(tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        iiko_rows = await conn.fetch(
+            """SELECT bo_url, bo_login, city, branch_name
+               FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true
+               ORDER BY city, branch_name""",
+            tenant_id,
+        )
+
+        chats = await conn.fetch(
+            """SELECT chat_id, name, modules_json, city, is_active
+               FROM tenant_chats WHERE tenant_id = $1 AND is_active = true
+               ORDER BY name""",
+            tenant_id,
+        )
+
+        cities_rows = await conn.fetch(
+            "SELECT DISTINCT city FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true",
+            tenant_id,
+        )
+
+    iiko_data = {
+        "status": "not_configured", "url": None, "login": None,
+        "last_check": None, "response_time_ms": None, "checks_log": [],
+    }
+    if iiko_rows:
+        first = iiko_rows[0]
+        iiko_data["status"] = "ok"
+        iiko_data["url"] = first["bo_url"]
+        iiko_data["login"] = first["bo_login"]
+
+    tg_chats = []
+    for ch in chats:
+        mods = ch["modules_json"]
+        if isinstance(mods, str):
+            try:
+                mods = json.loads(mods)
+            except (json.JSONDecodeError, TypeError):
+                mods = []
+        elif not isinstance(mods, list):
+            mods = []
+        tg_chats.append({
+            "chat_id": str(ch["chat_id"]),
+            "name": ch["name"],
+            "cities": [ch["city"]] if ch["city"] else [],
+            "modules": mods,
+            "status": "ok",
+        })
+
+    cities = [r["city"] for r in cities_rows if r["city"]]
+
+    return {
+        "iiko": iiko_data,
+        "telegram": {"bot_username": "arkentiy_bot", "chats": tg_chats},
+        "cities": cities,
+    }
+
+
+# =====================================================================
+# 6. PUT /api/cabinet/connections/iiko
+# =====================================================================
+
+@router.put("/connections/iiko")
+async def update_iiko(data: IikoUpdate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE iiko_credentials SET bo_url = $1, bo_login = $2
+               WHERE tenant_id = $3 AND is_active = true""",
+            data.url.rstrip("/"), data.login, tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'connection', 'Данные iiko обновлены', 'info')""",
+            tenant_id,
+        )
+    return {"status": "ok"}
+
+
+# =====================================================================
+# 7. POST /api/cabinet/connections/iiko/test
+# =====================================================================
+
+@router.post("/connections/iiko/test")
+async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        cred = await conn.fetchrow(
+            "SELECT bo_url, bo_login FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true LIMIT 1",
+            tenant_id,
+        )
+
+    if not cred or not cred["bo_url"]:
+        return {"status": "error", "error": "iiko не настроен"}
+
+    try:
+        from app.clients.iiko_auth import get_bo_token
+        token = await get_bo_token(cred["bo_url"])
+        return {"status": "ok" if token else "error", "response_time_ms": 500}
+    except Exception as e:
+        return {"status": "error", "error": str(e)[:200]}
+
+
+# =====================================================================
+# 8. GET /api/cabinet/chats
+# =====================================================================
+
+@router.get("/chats")
+async def get_chats(tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT chat_id, name, modules_json, city, is_active
+               FROM tenant_chats WHERE tenant_id = $1 AND is_active = true
+               ORDER BY name""",
+            tenant_id,
+        )
+
+    chats = []
+    for r in rows:
+        mods = r["modules_json"]
+        if isinstance(mods, str):
+            try:
+                mods = json.loads(mods)
+            except (json.JSONDecodeError, TypeError):
+                mods = []
+        elif not isinstance(mods, list):
+            mods = []
+        chats.append({
+            "chat_id": str(r["chat_id"]),
+            "name": r["name"],
+            "cities": [r["city"]] if r["city"] else [],
+            "modules": mods,
+        })
+    return {"chats": chats}
+
+
+# =====================================================================
+# 9. POST /api/cabinet/chats
+# =====================================================================
+
+@router.post("/chats")
+async def create_chat(data: ChatCreate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    try:
+        chat_id_int = int(data.chat_id)
+    except ValueError:
+        raise HTTPException(400, "Некорректный chat_id")
+
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            "SELECT tenant_id FROM tenant_chats WHERE chat_id = $1",
+            chat_id_int,
+        )
+        if existing:
+            if existing["tenant_id"] != tenant_id:
+                raise HTTPException(409, "Этот чат уже привязан к другому аккаунту")
+            await conn.execute(
+                """UPDATE tenant_chats SET is_active = true, name = $1
+                   WHERE tenant_id = $2 AND chat_id = $3""",
+                data.name, tenant_id, chat_id_int,
+            )
+        else:
+            default_modules = ["late_alerts", "reports"]
+            await conn.execute(
+                """INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, is_active)
+                   VALUES ($1, $2, $3, $4::jsonb, true)""",
+                tenant_id, chat_id_int, data.name, json.dumps(default_modules),
+            )
+
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'connection', $2, 'success')""",
+            tenant_id, f"Telegram-чат «{data.name}» добавлен",
+        )
+
+    return {"chat_id": data.chat_id, "name": data.name}
+
+
+# =====================================================================
+# 10. PUT /api/cabinet/chats/{chat_id}
+# =====================================================================
+
+@router.put("/chats/{chat_id}")
+async def update_chat(chat_id: str, data: ChatUpdate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    try:
+        chat_id_int = int(chat_id)
+    except ValueError:
+        raise HTTPException(400, "Некорректный chat_id")
+
+    city = data.cities[0] if data.cities else None
+
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """UPDATE tenant_chats SET name = $1, modules_json = $2::jsonb, city = $3
+               WHERE tenant_id = $4 AND chat_id = $5 AND is_active = true""",
+            data.name, json.dumps(data.modules), city, tenant_id, chat_id_int,
+        )
+        if result == "UPDATE 0":
+            raise HTTPException(404, "Чат не найден")
+
+    return {"status": "ok"}
+
+
+# =====================================================================
+# 11. DELETE /api/cabinet/chats/{chat_id}
+# =====================================================================
+
+@router.delete("/chats/{chat_id}")
+async def delete_chat(chat_id: str, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    try:
+        chat_id_int = int(chat_id)
+    except ValueError:
+        raise HTTPException(400, "Некорректный chat_id")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT name FROM tenant_chats WHERE tenant_id = $1 AND chat_id = $2",
+            tenant_id, chat_id_int,
+        )
+        if not row:
+            raise HTTPException(404, "Чат не найден")
+
+        await conn.execute(
+            "UPDATE tenant_chats SET is_active = false WHERE tenant_id = $1 AND chat_id = $2",
+            tenant_id, chat_id_int,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'connection', $2, 'warning')""",
+            tenant_id, f"Telegram-чат «{row['name']}» отключён",
+        )
+
+    return {"status": "ok"}
+
+
+# =====================================================================
+# 12. POST /api/cabinet/chats/{chat_id}/test
+# =====================================================================
+
+@router.post("/chats/{chat_id}/test")
+async def test_chat(chat_id: str, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    try:
+        chat_id_int = int(chat_id)
+    except ValueError:
+        raise HTTPException(400, "Некорректный chat_id")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT name FROM tenant_chats WHERE tenant_id = $1 AND chat_id = $2 AND is_active = true",
+            tenant_id, chat_id_int,
+        )
+    if not row:
+        raise HTTPException(404, "Чат не найден")
+
+    settings = get_settings()
+    bot_token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
+    if not bot_token:
+        return {"status": "error", "error": "Бот не настроен"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": chat_id_int,
+                    "text": "✅ <b>Тестовое сообщение</b>\nАркентий работает в этом чате.",
+                    "parse_mode": "HTML",
+                },
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return {"status": "ok"}
+            return {"status": "error", "error": "Бот не может писать в этот чат"}
+    except Exception as e:
+        return {"status": "error", "error": str(e)[:200]}
+
+
+# =====================================================================
+# 13. POST /api/cabinet/chats/verify
+# =====================================================================
+
+@router.post("/chats/verify")
+async def verify_chat(data: ChatVerify, tenant_id: int = Depends(get_tenant_id)):
+    settings = get_settings()
+    bot_token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
+    if not bot_token:
+        return {"ok": False, "error": "Бот не настроен"}
+
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{bot_token}/getChat",
+                json={"chat_id": data.chat_id},
+            )
+            result = resp.json()
+            if result.get("ok"):
+                chat_title = result["result"].get("title", result["result"].get("first_name", ""))
+                return {"ok": True, "chat_title": chat_title}
+            return {"ok": False, "error": "Бот не найден в этом чате"}
+    except Exception:
+        return {"ok": False, "error": "Ошибка проверки. Попробуйте позже"}
+
+
+# =====================================================================
+# 14. GET /api/cabinet/billing
+# =====================================================================
+
+@router.get("/billing")
+async def get_billing(tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        card_info = await conn.fetchrow(
+            """SELECT card_last4, card_brand FROM payments
+               WHERE tenant_id = $1 AND status = 'succeeded' AND card_last4 IS NOT NULL
+               ORDER BY created_at DESC LIMIT 1""",
+            tenant_id,
+        )
+
+        payments = await conn.fetch(
+            """SELECT id, amount, status, description, card_last4, created_at
+               FROM payments WHERE tenant_id = $1
+               ORDER BY created_at DESC LIMIT 50""",
+            tenant_id,
+        )
+
+    payment_method = None
+    if card_info and card_info["card_last4"]:
+        payment_method = {
+            "type": "card",
+            "last4": card_info["card_last4"],
+            "brand": card_info["card_brand"],
+        }
+
+    return {
+        "payment_method": payment_method,
+        "payments": [
+            {
+                "id": p["id"],
+                "date": p["created_at"].strftime("%Y-%m-%d") if p["created_at"] else None,
+                "amount": p["amount"],
+                "status": p["status"],
+                "description": p["description"],
+            }
+            for p in payments
+        ],
+    }
+
+
+# =====================================================================
+# 15. GET /api/cabinet/settings
+# =====================================================================
+
+@router.get("/settings")
+async def get_settings_endpoint(tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT name, contact, email, phone, inn, legal_name FROM tenants WHERE id = $1",
+            tenant_id,
+        )
+    if not row:
+        raise HTTPException(404, "Тенант не найден")
+
+    return {
+        "name": row["name"],
+        "contact": row["contact"],
+        "email": row["email"],
+        "phone": row["phone"],
+        "inn": row["inn"],
+        "legal_name": row["legal_name"],
+    }
+
+
+# =====================================================================
+# 16. PUT /api/cabinet/settings
+# =====================================================================
 
 @router.put("/settings")
 async def update_settings(data: SettingsUpdate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        updates = {}
+        if data.name is not None:
+            updates["name"] = data.name
+        if data.contact is not None:
+            updates["contact"] = data.contact
+        if data.email is not None:
+            existing = await conn.fetchrow(
+                "SELECT id FROM tenants WHERE email = $1 AND id != $2",
+                data.email, tenant_id,
+            )
+            if existing:
+                raise HTTPException(409, "Email уже используется")
+            updates["email"] = data.email
+        if data.phone is not None:
+            updates["phone"] = data.phone
+
+        if updates:
+            set_parts = [f"{k} = ${i+2}" for i, k in enumerate(updates.keys())]
+            set_parts.append("updated_at = now()")
+            query = f"UPDATE tenants SET {', '.join(set_parts)} WHERE id = $1"
+            await conn.execute(query, tenant_id, *updates.values())
+
     return {"status": "ok"}
+
+
+# =====================================================================
+# 17. PUT /api/cabinet/settings/password
+# =====================================================================
 
 @router.put("/settings/password")
 async def update_password(data: PasswordUpdate, tenant_id: int = Depends(get_tenant_id)):
+    if len(data.new_password) < 8:
+        raise HTTPException(400, "Пароль должен быть минимум 8 символов")
+
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT password_hash FROM tenants WHERE id = $1", tenant_id,
+        )
+        if not row or not row["password_hash"]:
+            raise HTTPException(400, "Пароль не установлен")
+
+        if not verify_password(data.old_password, row["password_hash"]):
+            raise HTTPException(403, "Неверный текущий пароль")
+
+        new_hash = hash_password(data.new_password)
+        await conn.execute(
+            "UPDATE tenants SET password_hash = $1, updated_at = now() WHERE id = $2",
+            new_hash, tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'system', 'Пароль изменён', 'info')""",
+            tenant_id,
+        )
+
     return {"status": "ok"}
+
+
+# =====================================================================
+# 18. PUT /api/cabinet/settings/legal
+# =====================================================================
+
+@router.put("/settings/legal")
+async def update_legal(data: LegalUpdate, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE tenants SET inn = $1, legal_name = $2, updated_at = now() WHERE id = $3",
+            data.inn, data.legal_name, tenant_id,
+        )
+
+    return {"status": "ok"}
+
+
+# =====================================================================
+# 19. DELETE /api/cabinet/account
+# =====================================================================
+
+@router.delete("/account")
+async def delete_account(data: AccountDeleteRequest, tenant_id: int = Depends(get_tenant_id)):
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT name, email, password_hash FROM tenants WHERE id = $1", tenant_id,
+        )
+        if not row or not row["password_hash"]:
+            raise HTTPException(400, "Аккаунт не найден")
+
+        if not verify_password(data.password, row["password_hash"]):
+            raise HTTPException(403, "Неверный пароль")
+
+        await conn.execute(
+            "UPDATE tenants SET status = 'cancelled', updated_at = now() WHERE id = $1",
+            tenant_id,
+        )
+        await conn.execute(
+            "UPDATE subscriptions SET status = 'cancelled', updated_at = now() WHERE tenant_id = $1",
+            tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'system', 'Аккаунт удалён по запросу владельца', 'error')""",
+            tenant_id,
+        )
+
+    try:
+        from app.clients.telegram import monitor
+        await monitor(
+            f"🔴 <b>Аккаунт удалён</b>\n"
+            f"Компания: {row['name']}\n"
+            f"Email: {row['email']}"
+        )
+    except Exception:
+        pass
+
+    return {"status": "ok", "message": "Аккаунт деактивирован"}

@@ -23,6 +23,12 @@ from app.db import (
     upsert_daily_stats_batch,
 )
 
+try:
+    from app.db import get_all_branches as _get_all_branches, get_module_chats_for_city as _get_module_chats
+except ImportError:
+    _get_all_branches = None
+    _get_module_chats = None
+
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
@@ -165,7 +171,12 @@ async def job_send_morning_report(utc_offset: int) -> None:
     yesterday = datetime.now(tz) - timedelta(days=1)
     date_iso = yesterday.strftime("%Y-%m-%d")
 
-    branches = [b for b in settings.branches if b.get("utc_offset", 7) == utc_offset]
+    # Берём все точки всех тенантов (multi-tenant)
+    if _get_all_branches:
+        all_branches = _get_all_branches()
+    else:
+        all_branches = [{**b, "tenant_id": 1} for b in settings.branches]
+    branches = [b for b in all_branches if b.get("utc_offset", 7) == utc_offset]
     if not branches:
         await log_job_finish(log_id, "ok", f"Нет точек для UTC+{utc_offset}")
         return
@@ -232,7 +243,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
         except Exception as e:
             logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
 
-        # Отправка в ТГ
+        # Отправка в ТГ — per-tenant роутинг
         branch_updates = updates_by_branch.get(name, [])
         try:
             lines = []
@@ -259,8 +270,22 @@ async def job_send_morning_report(utc_offset: int) -> None:
             quip = await get_morning_quip(name, rev, chk, late_pct, agg.get("avg_late_min") or 0)
             if quip:
                 lines.append(f"\n<i>{html.escape(quip)}</i>")
-            await telegram.report("\n".join(lines))
-            sent += 1
+
+            full_msg = "\n".join(lines)
+            tenant_id = branch.get("tenant_id", 1)
+            city = branch.get("city", "")
+
+            if _get_module_chats and tenant_id != 1:
+                # Внешний тенант — шлём в его "reports" чаты
+                report_chats = await _get_module_chats("reports", city, tenant_id)
+                for chat_id in report_chats:
+                    await telegram.send_message(str(chat_id), full_msg)
+                if report_chats:
+                    sent += 1
+            else:
+                # Ёбидоёби (tenant_id=1) — глобальный канал
+                await telegram.report(full_msg)
+                sent += 1
         except Exception as e:
             logger.error(f"Ошибка отправки утреннего отчёта [{name}]: {e}")
 

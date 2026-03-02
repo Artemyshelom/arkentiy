@@ -39,12 +39,12 @@ async def init_db(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     logger.info("PostgreSQL pool создан")
 
-    migration_file = MIGRATION_DIR / "001_initial.sql"
-    if migration_file.exists():
+    # Применяем все миграции по порядку
+    for migration_name in sorted(MIGRATION_DIR.glob("*.sql")):
         async with _pool.acquire() as conn:
-            sql = migration_file.read_text()
+            sql = migration_name.read_text()
             await conn.execute(sql)
-        logger.info("Миграция 001_initial.sql применена")
+        logger.info(f"Миграция {migration_name.name} применена")
 
     await seed_default_tenant()
 
@@ -740,6 +740,17 @@ async def get_access_config_from_db(tenant_id: int = 1) -> dict:
     }
 
 
+async def get_tenant_id_by_admin(user_id: int) -> int | None:
+    """Возвращает tenant_id пользователя с ролью admin/owner, или None."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT tenant_id FROM tenant_users "
+        "WHERE user_id = $1 AND role IN ('admin', 'owner') AND is_active = true LIMIT 1",
+        user_id,
+    )
+    return row["tenant_id"] if row else None
+
+
 # =====================================================================
 # iiko_credentials — точки per tenant
 # =====================================================================
@@ -750,6 +761,15 @@ _branches_cache: dict[int, list[dict]] = {}
 def get_branches(tenant_id: int = 1) -> list[dict]:
     """Sync — из in-memory cache. Заполняется при init_db."""
     return list(_branches_cache.get(tenant_id, []))
+
+
+def get_all_branches() -> list[dict]:
+    """Sync — все точки всех тенантов из кеша, каждая с полем tenant_id."""
+    result: list[dict] = []
+    for tid, branches in _branches_cache.items():
+        for b in branches:
+            result.append({**b, "tenant_id": tid})
+    return result
 
 
 async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
@@ -774,6 +794,26 @@ async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
         }
         for r in rows
     ]
+
+
+# Маппинг chat_id → tenant_id (sync, заполняется при init_db)
+_chat_tenant_map: dict[int, int] = {}
+
+
+def get_tenant_id_for_chat(chat_id: int) -> int | None:
+    """Sync — возвращает tenant_id для chat_id из in-memory кэша."""
+    return _chat_tenant_map.get(chat_id)
+
+
+async def load_chat_tenant_map() -> None:
+    """Загружает маппинг chat_id → tenant_id из tenant_chats."""
+    global _chat_tenant_map
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT chat_id, tenant_id FROM tenant_chats WHERE is_active = true"
+    )
+    _chat_tenant_map = {r["chat_id"]: r["tenant_id"] for r in rows}
+    logger.info(f"Chat→tenant map загружен: {len(_chat_tenant_map)} чатов")
 
 
 async def load_branches_cache(tenant_id: int | None = None) -> None:

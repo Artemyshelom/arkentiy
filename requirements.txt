@@ -12,6 +12,10 @@ google-api-python-client==2.157.0
 python-multipart==0.0.20
 python-dateutil==2.9.0
 sqlalchemy==2.0.38
+bcrypt==4.2.1
+slowapi==0.1.9
+PyJWT==2.9.0
+email-validator==2.2.0
 greenlet==3.1.1
 # Финансы — реестр ТБанк
 openpyxl==3.1.5

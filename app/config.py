@@ -57,8 +57,15 @@ class Settings(BaseSettings):
     # Маркетинг: chat_id или user_id через запятую, кому доступна /выгрузка
     telegram_marketing_ids: str = ""
 
+    # ЮKassa
+    yukassa_shop_id: str = ""
+    yukassa_secret_key: str = ""
+    yukassa_return_url: str = "https://arkentiy.ru"
+
     # Безопасность
     webhook_secret: str = "change_me"
+    jwt_secret: str = "arkentiy-secret-change-me"
+    debug: bool = False
 
     # Мониторинг конкурентов
     competitor_bot_token: str = ""

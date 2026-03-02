@@ -258,11 +258,25 @@ async def lifespan(app: FastAPI):
 
         logger.info("[main] Seed from .env: users/chats added to DB")
 
-    _db_access = await get_access_config_from_db()
-    _access.update_db_cache(_db_access)
+    # Грузим конфиги ВСЕХ активных тенантов в _db_cfg (merge по chat_id/user_id)
+    from app.database_pg import load_chat_tenant_map, get_pool as _get_pg_pool
+    _merged_access: dict = {"chats": {}, "users": {}}
+    try:
+        _pg_pool = _get_pg_pool()
+        _tid_rows = await _pg_pool.fetch("SELECT id FROM tenants WHERE status = 'active' ORDER BY id")
+        for _row in _tid_rows:
+            _cfg = await get_access_config_from_db(_row["id"])
+            _merged_access["chats"].update(_cfg.get("chats", {}))
+            _merged_access["users"].update(_cfg.get("users", {}))
+    except Exception as _e:
+        logger.warning(f"[main] Не удалось загрузить конфиги всех тенантов: {_e}")
+        _cfg1 = await get_access_config_from_db(1)
+        _merged_access = _cfg1
+    _access.update_db_cache(_merged_access)
+    await load_chat_tenant_map()
     logger.info(
-        f"Access DB cache: {len(_db_access.get('chats', {}))} чатов, "
-        f"{len(_db_access.get('users', {}))} пользователей"
+        f"Access DB cache: {len(_merged_access.get('chats', {}))} чатов, "
+        f"{len(_merged_access.get('users', {}))} пользователей (все тенанты)"
     )
 
     register_jobs()

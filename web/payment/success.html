@@ -35,12 +35,61 @@
           <p class="text-gray-600">3. Алерты и отчёты начнут приходить завтра утром</p>
         </div>
 
-        <a href="/login.html" class="inline-flex items-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+        <a href="/cabinet/" id="btn-cabinet" class="inline-flex items-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
           Перейти в личный кабинет
         </a>
       </div>
     </div>
   </main>
+
+  <script>
+    async function loadPaymentDetails() {
+      const params = new URLSearchParams(window.location.search);
+      const paymentId = params.get("payment_id");
+      const details = document.getElementById("payment-details");
+      if (!paymentId) {
+        details.innerHTML = "<p>Оплата подтверждена</p>";
+        return;
+      }
+      try {
+        const resp = await fetch(`/api/payments/${paymentId}/status`);
+        if (!resp.ok) throw new Error("not found");
+        const data = await resp.json();
+
+        if (data.status === "pending") {
+          details.innerHTML = '<p class="text-yellow-600">Обработка платежа, подождите...</p>';
+          setTimeout(loadPaymentDetails, 5000);
+          return;
+        }
+
+        const modules = (data.modules || []).filter(m => m !== "base").map(m => {
+          if (m === "finance") return "Финансы";
+          if (m === "competitors") return "Конкуренты";
+          return m;
+        });
+        const modStr = modules.length ? "Базовый + " + modules.join(" + ") : "Базовый";
+
+        let html = `<p><strong>Компания:</strong> ${data.tenant_name}</p>`;
+        html += `<p><strong>Тариф:</strong> ${modStr}</p>`;
+        html += `<p><strong>Оплачено:</strong> ${Number(data.amount).toLocaleString("ru-RU")} &#8381;</p>`;
+        if (data.next_payment_date) {
+          const d = new Date(data.next_payment_date);
+          html += `<p><strong>Следующее списание:</strong> ${d.toLocaleDateString("ru-RU")}</p>`;
+        }
+        details.innerHTML = html;
+      } catch {
+        details.innerHTML = "<p>Оплата подтверждена</p>";
+      }
+
+      // Если есть JWT, ведём в кабинет; иначе — на логин
+      if (!localStorage.getItem("arkentiy_token")) {
+        const btn = document.getElementById("btn-cabinet");
+        btn.href = "/login.html";
+        btn.textContent = "Войти";
+      }
+    }
+    document.addEventListener("DOMContentLoaded", loadPaymentDetails);
+  </script>
 
   <footer class="py-6 border-t border-gray-100">
     <div class="max-w-6xl mx-auto px-4 sm:px-6 text-center text-xs text-gray-400">

@@ -228,6 +228,32 @@ function collectCurrentStep() {
   }
 }
 
+let _emailAvailable = true;
+
+async function checkEmailAvailability() {
+  const el = document.getElementById("f-email");
+  const hint = document.getElementById("email-hint");
+  const email = el.value.trim();
+  if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+  try {
+    const resp = await fetch("/api/auth/check-email", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email }),
+    });
+    const data = await resp.json();
+    _emailAvailable = data.available;
+    if (hint) {
+      if (!data.available) {
+        hint.innerHTML = '<span class="text-red-500 text-xs">Email уже зарегистрирован. <a href="/login.html" class="underline">Войти</a></span>';
+        hint.classList.remove("hidden");
+      } else {
+        hint.classList.add("hidden");
+      }
+    }
+  } catch { _emailAvailable = true; }
+}
+
 function validateStep(idx) {
   switch (idx) {
     case 0: {
@@ -238,6 +264,7 @@ function validateStep(idx) {
       if (c.length < 2) { alert("Укажите название сети"); return false; }
       if (n.length < 2) { alert("Укажите контактное лицо"); return false; }
       if (!e || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(e)) { alert("Укажите корректный email"); return false; }
+      if (!_emailAvailable) { alert("Этот email уже зарегистрирован. Войдите или используйте другой"); return false; }
       if (p.length < 8) { alert("Пароль должен быть минимум 8 символов"); return false; }
       return true;
     }
@@ -474,7 +501,7 @@ function fmt(n) { return n.toLocaleString("ru-RU"); }
 
 // --- iiko Test ---
 
-function testIiko() {
+async function testIiko() {
   const url = document.getElementById("f-iiko-url").value.trim();
   const login = document.getElementById("f-iiko-login").value.trim();
   if (!url || !login) { alert("Заполните URL и логин"); return; }
@@ -484,17 +511,29 @@ function testIiko() {
   btn.textContent = "Проверяем...";
   result.classList.add("hidden");
 
-  setTimeout(() => {
-    btn.disabled = false;
-    btn.textContent = "Проверить подключение";
-    result.innerHTML = '<span class="text-amber-600">&#9888; Проверка подключения будет доступна после запуска бэкенда. Можете продолжить.</span>';
-    result.classList.remove("hidden");
-  }, 1500);
+  try {
+    const resp = await fetch("/api/iiko/test-connection", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ bo_url: url, api_login: login }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.innerHTML = `<span class="text-green-600">&#10003; Подключение успешно!${data.branches_found ? ` Найдено точек: ${data.branches_found}` : ""}</span>`;
+    } else {
+      result.innerHTML = `<span class="text-red-500">&#10007; ${esc(data.message || "Ошибка подключения")}</span>`;
+    }
+  } catch {
+    result.innerHTML = '<span class="text-red-500">&#10007; Ошибка сети. Попробуйте позже</span>';
+  }
+  btn.disabled = false;
+  btn.textContent = "Проверить подключение";
+  result.classList.remove("hidden");
 }
 
 // --- Telegram Test ---
 
-function testTelegram() {
+async function testTelegram() {
   const chatId = document.getElementById("f-chat-id").value.trim();
   if (!chatId) { alert("Введите Chat ID"); return; }
   const btn = document.getElementById("btn-test-tg");
@@ -503,12 +542,24 @@ function testTelegram() {
   btn.textContent = "Проверяем...";
   result.classList.add("hidden");
 
-  setTimeout(() => {
-    btn.disabled = false;
-    btn.textContent = "Проверить подключение";
-    result.innerHTML = '<span class="text-amber-600">&#9888; Проверка Telegram будет доступна после запуска бэкенда. Можете продолжить.</span>';
-    result.classList.remove("hidden");
-  }, 1500);
+  try {
+    const resp = await fetch("/api/telegram/test-chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ chat_id: chatId }),
+    });
+    const data = await resp.json();
+    if (data.success) {
+      result.innerHTML = `<span class="text-green-600">&#10003; ${esc(data.message)}${data.chat_title ? ` (${esc(data.chat_title)})` : ""}</span>`;
+    } else {
+      result.innerHTML = `<span class="text-red-500">&#10007; ${esc(data.message || "Бот не найден в этом чате")}</span>`;
+    }
+  } catch {
+    result.innerHTML = '<span class="text-red-500">&#10007; Ошибка сети. Попробуйте позже</span>';
+  }
+  btn.disabled = false;
+  btn.textContent = "Проверить подключение";
+  result.classList.remove("hidden");
 }
 
 // --- Review (Step 6) ---
@@ -641,24 +692,30 @@ function setupPayMethodToggle() {
 
 // --- Promo ---
 
-function validatePromoWizard() {
+async function validatePromoWizard() {
   const input = document.getElementById("f-promo");
   const result = document.getElementById("promo-result-w");
   const code = input.value.trim().toUpperCase();
   if (!code) { wizardData.promo = null; result.classList.add("hidden"); recalcReview(); return; }
 
-  const DB = {
-    "EARLY": { code: "EARLY", bonuses: [{ type: "free_connection", value: 10000 }, { type: "fixed_discount", amount: 2000 }], description: "Бесплатное подключение + скидка 2 000 ₽/мес" },
-    "FRIEND": { code: "FRIEND", bonuses: [{ type: "free_connection", value: 10000 }], description: "Бесплатное подключение" },
-  };
-
-  const promo = DB[code];
-  if (promo) {
-    wizardData.promo = promo;
-    result.innerHTML = `<span class="text-green-600">&#10003; ${promo.description}</span>`;
-  } else {
+  try {
+    const resp = await fetch("/api/promo/validate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const data = await resp.json();
+    if (data.valid) {
+      const desc = data.bonuses.map(b => b.description).join(" + ");
+      wizardData.promo = { code: data.code, bonuses: data.bonuses };
+      result.innerHTML = `<span class="text-green-600">&#10003; ${esc(desc)}</span>`;
+    } else {
+      wizardData.promo = null;
+      result.innerHTML = `<span class="text-red-500">${esc(data.message || "Промокод не найден")}</span>`;
+    }
+  } catch {
     wizardData.promo = null;
-    result.innerHTML = `<span class="text-red-500">Промокод не найден</span>`;
+    result.innerHTML = '<span class="text-red-500">Ошибка проверки. Попробуйте позже</span>';
   }
   result.classList.remove("hidden");
   recalcReview();
@@ -666,14 +723,136 @@ function validatePromoWizard() {
 
 // --- Submit ---
 
-function submitPayment() {
+async function _createTenant(trial) {
   collectCurrentStep();
-  alert("Оплата будет доступна после подключения ЮKassa. Данные сохранены — мы свяжемся с вами для подключения.");
+  const d = wizardData;
+  const modules = ["base"];
+  if (d.modules.finance) modules.push("finance");
+  if (d.modules.competitors) modules.push("competitors");
+
+  const body = {
+    company_name: d.company,
+    contact_name: d.contact,
+    email: d.email,
+    password: d.password,
+    phone: d.phone || null,
+    cities: d.cities.filter(c => c.name).map(c => ({
+      name: c.name,
+      branches: c.branches.filter(b => b.name).map(b => b.name),
+    })),
+    modules,
+    iiko: d.iiko.url ? { bo_url: d.iiko.url, api_login: d.iiko.login } : null,
+    telegram_chat_id: d.telegram.chatId || null,
+    period: d.period,
+    promo_code: d.promo ? d.promo.code : null,
+    trial,
+  };
+
+  try {
+    const resp = await fetch("/api/tenants/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || "Произошла ошибка. Попробуйте позже");
+      return null;
+    }
+    const data = await resp.json();
+    // Сохраняем JWT для входа в кабинет
+    localStorage.setItem("arkentiy_token", data.token);
+    localStorage.removeItem("arkentiy_register");
+    return data;
+  } catch {
+    alert("Ошибка сети. Попробуйте позже");
+    return null;
+  }
 }
 
-function submitTrial() {
+async function submitPayment() {
   collectCurrentStep();
-  alert("Триал будет доступен после запуска бэкенда. Данные сохранены — мы свяжемся с вами для подключения.");
+  const btn = document.getElementById("btn-pay");
+  btn.disabled = true;
+  btn.textContent = "Создаём аккаунт...";
+
+  const data = await _createTenant(false);
+  if (!data) { btn.disabled = false; btn.textContent = "Оплатить"; return; }
+
+  const amount = data.subscription.first_payment;
+
+  if (wizardData.payMethod === "invoice") {
+    // Счёт для юрлица
+    btn.textContent = "Создаём счёт...";
+    try {
+      const d = wizardData;
+      const bc = getBranchCount();
+      const items = [{ name: `Базовый пакет (${bc} точ.)`, amount: 5000 * bc }];
+      if (d.modules.finance) items.push({ name: `Финансы (${bc} точ.)`, amount: 2000 * bc });
+      if (d.modules.competitors) {
+        const cc = getCityCount();
+        items.push({ name: `Конкуренты (${cc} гор.)`, amount: 1000 * cc });
+      }
+      items.push({ name: "Подключение", amount: data.subscription.connection_fee });
+
+      const resp = await fetch("/api/invoices/create", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          tenant_id: data.tenant_id,
+          amount,
+          inn: d.inn || "",
+          legal_name: d.legalName || "",
+          items,
+        }),
+      });
+      if (!resp.ok) throw new Error("invoice create failed");
+      const inv = await resp.json();
+      window.location.href = inv.invoice_url;
+    } catch {
+      alert("Ошибка создания счёта. Попробуйте позже");
+      btn.disabled = false;
+      btn.textContent = "Оплатить";
+    }
+    return;
+  }
+
+  // Оплата картой через ЮKassa
+  btn.textContent = "Переходим к оплате...";
+  try {
+    const resp = await fetch("/api/payments/create", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        tenant_id: data.tenant_id,
+        amount,
+        description: `Подписка Аркентий — ${wizardData.company}`,
+      }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      alert(err.detail || "Ошибка платёжной системы. Попробуйте позже");
+      btn.disabled = false;
+      btn.textContent = "Оплатить";
+      return;
+    }
+    const payment = await resp.json();
+    window.location.href = payment.confirmation_url;
+  } catch {
+    alert("Ошибка сети. Попробуйте позже");
+    btn.disabled = false;
+    btn.textContent = "Оплатить";
+  }
+}
+
+async function submitTrial() {
+  const btn = document.querySelector('[onclick="submitTrial()"]');
+  if (btn) { btn.disabled = true; btn.textContent = "Создаём аккаунт..."; }
+
+  const data = await _createTenant(true);
+  if (!data) { if (btn) { btn.disabled = false; btn.textContent = "Начать триал"; } return; }
+
+  window.location.href = "/cabinet/";
 }
 
 document.addEventListener("DOMContentLoaded", init);

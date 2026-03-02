@@ -787,8 +787,12 @@ async def _safe_incremental(state: BranchState, client: httpx.AsyncClient) -> No
 # ---------------------------------------------------------------------------
 
 async def poll_all_branches() -> None:
-    """Опрашивает все точки из branches.json параллельно."""
-    branches = settings.branches
+    """Опрашивает все точки всех тенантов параллельно."""
+    try:
+        from app.db import get_all_branches as _get_all
+        branches = _get_all()
+    except Exception:
+        branches = settings.branches
     if not branches:
         logger.warning("iiko_bo_events: branches.json пуст или не найден")
         return

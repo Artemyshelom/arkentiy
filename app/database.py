@@ -1959,3 +1959,15 @@ async def get_access_config_from_db(tenant_id: int = 1) -> dict:
             for u in users
         },
     }
+
+
+async def get_tenant_id_by_admin(user_id: int) -> int | None:
+    """Возвращает tenant_id пользователя с ролью admin/owner, или None."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT tenant_id FROM tenant_users "
+            "WHERE user_id = ? AND role IN ('admin', 'owner') AND is_active = 1 LIMIT 1",
+            (user_id,),
+        ) as cur:
+            row = await cur.fetchone()
+            return row[0] if row else None

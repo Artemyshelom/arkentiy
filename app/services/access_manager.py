@@ -168,15 +168,16 @@ async def _is_tenant_admin(user_id: int) -> bool:
 
 
 async def _resolve_tenant_id(user_id: int) -> int:
-    """Определяет tenant_id для данного пользователя-администратора."""
-    if access.is_admin(user_id):
-        return 1
+    """Определяет tenant_id для данного пользователя-администратора.
+    Сначала проверяем tenant_users (tenant-specific admin) — только потом global admin."""
     try:
         tid = await _db.get_tenant_id_by_admin(user_id)
         if tid is not None:
             return tid
     except Exception as e:
         logger.error(f"[access_manager] _resolve_tenant_id error: {e}")
+    if access.is_admin(user_id):
+        return 1
     return 1
 
 
@@ -192,15 +193,16 @@ async def _get_tenant_cfg(tenant_id: int) -> dict:
 def _main_screen(cfg: dict) -> tuple[str, list]:
     """Главный экран — чаты сгруппированы по городам."""
     chats: dict = cfg.get("chats", {})
+    cities_list: list[str] = cfg.get("tenant_cities") or CITIES
 
-    by_city: dict[str, list] = {c: [] for c in CITIES}
+    by_city: dict[str, list] = {c: [] for c in cities_list}
     by_city["_all"] = []
 
     for cid_str, cdata in chats.items():
         cities = _parse_city_raw(cdata.get("city"))
         if cities is not None and len(cities) == 1:
             city = next(iter(cities))
-            key = city if city in CITIES else "_all"
+            key = city if city in cities_list else "_all"
         else:
             key = "_all"
         by_city[key].append((cid_str, cdata))
@@ -217,7 +219,7 @@ def _main_screen(cfg: dict) -> tuple[str, list]:
     lines = ["📋 <b>Управление доступом</b>\n"]
     keyboard: list = []
 
-    for city in CITIES:
+    for city in cities_list:
         items = by_city[city]
         if not items:
             continue
@@ -261,11 +263,17 @@ def _chat_screen(cid_str: str, cfg: dict) -> tuple[str, list]:
         f"<b>Модули:</b>"
     )
 
+    available_modules: list[str] | None = cfg.get("available_modules")
+    cities_list: list[str] = cfg.get("tenant_cities") or CITIES
+
     keyboard: list = []
     row: list = []
     for mod_id, mod_label in _MODULE_META:
-        icon = "✅" if mod_id in modules else "❌"
-        row.append({"text": f"{icon} {mod_label}", "callback_data": f"ac:tm:{cid_str}:{mod_id}"})
+        if available_modules is not None and mod_id not in available_modules:
+            row.append({"text": f"🔒 {mod_label}", "callback_data": "ac:locked"})
+        else:
+            icon = "✅" if mod_id in modules else "❌"
+            row.append({"text": f"{icon} {mod_label}", "callback_data": f"ac:tm:{cid_str}:{mod_id}"})
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -273,7 +281,7 @@ def _chat_screen(cid_str: str, cfg: dict) -> tuple[str, list]:
         keyboard.append(row)
 
     city_row: list = []
-    for c in CITIES:
+    for c in cities_list:
         mark = "✅" if current_cities is not None and c in current_cities else "○"
         city_row.append({"text": f"{mark} {c}", "callback_data": f"ac:ty:{cid_str}:{c}"})
         if len(city_row) == 2:
@@ -334,11 +342,17 @@ def _user_screen(uid_str: str, cfg: dict) -> tuple[str, list]:
         f"<b>Модули:</b>"
     )
 
+    available_modules: list[str] | None = cfg.get("available_modules")
+    cities_list: list[str] = cfg.get("tenant_cities") or CITIES
+
     keyboard: list = []
     row: list = []
     for mod_id, mod_label in _MODULE_META:
-        icon = "✅" if mod_id in modules else "❌"
-        row.append({"text": f"{icon} {mod_label}", "callback_data": f"ac:um:{uid_str}:{mod_id}"})
+        if available_modules is not None and mod_id not in available_modules:
+            row.append({"text": f"🔒 {mod_label}", "callback_data": "ac:locked"})
+        else:
+            icon = "✅" if mod_id in modules else "❌"
+            row.append({"text": f"{icon} {mod_label}", "callback_data": f"ac:um:{uid_str}:{mod_id}"})
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -346,7 +360,7 @@ def _user_screen(uid_str: str, cfg: dict) -> tuple[str, list]:
         keyboard.append(row)
 
     city_row: list = []
-    for c in CITIES:
+    for c in cities_list:
         mark = "✅" if current_cities is not None and c in current_cities else "○"
         city_row.append({"text": f"{mark} {c}", "callback_data": f"ac:uy:{uid_str}:{c}"})
         if len(city_row) == 2:
@@ -495,6 +509,10 @@ async def handle_callback(
     _nav_actions = {"main", "c", "users", "u", "addchat", "adduser", "rg", "ig"}
     if action in _nav_actions:
         await _answer_cb(cb_id)
+
+    if action == "locked":
+        await _answer_cb(cb_id, "🔒 Недоступно в вашем тарифе", alert=True)
+        return
 
     if action == "main":
         cfg = await _get_tenant_cfg(tenant_id)

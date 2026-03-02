@@ -725,9 +725,41 @@ async def get_alert_chats_for_city(city: str, tenant_id: int = 1) -> list[int]:
     return await get_module_chats_for_city("late_alerts", city, tenant_id)
 
 
+async def get_tenant_cities(tenant_id: int) -> list[str]:
+    """Возвращает список уникальных городов тенанта из iiko_credentials."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT city FROM iiko_credentials "
+        "WHERE tenant_id = $1 AND is_active = true AND city IS NOT NULL AND city != '' "
+        "ORDER BY city",
+        tenant_id,
+    )
+    return [r["city"] for r in rows]
+
+
+async def get_tenant_available_modules(tenant_id: int) -> list[str] | None:
+    """Возвращает список доступных модулей из подписки, или None если нет ограничений."""
+    import json as _json
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT modules_json FROM subscriptions "
+        "WHERE tenant_id = $1 AND status = 'active' "
+        "ORDER BY created_at DESC LIMIT 1",
+        tenant_id,
+    )
+    if not row or not row["modules_json"]:
+        return None
+    try:
+        return _json.loads(row["modules_json"])
+    except Exception:
+        return None
+
+
 async def get_access_config_from_db(tenant_id: int = 1) -> dict:
     users = await get_all_tenant_users(tenant_id)
     chats = await get_all_tenant_chats(tenant_id)
+    tenant_cities = await get_tenant_cities(tenant_id)
+    available_modules = await get_tenant_available_modules(tenant_id)
     return {
         "chats": {
             str(c["chat_id"]): {"name": c["name"], "modules": c["modules"], "city": c["city"]}
@@ -737,6 +769,8 @@ async def get_access_config_from_db(tenant_id: int = 1) -> dict:
             str(u["user_id"]): {"name": u["name"], "modules": u["modules"], "city": u["city"]}
             for u in users
         },
+        "tenant_cities": tenant_cities or None,
+        "available_modules": available_modules,
     }
 
 

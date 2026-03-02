@@ -1,0 +1,138 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Счёт на оплату — Аркентий</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: { brand: { 50:'#eef2ff',100:'#e0e7ff',500:'#6366f1',600:'#4f46e5',700:'#4338ca' } } } } }
+  </script>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+    </div>
+  </header>
+
+  <main class="flex-1 flex items-center justify-center px-4 pt-20 pb-10">
+    <div class="w-full max-w-lg">
+      <div class="bg-white rounded-2xl border border-gray-100 p-8 shadow-sm">
+        <div id="invoice-content">
+          <p class="text-center text-gray-500">Загружаем счёт...</p>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer class="py-6 border-t border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 text-center text-xs text-gray-400">
+      <p>&copy; 2026 Аркентий</p>
+    </div>
+  </footer>
+
+  <script>
+    function fmt(n) { return Number(n).toLocaleString("ru-RU"); }
+    function esc(s) { return (s || "").replace(/</g, "&lt;").replace(/>/g, "&gt;"); }
+
+    async function loadInvoice() {
+      const params = new URLSearchParams(window.location.search);
+      const invoiceId = params.get("invoice_id");
+      const el = document.getElementById("invoice-content");
+
+      if (!invoiceId) {
+        el.innerHTML = '<p class="text-center text-red-500">Счёт не найден</p><a href="/" class="block mt-4 text-center text-brand-600 text-sm">На главную</a>';
+        return;
+      }
+
+      try {
+        const resp = await fetch(`/api/invoices/${invoiceId}`);
+        if (!resp.ok) throw new Error("not found");
+        const data = await resp.json();
+
+        const statusMap = {
+          pending: { label: "ожидает оплаты", cls: "text-yellow-600 bg-yellow-50" },
+          pending_verification: { label: "проверяется", cls: "text-blue-600 bg-blue-50" },
+          paid: { label: "оплачен", cls: "text-green-600 bg-green-50" },
+          cancelled: { label: "отменён", cls: "text-red-600 bg-red-50" },
+        };
+        const st = statusMap[data.status] || statusMap.pending;
+
+        let itemsHtml = (data.items || []).map(i =>
+          `<div class="flex justify-between py-1"><span class="text-gray-600">${esc(i.name)}</span><span class="font-medium">${fmt(i.amount)} &#8381;</span></div>`
+        ).join("");
+
+        const createdDate = data.created_at ? new Date(data.created_at).toLocaleDateString("ru-RU") : "";
+
+        el.innerHTML = `
+          <div class="flex items-center justify-between mb-4">
+            <h1 class="text-lg font-bold text-gray-900">Счёт на оплату</h1>
+            <span class="text-xs font-medium px-2 py-1 rounded-full ${st.cls}">${st.label}</span>
+          </div>
+
+          <div class="text-sm text-gray-600 space-y-1 mb-5">
+            <p><strong>Счёт №:</strong> ${esc(data.invoice_number)}</p>
+            <p><strong>Дата:</strong> ${createdDate}</p>
+            ${data.legal_name ? `<p><strong>Плательщик:</strong> ${esc(data.legal_name)}</p>` : ""}
+            ${data.inn ? `<p><strong>ИНН:</strong> ${esc(data.inn)}</p>` : ""}
+          </div>
+
+          <div class="border-t border-gray-100 pt-4 mb-4 text-sm">
+            ${itemsHtml}
+            <div class="flex justify-between pt-3 mt-3 border-t border-gray-100 font-semibold">
+              <span>Итого:</span>
+              <span>${fmt(data.amount)} &#8381;</span>
+            </div>
+          </div>
+
+          <div class="bg-gray-50 rounded-xl p-4 text-xs text-gray-500 mb-5 space-y-1">
+            <p class="font-semibold text-gray-700">Реквизиты для оплаты:</p>
+            <p>ИП Шеломенцев Артемий Андреевич</p>
+            <p>Расчётный счёт и реквизиты — в PDF-файле</p>
+          </div>
+
+          ${data.status === "pending" ? `
+            <div class="space-y-3">
+              <button onclick="confirmPayment('${invoiceId}')" id="btn-confirm"
+                class="w-full px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+                Я оплатил — активировать
+              </button>
+            </div>
+          ` : ""}
+
+          ${data.status === "paid" ? `
+            <a href="/cabinet/" class="block text-center px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+              Перейти в кабинет
+            </a>
+          ` : ""}
+
+          ${data.status === "pending_verification" ? `
+            <p class="text-center text-sm text-blue-600 mt-2">Заявка на подтверждение отправлена. Активируем в течение 1 рабочего дня.</p>
+          ` : ""}
+        `;
+      } catch {
+        el.innerHTML = '<p class="text-center text-red-500">Счёт не найден</p><a href="/" class="block mt-4 text-center text-brand-600 text-sm">На главную</a>';
+      }
+    }
+
+    async function confirmPayment(invoiceId) {
+      const btn = document.getElementById("btn-confirm");
+      btn.disabled = true;
+      btn.textContent = "Отправляем...";
+      try {
+        const resp = await fetch(`/api/invoices/${invoiceId}/confirm`, { method: "POST" });
+        if (!resp.ok) throw new Error("failed");
+        await loadInvoice();
+      } catch {
+        alert("Ошибка. Попробуйте позже или напишите в Telegram @artemiy_shelomentsev");
+        btn.disabled = false;
+        btn.textContent = "Я оплатил — активировать";
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", loadInvoice);
+  </script>
+</body>
+</html>

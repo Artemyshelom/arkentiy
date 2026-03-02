@@ -34,16 +34,59 @@
         </div>
 
         <div class="space-y-3">
-          <a href="/register.html" class="block px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
+          <button onclick="retryPayment()" id="btn-retry" class="w-full px-6 py-3 bg-brand-600 text-white font-semibold rounded-xl hover:bg-brand-700 transition-colors">
             Попробовать снова
+          </button>
+          <a href="/register.html" class="block px-6 py-3 text-brand-600 font-medium rounded-xl border border-brand-200 hover:bg-brand-50 transition-colors text-sm text-center">
+            Выбрать другой способ оплаты
           </a>
-          <a href="https://t.me/artemiy_shelomentsev" class="block px-6 py-3 text-brand-600 font-medium rounded-xl border border-brand-200 hover:bg-brand-50 transition-colors text-sm">
-            Написать в Telegram
+          <a href="https://t.me/artemiy_shelomentsev" class="block px-6 py-3 text-gray-500 font-medium text-sm text-center hover:text-brand-600 transition-colors">
+            Или напишите нам в Telegram
           </a>
         </div>
       </div>
     </div>
   </main>
+
+  <script>
+    async function retryPayment() {
+      const params = new URLSearchParams(window.location.search);
+      const paymentId = params.get("payment_id");
+      if (!paymentId) {
+        window.location.href = "/register.html";
+        return;
+      }
+
+      const btn = document.getElementById("btn-retry");
+      btn.disabled = true;
+      btn.textContent = "Создаём платёж...";
+
+      try {
+        // Получаем данные старого платежа
+        const statusResp = await fetch(`/api/payments/${paymentId}/status`);
+        if (!statusResp.ok) throw new Error("not found");
+        const statusData = await statusResp.json();
+
+        // Создаём новый платёж
+        const resp = await fetch("/api/payments/create", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            tenant_id: statusData.tenant_id || 0,
+            amount: statusData.amount,
+            description: `Подписка Аркентий — ${statusData.tenant_name}`,
+          }),
+        });
+        if (!resp.ok) throw new Error("create failed");
+        const data = await resp.json();
+        window.location.href = data.confirmation_url;
+      } catch {
+        alert("Не удалось создать платёж. Попробуйте зарегистрироваться заново.");
+        btn.disabled = false;
+        btn.textContent = "Попробовать снова";
+      }
+    }
+  </script>
 
   <footer class="py-6 border-t border-gray-100">
     <div class="max-w-6xl mx-auto px-4 sm:px-6 text-center text-xs text-gray-400">

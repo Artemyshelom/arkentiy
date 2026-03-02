@@ -10,6 +10,7 @@ services:
       - ./data:/app/data
       - ./logs:/app/logs
       - ./secrets:/app/secrets:ro
+      - ./web:/app/web
     environment:
       - TZ=Europe/Moscow
     depends_on:

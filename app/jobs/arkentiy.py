@@ -68,6 +68,10 @@ _ctx_bot_token: ContextVar[str] = ContextVar("bot_token", default="")
 # Смещение update_id отдельно для каждого токена
 _last_update_id: dict[str, int | None] = {}  # bot_token → last update_id
 
+# AI @ mention — in-memory флаг горячего отключения (/ai on|off)
+# При старте берётся из settings.openclaw_enabled; меняется без редеплоя
+_openclaw_enabled: bool = True
+
 # Маппинг команды → модуль для проверки прав
 _CMD_MODULE: dict[str, str] = {
     "статус": "reports", "status": "reports",
@@ -220,6 +224,79 @@ async def _send_document(chat_id: int, filename: str, data: bytes, caption: str 
     except Exception as e:
         logger.error(f"_send_document: {e}")
         return False
+
+
+async def _react(chat_id: int, message_id: int, emoji: str) -> None:
+    """Ставит emoji-реакцию на сообщение (Bot API 7.0+, setMessageReaction)."""
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            await client.post(
+                f"{_bot_url()}/setMessageReaction",
+                json={
+                    "chat_id": chat_id,
+                    "message_id": message_id,
+                    "reaction": [{"type": "emoji", "emoji": emoji}],
+                    "is_big": False,
+                },
+            )
+    except Exception as e:
+        logger.debug("_react error: %s", e)
+
+
+async def _reply(chat_id: int, message_id: int, text: str, parse_mode: str = "HTML") -> None:
+    """Отправляет reply на конкретное сообщение. Длинный текст разбивает на части."""
+    max_len = 4096
+    chunks: list[str] = []
+    while text:
+        if len(text) <= max_len:
+            chunks.append(text)
+            break
+        cut = text.rfind("\n", 0, max_len)
+        if cut <= 0:
+            cut = max_len
+        chunks.append(text[:cut])
+        text = text[cut:].lstrip("\n")
+
+    first = True
+    for chunk in chunks:
+        payload: dict = {
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": parse_mode,
+        }
+        if first:
+            payload["reply_to_message_id"] = message_id
+            payload["allow_sending_without_reply"] = True
+            first = False
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                r = await client.post(f"{_bot_url()}/sendMessage", json=payload)
+                if not r.json().get("ok"):
+                    # Если Markdown сломан — повторить без форматирования
+                    if parse_mode != "HTML":
+                        payload["parse_mode"] = "HTML"
+                        await client.post(f"{_bot_url()}/sendMessage", json=payload)
+        except Exception as e:
+            logger.error("_reply error: %s", e)
+
+
+def _is_bot_mentioned(message: dict, text: str) -> bool:
+    """
+    Проверяет что бот упомянут через @username в тексте.
+    Использует entities из Telegram — надёжнее regex.
+    Если telegram_bot_username не задан — срабатывает на любой @mention.
+    """
+    entities = message.get("entities", [])
+    bot_username = settings.telegram_bot_username.lower().lstrip("@")
+    for entity in entities:
+        if entity.get("type") != "mention":
+            continue
+        offset = entity["offset"]
+        length = entity["length"]
+        mentioned = text[offset : offset + length].lstrip("@").lower()
+        if not bot_username or mentioned == bot_username:
+            return True
+    return False
 
 
 async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -> None:
@@ -730,20 +807,21 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
 
 
 def _format_order_compact(r: dict) -> str:
-    """Компактная строка для больших выборок."""
+    """Компактная строка для больших выборок — двухстрочный формат."""
+    type_icon = "🚶" if r.get("is_self_service") else "🛵"
+    city = r["branch_name"].split("_")[0] if r.get("branch_name") else "?"
     s = r["sum"]
-    sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-    client = html.escape(r.get("client_name") or "?")
+    sum_str = f"{int(float(s))}₽" if s else "—"
     if r["is_late"]:
-        mins = r.get("late_minutes")
-        late_icon = f"🔴 +{int(mins)} мин" if mins else "🔴"
+        mins = int(r.get("late_minutes") or 0)
+        late_icon = f"🔴 +{mins}м" if mins else "🔴"
     elif r["actual_time"]:
         late_icon = "✅"
     else:
         late_icon = "⏳"
     return (
-        f"  #{r['delivery_num']} {html.escape(r['branch_name'])}\n"
-        f"  👤 {client} | 💰 {sum_str} | {late_icon} {_fmt_dt(r['planned_time'])}"
+        f"{type_icon} #{r['delivery_num']} {html.escape(city)}\n"
+        f"   {_fmt_dt(r['planned_time'])} · {sum_str} · {late_icon}"
     )
 
 
@@ -963,23 +1041,17 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     elif query_type == "phone":
         client_name = (rows[0].get("client_name") or "—")
         branches_set = {r["branch_name"] for r in rows}
-        branch_note = f" · {html.escape(rows[0]['branch_name'])}" if len(branches_set) == 1 else ""
-        lines = [
-            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов",
-            f"👤 {html.escape(client_name)}{branch_note}\n",
-        ]
-        for r in rows:
-            s = r["sum"]
-            sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
-            branch_part = f" · {html.escape(r['branch_name'].split('_')[0])}" if len(branches_set) > 1 else ""
-            lines.append(
-                f"#{r['delivery_num']}{branch_part} · {sum_str} · {_late_ico(r)} · {_fmt_dt(r['planned_time'])}"
-            )
-        text = "\n".join(lines)
+        header = (
+            f"🔍 <code>{html.escape(query)}</code> — {len(rows)} заказов\n"
+            f"👤 {html.escape(client_name)}"
+        )
+        order_lines = [_format_order_compact(r) for r in rows]
+        text = header + "\n\n" + "\n\n".join(order_lines)
         keyboard = []
         row_buf = []
         for idx, r in enumerate(rows):
-            row_buf.append({"text": f"#{r['delivery_num']}", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
+            city_short = r["branch_name"].split("_")[0] if r.get("branch_name") else "?"
+            row_buf.append({"text": f"#{r['delivery_num']} ({city_short})", "callback_data": f"srch:card:{r['delivery_num']}:{idx}"})
             if len(row_buf) == 3:
                 keyboard.append(row_buf)
                 row_buf = []
@@ -2293,7 +2365,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                         await _send(chat_id, f"❌ Ошибка: {html.escape(str(e))}")
             continue
 
-        # Не команда — проверяем диалог access_manager (например, ввод ID чата)
+        # Не команда — проверяем диалог access_manager и @ mention
         if text and not text.startswith("/"):
             if access.is_admin(user_id) and chat_id > 0:
                 try:
@@ -2302,6 +2374,31 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                         continue
                 except Exception as e:
                     logger.error(f"[access_manager] handle_text: {e}")
+
+            # AI: @ mention бота → OpenClaw
+            if _openclaw_enabled and _is_bot_mentioned(message, text):
+                perms = access.get_permissions(chat_id, user_id)
+                if perms.has("ai"):
+                    msg_id: int = message.get("message_id", 0)
+                    await _react(chat_id, msg_id, "🤔")
+                    try:
+                        from app.jobs.openclaw_mention import handle_mention
+                        response = await handle_mention(
+                            text=text,
+                            user_id=user_id,
+                            username=username,
+                            city=perms.city,
+                            is_admin=perms.is_admin,
+                        )
+                        if response:
+                            await _reply(chat_id, msg_id, response)
+                            await _react(chat_id, msg_id, "✅")
+                        else:
+                            await _react(chat_id, msg_id, "✅")
+                    except Exception as e:
+                        logger.error("[mention] unhandled error: %s", e, exc_info=True)
+                        await _reply(chat_id, msg_id, "⚠️ Мозги временно недоступны.")
+                        await _react(chat_id, msg_id, "❌")
             continue
 
         if not text.startswith("/"):
@@ -2361,6 +2458,17 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             await run_export(chat_id, arg, _bot_url())
         elif cmd in ("доступ", "access"):
             await access_manager.handle_command(chat_id, user_id)
+        elif cmd == "ai" and perms.is_admin:
+            global _openclaw_enabled
+            if arg.lower() == "on":
+                _openclaw_enabled = True
+                await _send(chat_id, "✅ AI включён (@ mention активен).")
+            elif arg.lower() == "off":
+                _openclaw_enabled = False
+                await _send(chat_id, "🔕 AI выключен до рестарта или <code>/ai on</code>.")
+            else:
+                status = "включён ✅" if _openclaw_enabled else "выключен 🔕"
+                await _send(chat_id, f"🤖 AI сейчас: {status}\n\n/ai on — включить\n/ai off — выключить")
         elif cmd in ("конкуренты", "competitors"):
             await _send(chat_id, "⏳ Обновляю таблицы конкурентов...")
             try:
@@ -2380,9 +2488,12 @@ async def run_polling_loop(bot_token: str = "", tenant_id: int = 1) -> None:
     Запускается как asyncio.Task в lifespan — по одному на каждый активный тенант.
     """
     import asyncio as _asyncio
+    global _openclaw_enabled
+    _openclaw_enabled = settings.openclaw_enabled  # берём из .env при старте
+
     token = bot_token or settings.telegram_analytics_bot_token
     label = f"tenant_id={tenant_id}"
-    logger.info(f"Аркентий: polling loop started [{label}]")
+    logger.info(f"Аркентий: polling loop started [{label}], AI={'on' if _openclaw_enabled else 'off'}")
     while True:
         try:
             await poll_analytics_bot(bot_token=token, tenant_id=tenant_id)

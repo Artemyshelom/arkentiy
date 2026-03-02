@@ -39,12 +39,12 @@ async def init_db(database_url: str) -> None:
     _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
     logger.info("PostgreSQL pool создан")
 
-    migration_file = MIGRATION_DIR / "001_initial.sql"
-    if migration_file.exists():
+    # Применяем все миграции по порядку
+    for migration_name in sorted(MIGRATION_DIR.glob("*.sql")):
         async with _pool.acquire() as conn:
-            sql = migration_file.read_text()
+            sql = migration_name.read_text()
             await conn.execute(sql)
-        logger.info("Миграция 001_initial.sql применена")
+        logger.info(f"Миграция {migration_name.name} применена")
 
     await seed_default_tenant()
 
@@ -738,6 +738,17 @@ async def get_access_config_from_db(tenant_id: int = 1) -> dict:
             for u in users
         },
     }
+
+
+async def get_tenant_id_by_admin(user_id: int) -> int | None:
+    """Возвращает tenant_id пользователя с ролью admin/owner, или None."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT tenant_id FROM tenant_users "
+        "WHERE user_id = $1 AND role IN ('admin', 'owner') AND is_active = true LIMIT 1",
+        user_id,
+    )
+    return row["tenant_id"] if row else None
 
 
 # =====================================================================

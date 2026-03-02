@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _CONFIG_PATH = Path("/app/secrets/access_config.json")
 
 ALL_MODULES: frozenset[str] = frozenset(
-    {"late_alerts", "late_queries", "search", "reports", "marketing", "finance", "admin"}
+    {"late_alerts", "late_queries", "search", "reports", "marketing", "finance", "admin", "ai"}
 )
 CITIES = ["Барнаул", "Абакан", "Томск", "Черногорск"]
 
@@ -31,6 +31,7 @@ MODULE_LABELS: dict[str, str] = {
     "marketing":    "📈 Маркетинг",
     "finance":      "💰 Финансы",
     "admin":        "🛠 Админ",
+    "ai":           "🤖 AI (@ mention)",
 }
 
 # (mtime, config_dict) — кэш JSON-файла

@@ -11,8 +11,12 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
 from datetime import datetime
 from app.clients import telegram
@@ -27,6 +31,8 @@ from app import access as _access
 from app.monitoring.healthcheck import router as health_router
 from app.webhooks.bitrix import router as bitrix_router
 from app.routers.cabinet import router as cabinet_router
+from app.routers.onboarding import router as onboarding_router
+from app.routers.payments import router as payments_router
 
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
@@ -40,6 +46,8 @@ from app.jobs.late_alerts import job_late_alerts
 from app.jobs.daily_report import job_send_morning_report
 from app.jobs.audit import job_audit_report
 from app.jobs.cancel_sync import job_cancel_sync
+from app.jobs.billing import job_recurring_billing
+from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 
 settings = get_settings()
 
@@ -187,6 +195,34 @@ def register_jobs() -> None:
         misfire_grace_time=120,
     )
 
+    # Рекуррентный биллинг ЮKassa: ежедневно в 03:00 МСК
+    scheduler.add_job(
+        job_recurring_billing,
+        trigger=CronTrigger(hour=3, minute=0),
+        id="recurring_billing",
+        name="Рекуррентный биллинг ЮKassa",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+    # Жизненный цикл подписок: ежедневно в 04:00 МСК (после биллинга в 03:00)
+    scheduler.add_job(
+        job_trial_expiry,
+        trigger=CronTrigger(hour=4, minute=0),
+        id="trial_expiry",
+        name="Истечение триалов",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+    scheduler.add_job(
+        job_payment_grace,
+        trigger=CronTrigger(hour=4, minute=10),
+        id="payment_grace",
+        name="Grace period неоплаты",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -267,6 +303,8 @@ async def lifespan(app: FastAPI):
     scheduler.shutdown(wait=False)
 
 
+limiter = Limiter(key_func=get_remote_address)
+
 app = FastAPI(
     title="Аркентий (Интеграции Ёбидоёби)",
     version="1.0.0",
@@ -274,17 +312,35 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Слишком много запросов. Попробуйте позже."},
+    )
+
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["GET", "POST"],
+    allow_origins=[
+        "https://arkentiy.ru",
+        "https://www.arkentiy.ru",
+        "http://5.42.98.2",
+        "http://localhost:8000",
+    ],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    allow_credentials=True,
 )
 
 app.include_router(health_router)
 app.include_router(bitrix_router, prefix="/webhook")
 app.include_router(cabinet_router)
-app.mount("/", StaticFiles(directory="web", html=True), name="static")
+app.include_router(onboarding_router)
+app.include_router(payments_router)
 
 
 # --- Ручные триггеры (для отладки и тестирования) ---
@@ -349,3 +405,7 @@ async def run_backfill(date_from: str = "2026-02-01", date_to: str | None = None
         "date_from": df.strftime("%Y-%m-%d"),
         "date_to": dt.strftime("%Y-%m-%d"),
     }
+
+
+# --- StaticFiles mount (ДОЛЖЕН быть в конце, после всех маршрутов) ---
+app.mount("/", StaticFiles(directory="web", html=True), name="static")

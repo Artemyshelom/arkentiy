@@ -59,6 +59,22 @@ from app.jobs.late_alerts import (
 logger = logging.getLogger(__name__)
 settings = get_settings()
 
+# #region agent log
+def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "") -> None:
+    import json as _json
+    try:
+        import pathlib as _pl
+        from app.ctx import ctx_tenant_id
+        log_path = _pl.Path(__file__).resolve().parents[3] / ".cursor" / "debug-3e913f.log"
+        payload = {"sessionId": "3e913f", "location": location, "message": message, "data": data, "timestamp": __import__("time").time() * 1000}
+        if hypothesis_id:
+            payload["hypothesisId"] = hypothesis_id
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(payload, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+# #endregion
+
 # Context variables для мульти-тенантного режима (определены в app.ctx, импортируем здесь).
 from app.ctx import ctx_tenant_id as _ctx_tenant_id, ctx_bot_token as _ctx_bot_token
 
@@ -1227,11 +1243,18 @@ async def _build_branch_report(
     """Собирает отчёт для одной точки. Возвращает текст или None."""
     import json as _json
 
+    # #region agent log
+    _tid = _ctx_tenant_id.get()
+    _debug_log("arkentiy:_build_branch_report:before", "about to fetch stats", {"branch": name, "date_from": date_from, "date_to": date_to, "is_single_day": is_single_day, "ctx_tenant_id": _tid}, "H1")
+    # #endregion
     if is_single_day:
-        ds = await get_daily_stats(name, date_from)
+        ds = await get_daily_stats(name, date_from, tenant_id=_tid)
     else:
-        ds = await get_period_stats(name, date_from, date_to)
+        ds = await get_period_stats(name, date_from, date_to, tenant_id=_tid)
 
+    # #region agent log
+    _debug_log("arkentiy:_build_branch_report:after", "stats result", {"branch": name, "has_data": ds is not None}, "H1")
+    # #endregion
     if not ds:
         return None
 
@@ -1266,6 +1289,7 @@ async def _build_city_aggregate(
     """Агрегирует данные по всем филиалам города в один отчёт."""
     import json as _json
 
+    _tid = _ctx_tenant_id.get()
     totals: dict = {}
     weighted_keys = ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min")
     sum_keys = (
@@ -1278,10 +1302,10 @@ async def _build_city_aggregate(
     for branch in branches:
         name = branch["name"]
         if is_single_day:
-            ds = await get_daily_stats(name, date_from)
+            ds = await get_daily_stats(name, date_from, tenant_id=_tid)
             agg = await aggregate_orders_for_daily_stats(name, date_from) if ds else {}
         else:
-            ds = await get_period_stats(name, date_from, date_to)
+            ds = await get_period_stats(name, date_from, date_to, tenant_id=_tid)
             agg = {}
 
         if not ds:
@@ -1364,6 +1388,10 @@ async def _handle_day(chat_id: int, arg: str, city_filter=None) -> None:
     /отчёт [филиал] [период] — отчёт за день/неделю/месяц/диапазон из daily_stats.
     При запросе по городу (>1 филиала) — сначала агрегат, потом inline-кнопки.
     """
+    # #region agent log
+    _tid = _ctx_tenant_id.get()
+    _debug_log("arkentiy:_handle_day:entry", "handle_day started", {"chat_id": chat_id, "arg": arg, "city_filter": city_filter, "ctx_tenant_id": _tid}, "H2")
+    # #endregion
     tokens = arg.strip().split() if arg.strip() else []
     date_from, date_to, label, filter_tokens = _parse_period(tokens)
     filter_q = " ".join(filter_tokens).strip()
@@ -1373,6 +1401,9 @@ async def _handle_day(chat_id: int, arg: str, city_filter=None) -> None:
         filter_q = city_filter
 
     branches_cfg = get_available_branches(filter_q) if filter_q else get_available_branches()
+    # #region agent log
+    _debug_log("arkentiy:_handle_day:branches", "branches resolved", {"count": len(branches_cfg), "names": [b["name"] for b in branches_cfg], "filter_q": filter_q, "tenant_id": _tid}, "H4")
+    # #endregion
     if filter_q and not branches_cfg:
         await _send(chat_id, f"❌ Точка или город «{filter_q}» не найдены.")
         return
@@ -2517,6 +2548,14 @@ async def run_polling_loop(bot_token: str = "", tenant_id: int = 1) -> None:
 
     token = bot_token or settings.telegram_analytics_bot_token
     label = f"tenant_id={tenant_id}"
+    
+    # Загружаем кэш точек для этого тенанта перед началом
+    try:
+        from app.database_pg import load_branches_cache
+        await load_branches_cache(tenant_id)
+    except Exception as e:
+        logger.warning(f"Не удалось загрузить кэш точек для {label}: {e}")
+    
     logger.info(f"Аркентий: polling loop started [{label}], AI={'on' if _openclaw_enabled else 'off'}")
     while True:
         try:

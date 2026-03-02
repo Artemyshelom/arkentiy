@@ -217,6 +217,9 @@ def get_available_branches(query: str | frozenset | None = None) -> list[dict]:
         from app.db import get_branches
         tenant_id = ctx_tenant_id.get()
         branches = get_branches(tenant_id) if tenant_id != 1 else settings.branches
+        # Fallback: если кэш пуст для другого тенанта, используем настройки (это не идеально, но лучше чем ничего)
+        if not branches and tenant_id != 1:
+            branches = settings.branches
     except Exception:
         branches = settings.branches
 

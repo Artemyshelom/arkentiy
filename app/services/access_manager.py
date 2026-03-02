@@ -29,7 +29,7 @@ from typing import Optional
 
 import httpx
 
-from app import access
+from app.services import access
 from app import db as _db
 from app.config import get_settings
 

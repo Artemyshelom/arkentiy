@@ -27,7 +27,7 @@ from app.db import (
     upsert_tenant_user, upsert_tenant_chat,
     get_active_tenants_with_tokens,
 )
-from app import access as _access
+from app.services import access as _access
 from app.monitoring.healthcheck import router as health_router
 from app.webhooks.bitrix import router as bitrix_router
 from app.routers.cabinet import router as cabinet_router

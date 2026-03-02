@@ -31,7 +31,7 @@ import httpx
 from app.jobs import bank_statement
 from app.jobs import tbank_reconciliation
 
-from app import access
+from app.services import access
 from app.clients.iiko_bo_events import (
     get_all_branches_staff,
     _states,

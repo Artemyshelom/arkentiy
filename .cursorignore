@@ -1,0 +1,16 @@
+# Секреты — запретить Cursor/AI индексировать и отправлять в контекст
+.env
+*.env
+secrets/
+*secret*
+*credential*
+*.pem
+*.key
+*.crt
+*.p12
+
+# Данные
+data/
+*.sqlite
+*.db
+logs/

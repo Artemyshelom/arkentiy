@@ -11,7 +11,7 @@ from contextlib import asynccontextmanager
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
@@ -357,7 +357,6 @@ app.add_middleware(
     allow_origins=[
         "https://arkentiy.ru",
         "https://www.arkentiy.ru",
-        "http://5.42.98.2",
         "http://localhost:8000",
     ],
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -374,8 +373,18 @@ app.include_router(payments_router)
 
 # --- Ручные триггеры (для отладки и тестирования) ---
 
+def _verify_admin_key(x_admin_key: str = Header(None)) -> str:
+    """Проверяет API-ключ для админ-эндпоинтов."""
+    expected = settings.admin_api_key
+    if not expected:
+        raise HTTPException(503, "ADMIN_API_KEY не настроен")
+    if not x_admin_key or x_admin_key != expected:
+        raise HTTPException(401, "Неверный X-Admin-Key")
+    return x_admin_key
+
+
 @app.post("/run/{job_id}", tags=["Manual triggers"])
-async def run_job_manually(job_id: str):
+async def run_job_manually(job_id: str, _key: str = Depends(_verify_admin_key)):
     """Запустить задачу вручную по ID."""
     job = scheduler.get_job(job_id)
     if not job:
@@ -386,7 +395,7 @@ async def run_job_manually(job_id: str):
 
 
 @app.get("/jobs", tags=["Manual triggers"])
-async def list_jobs():
+async def list_jobs(_key: str = Depends(_verify_admin_key)):
     """Список всех задач и времени следующего запуска."""
     return [
         {
@@ -399,7 +408,7 @@ async def list_jobs():
 
 
 @app.post("/backfill", tags=["Manual triggers"])
-async def run_backfill(date_from: str = "2026-02-01", date_to: str | None = None):
+async def run_backfill(date_from: str = "2026-02-01", date_to: str | None = None, _key: str = Depends(_verify_admin_key)):
     """
     Сброс листа 'Выгрузка iiko' и заполнение данными за диапазон дат.
     Формат дат: YYYY-MM-DD. По умолчанию date_to = вчера по UTC+7.

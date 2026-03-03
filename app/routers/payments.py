@@ -150,12 +150,40 @@ async def api_create_payment(req: PaymentCreateRequest, request: Request):
 # 2. POST /api/payments/webhook
 # =====================================================================
 
+# IP-адреса ЮKassa для верификации webhook
+YUKASSA_IPS = {
+    "185.71.76.0/27", "185.71.77.0/27", "77.75.153.0/25",
+    "77.75.156.11", "77.75.156.35",
+}
+
+def _is_yukassa_ip(ip: str) -> bool:
+    """Проверяет, что IP принадлежит ЮKassa."""
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(ip)
+        for net in YUKASSA_IPS:
+            if "/" in net:
+                if addr in ipaddress.ip_network(net, strict=False):
+                    return True
+            elif ip == net:
+                return True
+    except ValueError:
+        pass
+    return False
+
+
 @router.post("/payments/webhook")
 async def payment_webhook(request: Request):
     """
     Webhook от ЮKassa.
     Обрабатывает события: payment.succeeded, payment.canceled.
     """
+    # Проверяем IP отправителя
+    client_ip = request.headers.get("x-real-ip") or request.headers.get("x-forwarded-for", "").split(",")[0].strip() or request.client.host
+    if not _is_yukassa_ip(client_ip):
+        logger.warning(f"ЮKassa webhook: отклонён IP {client_ip}")
+        raise HTTPException(403, "Forbidden")
+
     try:
         body = await request.json()
     except Exception:

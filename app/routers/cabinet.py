@@ -147,15 +147,6 @@ async def login(req: LoginRequest):
                     )
                     return {"token": token, "tenant": row["name"]}
 
-    settings = get_settings()
-    if settings.debug and req.email == "art@ebidoebi.ru" and req.password == "demo123":
-        token = jwt.encode(
-            {"tenant_id": 1, "email": req.email,
-             "exp": datetime.utcnow() + timedelta(days=30)},
-            _jwt_secret(), algorithm=JWT_ALGO,
-        )
-        return {"token": token, "tenant": "Ёбидоёби"}
-
     raise HTTPException(401, "Неверный email или пароль")
 
 

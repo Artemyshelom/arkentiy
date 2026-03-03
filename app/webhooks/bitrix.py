@@ -31,6 +31,14 @@ NOTIFY_ON_STATUS = {
 @router.post("/bitrix")
 async def handle_bitrix_webhook(request: Request):
     """Принимает webhook от Битрикс24 об изменениях задач."""
+    # Проверяем webhook secret
+    webhook_secret = settings.webhook_secret
+    if webhook_secret:
+        token = request.query_params.get("token") or request.headers.get("x-webhook-secret", "")
+        if token != webhook_secret:
+            logger.warning(f"Битрикс24 webhook: неверный token/secret")
+            return {"status": "forbidden"}
+
     try:
         # Битрикс24 может слать form-data или JSON
         content_type = request.headers.get("content-type", "")

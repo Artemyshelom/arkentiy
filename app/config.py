@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     iiko_org_ids_file: str = "/app/secrets/org_ids.json"
 
     # iiko Web BO API (выручка, отчёты)
-    iiko_bo_login: str = "artemiish"
+    iiko_bo_login: str = ""
     iiko_bo_password: str = ""
 
     # Конфиг точек (города, dept IDs, timezone)
@@ -63,13 +63,14 @@ class Settings(BaseSettings):
     yukassa_return_url: str = "https://arkentiy.ru"
 
     # Безопасность
-    webhook_secret: str = "change_me"
-    jwt_secret: str = "arkentiy-secret-change-me"
+    webhook_secret: str = ""
+    jwt_secret: str = ""
+    admin_api_key: str = ""  # ключ для /run, /jobs, /backfill
     debug: bool = False
 
     # OpenClaw AI (@ mention обработчик)
     openclaw_enabled: bool = False
-    openclaw_api_url: str = "http://72.56.107.85:18789/v1/chat/completions"
+    openclaw_api_url: str = ""
     openclaw_api_token: str = ""
     openclaw_model: str = "openclaw:arkentiy-brain"
     openclaw_timeout: float = 60.0

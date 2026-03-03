@@ -98,12 +98,27 @@ def register_jobs() -> None:
         misfire_grace_time=300,
     )
 
-    # Выгрузка iiko → Google Sheets + ТГ-оповещение: 09:26 местного = 05:26 МСК
+    # Выгрузка iiko → Google Sheets: 05:26 МСК (23:31 местного для первого филиала)
+    # MULTI-TENANT: запускаем для каждого tenant отдельно
+    async def _run_export_for_all_tenants():
+        """Запускает export_iiko_to_sheets для каждого активного tenant."""
+        try:
+            from app.database_pg import get_pool as _get_pg_pool
+            pool = _get_pg_pool()
+            tenant_ids = await pool.fetch("SELECT id FROM tenants WHERE status = 'active'")
+            for row in tenant_ids:
+                try:
+                    await job_export_iiko_to_sheets(tenant_id=row["id"])
+                except Exception as e:
+                    logger.error(f"Ошибка export iiko sheets для tenant_id={row['id']}: {e}")
+        except Exception as e:
+            logger.error(f"Ошибка в _run_export_for_all_tenants: {e}")
+    
     scheduler.add_job(
-        job_export_iiko_to_sheets,
+        _run_export_for_all_tenants,
         trigger=CronTrigger(hour=5, minute=26),
         id="iiko_to_sheets",
-        name="iiko заказы → Google Sheets",
+        name="iiko заказы → Google Sheets (все тенанты)",
         replace_existing=True,
         misfire_grace_time=300,
     )

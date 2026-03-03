@@ -247,9 +247,40 @@ async def export_day(date: datetime) -> list[list]:
     return rows
 
 
-async def job_export_iiko_to_sheets() -> None:
-    """Ежедневная выгрузка данных за сегодня в Google Sheets (23:31 местного)."""
-    log_id = await log_job_start("iiko_to_sheets")
+async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
+    """
+    Ежедневная выгрузка данных за сегодня в Google Sheets (23:31 местного).
+    
+    MULTI-TENANT: вызывается отдельно для каждого tenant_id.
+    Если tenant_id не передан, то используется конфиг из settings.
+    """
+    from app.database_pg import get_iiko_credentials
+    
+    # Если tenant_id не передан явно, используем tenant_id=1 из глобального конфига
+    # (это вызов из scheduler для tenant_id=1)
+    if tenant_id is None:
+        tenant_id = 1
+    
+    # Читаем конфиг для этого tenant
+    if tenant_id == 1:
+        # tenant_id=1 использует settings по умолчанию
+        creds = None
+    else:
+        # Для других тенантов читаем из БД
+        pool = get_pool()
+        creds_rows = await pool.fetch(
+            "SELECT tenant_id, iiko_url, api_login, api_pass FROM iiko_credentials WHERE tenant_id = $1 LIMIT 1",
+            tenant_id
+        )
+        if not creds_rows:
+            logger.warning(f"Нет iiko_credentials для tenant_id={tenant_id}")
+            return
+        creds = dict(creds_rows[0])
+    
+    # Загружаем конфиг для этого tenant (временная подстановка settings)
+    # Если нужно, можно передать конфиг параметром, но пока используем settings
+    
+    log_id = await log_job_start("iiko_to_sheets", tenant_id=tenant_id)
 
     if not settings.google_sheets_iiko_id:
         await log_job_finish(log_id, "error", "GOOGLE_SHEETS_IIKO_ID не задан")

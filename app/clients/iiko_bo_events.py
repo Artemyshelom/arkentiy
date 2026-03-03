@@ -483,7 +483,18 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             if uid in state.sessions:
                 state.sessions[uid]["closed_at"] = ev_date
 
-        elif ev_type == "cookingStatusChangedToNext":
+        else:
+            # #region agent log D4587f2
+            _order_num_dbg = attrs.get("deliveryNumber", "")
+            if _order_num_dbg or "cancel" in ev_type.lower() or "Cancel" in ev_type:
+                try:
+                    import json as _j4587f2c, time as _t4587f2c
+                    open("/Users/artemii/Desktop/CURSOR/Бизнес/.cursor/debug-4587f2.log", 'a').write(_j4587f2c.dumps({"sessionId":"4587f2","runId":"r1","hypothesisId":"EF","location":"iiko_bo_events.py:unhandled","message":"unhandled event type","data":{"ev_type":ev_type,"order_num":_order_num_dbg,"attrs_keys":list(attrs.keys())[:10],"branch":getattr(state,'branch_name','?')},"timestamp":_t4587f2c.time_ns()//1000000}) + '\n')
+                except Exception:
+                    pass
+            # #endregion
+
+        if ev_type == "cookingStatusChangedToNext":
             order_num_str = attrs.get("orderNum", "")
             cooking_status = attrs.get("cookingStatus", "")
             if order_num_str and cooking_status:

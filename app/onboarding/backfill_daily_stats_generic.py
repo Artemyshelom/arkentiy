@@ -43,10 +43,12 @@ class DailyStatsBackfiller:
         tenant_id: int,
         date_from: date,
         date_to: date,
+        skip_cities: set[str] = None,
     ):
         self.tenant_id = tenant_id
         self.date_from = date_from
         self.date_to = date_to
+        self.skip_cities = skip_cities or set()
         self.pool: asyncpg.Pool = None
         self.stats = {"ok": 0, "error": 0, "branches": set()}
 
@@ -64,16 +66,22 @@ class DailyStatsBackfiller:
             await self.pool.close()
 
     async def get_iiko_credentials(self) -> list[dict]:
-        """Получает iiko credentials для tenant, группирует по серверам."""
+        """Получает iiko credentials для tenant.
+        
+        ВАЖНО: в iiko_credentials есть и city (человеческое название) 
+        и branch_name (техническое, совпадает с Department в OLAP).
+        Используем branch_name для матчинга с OLAP ответами.
+        """
         rows = await self.pool.fetch(
             """SELECT DISTINCT 
-               bo_url, bo_login, bo_password, city, dept_id
+               bo_url, bo_login, bo_password, city, branch_name, dept_id
                FROM iiko_credentials
                WHERE tenant_id = $1 AND is_active = true
                ORDER BY city""",
             self.tenant_id,
         )
-        return [dict(r) for r in rows]
+        # Фильтруем skip_cities (по city — читаемое название)
+        return [dict(r) for r in rows if r["city"] not in self.skip_cities]
 
     async def get_branch_names(self) -> list[str]:
         """Получает unique branch names для tenant из iiko_credentials."""
@@ -95,11 +103,26 @@ class DailyStatsBackfiller:
                 logger.error(f"Нет iiko_credentials для tenant_id={self.tenant_id}")
                 return
 
-            # Группируем по серверам
+            # Группируем по серверам. branch_name = Department в OLAP (не city!)
             by_server = defaultdict(list)
             for cred in credentials:
                 key = (cred["bo_url"], cred["bo_login"], cred["bo_password"])
-                by_server[key].append(cred["city"])
+                by_server[key].append(cred["branch_name"])
+
+                # Получаем токены ОДИН РАЗ для всех серверов
+            tokens: dict[tuple, str] = {}
+            async with httpx.AsyncClient(verify=False, timeout=30) as auth_client:
+                for (bo_url, bo_login, bo_password) in by_server.keys():
+                    try:
+                        token = await self._get_token(bo_url, bo_login, bo_password, auth_client)
+                        tokens[(bo_url, bo_login, bo_password)] = token
+                        logger.info(f"Токен получен для {bo_url}")
+                    except Exception as e:
+                        logger.error(f"Ошибка auth {bo_url}: {e}")
+
+            if not tokens:
+                logger.error("Не удалось получить ни одного токена")
+                return
 
             # По дням
             current = self.date_from
@@ -115,10 +138,12 @@ class DailyStatsBackfiller:
                 async with httpx.AsyncClient(verify=False, timeout=60) as client:
                     tasks = [
                         self._fetch_and_upsert_day(
-                            client, bo_url, bo_login, bo_password, 
+                            client, bo_url, bo_login, bo_password,
+                            tokens.get((bo_url, bo_login, bo_password), ""),
                             branch_names, date_str, next_str
                         )
                         for (bo_url, bo_login, bo_password), branch_names in by_server.items()
+                        if (bo_url, bo_login, bo_password) in tokens
                     ]
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -128,7 +153,7 @@ class DailyStatsBackfiller:
                         self.stats["error"] += 1
                     else:
                         self.stats["ok"] += result
-                        
+
                 current += timedelta(days=1)
 
             self._print_summary()
@@ -142,16 +167,14 @@ class DailyStatsBackfiller:
         bo_url: str,
         bo_login: str,
         bo_password: str,
+        token: str,
         branch_names: list[str],
         date_str: str,
         next_str: str,
     ) -> int:
         """Загружает OLAP за день и UPSERT в daily_stats."""
         try:
-            # Auth
-            token = await self._get_token(bo_url, bo_login, bo_password, client)
-            
-            # Fetch stats
+            # Fetch stats (токен уже получен заранее)
             stats = await self._fetch_olap(bo_url, token, date_str, next_str, client)
 
             # UPSERT для каждой ветки
@@ -286,6 +309,8 @@ class DailyStatsBackfiller:
 
     async def _upsert_daily_stat(self, branch_name: str, date_iso: str, s: dict):
         """UPSERT в daily_stats."""
+        from datetime import date as date_type
+        date_obj = date_type.fromisoformat(date_iso)
         avg_check = round((s["revenue_net"] or 0) / s["check_count"]) if s.get("check_count") else 0
 
         await self.pool.execute(
@@ -305,7 +330,7 @@ class DailyStatsBackfiller:
             """,
             self.tenant_id,
             branch_name,
-            date_iso,
+            date_obj,
             s.get("check_count") or 0,
             s.get("revenue_net") or 0.0,
             avg_check,
@@ -332,16 +357,19 @@ async def main():
     parser.add_argument("--tenant-id", type=int, required=True)
     parser.add_argument("--date-from", type=str, required=True, help="YYYY-MM-DD")
     parser.add_argument("--date-to", type=str, required=True, help="YYYY-MM-DD")
+    parser.add_argument("--skip-cities", type=str, help="Города через запятую")
 
     args = parser.parse_args()
 
     date_from = date.fromisoformat(args.date_from)
     date_to = date.fromisoformat(args.date_to)
+    skip_cities = set(c.strip() for c in (args.skip_cities or "").split(",") if c.strip())
 
     backfiller = DailyStatsBackfiller(
         tenant_id=args.tenant_id,
         date_from=date_from,
         date_to=date_to,
+        skip_cities=skip_cities,
     )
 
     await backfiller.run()

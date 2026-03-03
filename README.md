@@ -138,13 +138,13 @@ GitHub (artemyshelom/arkentiy)
 
 ```bash
 # 1. Разведка (что уже есть на VPS)
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "ls -la /opt/ebidoebi/app/"
+ssh arkentiy "ls -la /opt/ebidoebi/app/"
 
 # 2. Бэкап на VPS (ДО заливки)
 ssh ... "cp /opt/ebidoebi/app/jobs/daily_report.py /opt/ebidoebi/app/jobs/daily_report.py.bak.$(date +%Y%m%d_%H%M%S)"
 
 # 3. SCP (только НОВЫЕ файлы или ДЕЛЬТА, не всё целиком)
-scp -i ~/.ssh/artemii_vps app/jobs/daily_report.py root@5.42.98.2:/opt/ebidoebi/app/jobs/
+scp -i ~/.ssh/cursor_arkentiy_vps app/jobs/daily_report.py arkentiy:/opt/ebidoebi/app/jobs/
 
 # 4. Сборка на VPS
 ssh ... "cd /opt/ebidoebi && docker compose build --no-cache && docker compose up -d"

@@ -7,7 +7,7 @@
 set -e
 
 VPS="root@5.42.98.2"
-SSH_KEY="$HOME/.ssh/artemii_vps"
+SSH_KEY="$HOME/.ssh/cursor_arkentiy_vps"
 PROJECT="/opt/ebidoebi"
 LOCAL="$HOME/Desktop/CURSOR/Бизнес/02_Проекты/Аркентий"
 DATE=$(date +%Y%m%d_%H%M%S)

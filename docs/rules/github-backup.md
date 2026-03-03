@@ -12,7 +12,7 @@
 ## Когда пушить
 
 ```bash
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
+ssh arkentiy \
   "cd /opt/ebidoebi && git add app/ Dockerfile docker-compose.yml && git commit -m 'feat: описание' && git push"
 ```
 

@@ -3,17 +3,29 @@ backfill_orders_shaburov.py — бэкфилл orders_raw для Шабуров�
 
 Phase 1 — order-level (возобновляемый по дням):
   Заполняет: delivery_num, branch_name, client_phone, sum, date, actual_time,
-             planned_time, delivery_address, is_self_service, status, cancel_reason.
+             delivery_address, is_self_service, status, cancel_reason.
 
 Phase 2 — dish-level enrichment (каждый раз для пустых items):
   Дополняет: items → JSON [{name, qty}] из OLAP DishName per Delivery.Number.
-  Идёт по неделям (не дням) — один запрос = 7 дней, быстрее.
+  Идёт по неделям — один запрос = 7 дней.
+
+Phase 3 — courier-level enrichment (каждый раз для пустых courier):
+  Дополняет: courier (имя курьера из WaiterName).
+  Идёт по неделям.
+
+Phase 4 — planned_time enrichment (каждый раз для пустых planned_time):
+  Дополняет: planned_time из Delivery.ExpectedTime.
+  Идёт по неделям.
+
+Phase 5 — client_name enrichment (каждый раз для пустых client_name):
+  Дополняет: client_name из Delivery.CustomerName.
+  Идёт по неделям.
 
 Запуск в контейнере:
     docker compose exec app python -m app.onboarding.backfill_orders_shaburov
 
 Возобновляемый: Phase 1 пропускает уже обработанные дни (progress.json).
-Phase 2 всегда запускается, UPDATE только там где items IS NULL/empty.
+Phase 2/3/4/5 всегда запускаются, UPDATE только там где поле IS NULL/empty.
 """
 
 import asyncio
@@ -41,7 +53,7 @@ PROGRESS_FILE = "/app/data/backfill_orders_shaburov_progress.json"
 # Ижевск OLAP таймаутит на исторических данных — пропускаем до выяснения
 SKIP_CITIES = {"Ижевск"}
 
-# Phase 1: order-level fields
+# Phase 1: order-level fields (только order-level атрибуты → правильная сумма)
 OLAP_ORDER_FIELDS = [
     "Delivery.Number",
     "Department",
@@ -50,18 +62,39 @@ OLAP_ORDER_FIELDS = [
     "Delivery.ActualTime",
     "Delivery.Address",
     "Delivery.ServiceType",
-    "WaiterName",                      # курьер (в контексте доставки = курьер)
 ]
-# NOTE: Delivery.ExpectedDeliveryTime (planned_time) — не существует на всех серверах iiko.
-# Не использовать — вызывает 400 Unknown OLAP field.
-# NOTE: OpenDate intentionally excluded — causes Delivery.Number=null on some iiko servers.
-# Date comes from filter parameter instead.
+# ВАЖНО: WaiterName НЕ добавлять в OLAP_ORDER_FIELDS — обнуляет DishDiscountSumInt!
+# WaiterName = отдельный Phase 3 запрос.
+# Delivery.ExpectedDeliveryTime — 400 Unknown field (нет в этой версии iiko).
+# Delivery.ExpectedTime — РАБОТАЕТ, но только как dimension (groupByRowFields), Phase 4.
+# OpenDate — null Delivery.Number на Канске, не использовать.
 
 # Phase 2: dish-level fields
 OLAP_DISH_FIELDS = [
     "Delivery.Number",
     "Department",
     "DishName",
+]
+
+# Phase 3: courier-level (WaiterName отдельно от суммы)
+OLAP_COURIER_FIELDS = [
+    "Delivery.Number",
+    "Department",
+    "WaiterName",
+]
+
+# Phase 4: planned_time (Delivery.ExpectedTime — работает как dimension-поле)
+OLAP_PLANNED_FIELDS = [
+    "Delivery.Number",
+    "Department",
+    "Delivery.ExpectedTime",
+]
+
+# Phase 5: client_name (Delivery.CustomerName — dimension поле)
+OLAP_CLIENT_NAME_FIELDS = [
+    "Delivery.Number",
+    "Department",
+    "Delivery.CustomerName",
 ]
 
 
@@ -154,7 +187,6 @@ def _parse_orders(rows: list[dict], branch_names: set, order_date: date) -> list
             "is_self_service": service_type.upper() == "PICKUP",
             "status": "Отменена" if cancel_cause else "Доставлена",
             "cancel_reason": cancel_cause or "",
-            "courier": (row.get("WaiterName") or "").strip(),
         })
     return result
 
@@ -169,18 +201,17 @@ async def _upsert_orders(pool: asyncpg.Pool, rows: list[dict]) -> int:
             INSERT INTO orders_raw
                 (tenant_id, branch_name, delivery_num, client_phone, sum, date,
                  actual_time, delivery_address, is_self_service,
-                 status, cancel_reason, courier, updated_at)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
+                 status, cancel_reason, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,now())
             ON CONFLICT (tenant_id, branch_name, delivery_num)
             DO UPDATE SET
                 client_phone     = COALESCE(NULLIF(EXCLUDED.client_phone,''), orders_raw.client_phone),
-                sum              = EXCLUDED.sum,
+                sum              = CASE WHEN EXCLUDED.sum > 0 THEN EXCLUDED.sum ELSE orders_raw.sum END,
                 actual_time      = COALESCE(NULLIF(EXCLUDED.actual_time,''), orders_raw.actual_time),
                 delivery_address = COALESCE(NULLIF(EXCLUDED.delivery_address,''), orders_raw.delivery_address),
                 is_self_service  = EXCLUDED.is_self_service,
                 status           = EXCLUDED.status,
                 cancel_reason    = EXCLUDED.cancel_reason,
-                courier          = COALESCE(NULLIF(EXCLUDED.courier,''), orders_raw.courier),
                 updated_at       = now()
             """,
             TENANT_ID,
@@ -194,7 +225,6 @@ async def _upsert_orders(pool: asyncpg.Pool, rows: list[dict]) -> int:
             r["is_self_service"],
             r["status"],
             r["cancel_reason"],
-            r["courier"],
         )
         count += 1
     return count
@@ -270,6 +300,89 @@ async def _update_items(pool: asyncpg.Pool, items_map: dict[tuple, list]) -> int
     return updated
 
 
+async def _phase3_enrich_courier(
+    pool: asyncpg.Pool,
+    by_server: dict[tuple, list],
+    all_dates: list[date],
+) -> None:
+    """Fetch WaiterName weekly (separately from sum) and update orders_raw.courier."""
+    logger.info("\n=== Phase 3: enrichment courier (WaiterName) ===")
+
+    empty_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (courier IS NULL OR courier='')",
+        TENANT_ID,
+    )
+    logger.info(f"Заказов без курьера: {empty_count}")
+    if empty_count == 0:
+        logger.info("Все заказы уже имеют курьера — Phase 3 пропущена")
+        return
+
+    total_updated = 0
+
+    async with httpx.AsyncClient(verify=False, timeout=90) as client:
+        for (bo_url, login, password), branch_names in by_server.items():
+            branch_set = set(branch_names)
+            try:
+                token = await _get_token(bo_url, login, password, client)
+            except Exception as e:
+                logger.error(f"Phase 3 auth failed {bo_url}: {e}")
+                continue
+
+            week_start = all_dates[0]
+            today = date.today()
+            while week_start <= all_dates[-1]:
+                week_end = min(week_start + timedelta(days=7), today)
+                body = {
+                    "reportType": "SALES",
+                    "buildSummary": "false",
+                    "groupByRowFields": OLAP_COURIER_FIELDS,
+                    "aggregateFields": ["DishDiscountSumInt"],
+                    "filters": _date_filter(str(week_start), str(week_end)),
+                }
+                try:
+                    r = await client.post(
+                        f"{bo_url}/api/v2/reports/olap?key={token}",
+                        json=body,
+                        headers={"Content-Type": "application/json"},
+                        timeout=90,
+                    )
+                    rows = r.json().get("data", []) if r.status_code == 200 else []
+                except Exception as e:
+                    logger.error(f"Phase 3 OLAP error {bo_url} {week_start}: {e}")
+                    rows = []
+
+                # Build {(branch, num): courier_name}
+                courier_map: dict[tuple, str] = {}
+                for row in rows:
+                    num = row.get("Delivery.Number")
+                    dept = (row.get("Department") or "").strip()
+                    waiter = (row.get("WaiterName") or "").strip()
+                    if num and dept in branch_set and waiter:
+                        courier_map[(dept, str(int(num)))] = waiter
+
+                updated = 0
+                for (branch, num), courier in courier_map.items():
+                    result = await pool.execute(
+                        """UPDATE orders_raw SET courier=$1, updated_at=now()
+                           WHERE tenant_id=$2 AND branch_name=$3 AND delivery_num=$4
+                             AND (courier IS NULL OR courier='')""",
+                        courier, TENANT_ID, branch, num,
+                    )
+                    if result and result.split()[-1] != "0":
+                        updated += 1
+
+                logger.info(f"  {week_start}..{week_end}: {len(courier_map)} с курьером, обновлено {updated}")
+                total_updated += updated
+                week_start += timedelta(days=7)
+                await asyncio.sleep(0.5)
+
+    remaining = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (courier IS NULL OR courier='')",
+        TENANT_ID,
+    )
+    logger.info(f"Phase 3 завершена: обновлено {total_updated}, без курьера осталось {remaining}")
+
+
 async def _phase2_enrich_items(
     pool: asyncpg.Pool,
     by_server: dict[tuple, list],
@@ -321,6 +434,180 @@ async def _phase2_enrich_items(
         TENANT_ID,
     )
     logger.info(f"Phase 2 завершена: обновлено {total_updated}, без состава осталось {remaining}")
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — planned_time enrichment
+# ---------------------------------------------------------------------------
+
+async def _phase4_enrich_planned(
+    pool: asyncpg.Pool,
+    by_server: dict[tuple, list],
+    all_dates: list[date],
+) -> None:
+    """Fetch Delivery.ExpectedTime weekly and update orders_raw.planned_time."""
+    logger.info("\n=== Phase 4: enrichment planned_time (Delivery.ExpectedTime) ===")
+
+    empty_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (planned_time IS NULL OR planned_time='')",
+        TENANT_ID,
+    )
+    logger.info(f"Заказов без planned_time: {empty_count}")
+    if empty_count == 0:
+        logger.info("Все заказы уже имеют planned_time — Phase 4 пропущена")
+        return
+
+    total_updated = 0
+
+    async with httpx.AsyncClient(verify=False, timeout=90) as client:
+        for (bo_url, login, password), branch_names in by_server.items():
+            branch_set = set(branch_names)
+            try:
+                token = await _get_token(bo_url, login, password, client)
+            except Exception as e:
+                logger.error(f"Phase 4 auth failed {bo_url}: {e}")
+                continue
+
+            week_start = all_dates[0]
+            today = date.today()
+            while week_start <= all_dates[-1]:
+                week_end = min(week_start + timedelta(days=7), today)
+                body = {
+                    "reportType": "DELIVERIES",
+                    "buildSummary": "false",
+                    "groupByRowFields": OLAP_PLANNED_FIELDS,
+                    "aggregateFields": ["DishDiscountSumInt"],
+                    "filters": _date_filter(str(week_start), str(week_end)),
+                }
+                try:
+                    r = await client.post(
+                        f"{bo_url}/api/v2/reports/olap?key={token}",
+                        json=body,
+                        headers={"Content-Type": "application/json"},
+                        timeout=90,
+                    )
+                    rows = r.json().get("data", []) if r.status_code == 200 else []
+                    if r.status_code != 200:
+                        logger.warning(f"Phase 4 OLAP {bo_url} {week_start}: {r.status_code} {r.text[:100]}")
+                except Exception as e:
+                    logger.error(f"Phase 4 OLAP error {bo_url} {week_start}: {e}")
+                    rows = []
+
+                planned_map: dict[tuple, str] = {}
+                for row in rows:
+                    num = row.get("Delivery.Number")
+                    dept = (row.get("Department") or "").strip()
+                    expected = (row.get("Delivery.ExpectedTime") or "").strip()
+                    if num and dept in branch_set and expected:
+                        planned_map[(dept, str(int(num)))] = expected
+
+                updated = 0
+                for (branch, num), planned_time in planned_map.items():
+                    result = await pool.execute(
+                        """UPDATE orders_raw SET planned_time=$1, updated_at=now()
+                           WHERE tenant_id=$2 AND branch_name=$3 AND delivery_num=$4
+                             AND (planned_time IS NULL OR planned_time='')""",
+                        planned_time, TENANT_ID, branch, num,
+                    )
+                    if result and result.split()[-1] != "0":
+                        updated += 1
+
+                logger.info(f"  {week_start}..{week_end}: {len(planned_map)} с плановым, обновлено {updated}")
+                total_updated += updated
+                week_start += timedelta(days=7)
+                await asyncio.sleep(0.5)
+
+    remaining = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (planned_time IS NULL OR planned_time='')",
+        TENANT_ID,
+    )
+    logger.info(f"Phase 4 завершена: обновлено {total_updated}, без planned_time осталось {remaining}")
+
+
+async def _phase5_enrich_client_name(
+    pool: asyncpg.Pool,
+    by_server: dict[tuple, list],
+    all_dates: list[date],
+) -> None:
+    """Fetch Delivery.CustomerName weekly and update orders_raw.client_name."""
+    logger.info("\n=== Phase 5: enrichment client_name (Delivery.CustomerName) ===")
+
+    empty_count = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (client_name IS NULL OR client_name='')",
+        TENANT_ID,
+    )
+    logger.info(f"Заказов без client_name: {empty_count}")
+    if empty_count == 0:
+        logger.info("Все заказы уже имеют client_name — Phase 5 пропущена")
+        return
+
+    total_updated = 0
+
+    async with httpx.AsyncClient(verify=False, timeout=90) as client:
+        for (bo_url, login, password), branch_names in by_server.items():
+            branch_set = set(branch_names)
+            try:
+                token = await _get_token(bo_url, login, password, client)
+            except Exception as e:
+                logger.error(f"Phase 5 auth failed {bo_url}: {e}")
+                continue
+
+            week_start = all_dates[0]
+            today = date.today()
+            while week_start <= all_dates[-1]:
+                week_end = min(week_start + timedelta(days=7), today)
+                body = {
+                    "reportType": "DELIVERIES",
+                    "buildSummary": "false",
+                    "groupByRowFields": OLAP_CLIENT_NAME_FIELDS,
+                    "aggregateFields": ["DishDiscountSumInt"],
+                    "filters": _date_filter(str(week_start), str(week_end)),
+                }
+                try:
+                    r = await client.post(
+                        f"{bo_url}/api/v2/reports/olap?key={token}",
+                        json=body,
+                        headers={"Content-Type": "application/json"},
+                        timeout=90,
+                    )
+                    rows = r.json().get("data", []) if r.status_code == 200 else []
+                    if r.status_code != 200:
+                        logger.warning(f"Phase 5 OLAP {bo_url} {week_start}: {r.status_code} {r.text[:100]}")
+                except Exception as e:
+                    logger.error(f"Phase 5 OLAP error {bo_url} {week_start}: {e}")
+                    rows = []
+
+                client_name_map: dict[tuple, str] = {}
+                for row in rows:
+                    num = row.get("Delivery.Number")
+                    dept = (row.get("Department") or "").strip()
+                    name = (row.get("Delivery.CustomerName") or "").strip()
+                    if num and dept in branch_set and name:
+                        # Пропускаем анонимные "GUEST" заказы
+                        if not name.startswith("GUEST"):
+                            client_name_map[(dept, str(int(num)))] = name
+
+                updated = 0
+                for (branch, num), client_name in client_name_map.items():
+                    result = await pool.execute(
+                        """UPDATE orders_raw SET client_name=$1, updated_at=now()
+                           WHERE tenant_id=$2 AND branch_name=$3 AND delivery_num=$4
+                             AND (client_name IS NULL OR client_name='')""",
+                        client_name, TENANT_ID, branch, num,
+                    )
+                    if result and result.split()[-1] != "0":
+                        updated += 1
+
+                logger.info(f"  {week_start}..{week_end}: {len(client_name_map)} с именем, обновлено {updated}")
+                total_updated += updated
+                week_start += timedelta(days=7)
+                await asyncio.sleep(0.5)
+
+    remaining = await pool.fetchval(
+        "SELECT COUNT(*) FROM orders_raw WHERE tenant_id=$1 AND (client_name IS NULL OR client_name='')",
+        TENANT_ID,
+    )
+    logger.info(f"Phase 5 завершена: обновлено {total_updated}, без client_name осталось {remaining}")
 
 
 # ---------------------------------------------------------------------------
@@ -407,18 +694,41 @@ async def main():
     # -----------------------------------------------------------------------
     await _phase2_enrich_items(pool, by_server, all_dates)
 
+    # -----------------------------------------------------------------------
+    # Phase 3 — enrich courier (WaiterName, отдельно от суммы)
+    # -----------------------------------------------------------------------
+    await _phase3_enrich_courier(pool, by_server, all_dates)
+
+    # -----------------------------------------------------------------------
+    # Phase 4 — enrich planned_time (Delivery.ExpectedTime)
+    # -----------------------------------------------------------------------
+    await _phase4_enrich_planned(pool, by_server, all_dates)
+
+    # -----------------------------------------------------------------------
+    # Phase 5 — enrich client_name (Delivery.CustomerName)
+    # -----------------------------------------------------------------------
+    await _phase5_enrich_client_name(pool, by_server, all_dates)
+
     # Final stats
     stats = await pool.fetch(
         """SELECT branch_name,
                   COUNT(*) as total,
-                  COUNT(*) FILTER (WHERE items IS NOT NULL AND items != '') as with_items
+                  COUNT(*) FILTER (WHERE items IS NOT NULL AND items != '') as with_items,
+                  COUNT(*) FILTER (WHERE courier IS NOT NULL AND courier != '') as with_courier,
+                  COUNT(*) FILTER (WHERE sum > 0) as with_sum,
+                  COUNT(*) FILTER (WHERE planned_time IS NOT NULL AND planned_time != '') as with_planned,
+                  COUNT(*) FILTER (WHERE client_name IS NOT NULL AND client_name != '') as with_client_name
            FROM orders_raw WHERE tenant_id=$1
            GROUP BY branch_name ORDER BY branch_name""",
         TENANT_ID,
     )
     logger.info("\n=== Итого в orders_raw ===")
     for s in stats:
-        logger.info(f"  {s['branch_name']}: {s['total']} заказов, {s['with_items']} с составом")
+        logger.info(
+            f"  {s['branch_name']}: {s['total']} заказов, "
+            f"{s['with_items']} с составом, {s['with_courier']} с курьером, "
+            f"{s['with_sum']} с суммой, {s['with_planned']} с planned_time, {s['with_client_name']} с именем"
+        )
 
     await pool.close()
 

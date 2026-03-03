@@ -15,11 +15,11 @@ Cursor (локально) → scp → VPS → git push origin main
 До того как написал хоть одну команду scp:
 
 ```bash
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "ls -la /opt/ebidoebi/app/"
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "ls -la /opt/ebidoebi/app/clients/"
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "ls -la /opt/ebidoebi/app/jobs/"
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "cat /opt/ebidoebi/.env"
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "cat /opt/ebidoebi/app/main.py"
+ssh arkentiy "ls -la /opt/ebidoebi/app/"
+ssh arkentiy "ls -la /opt/ebidoebi/app/clients/"
+ssh arkentiy "ls -la /opt/ebidoebi/app/jobs/"
+ssh arkentiy "cat /opt/ebidoebi/.env"
+ssh arkentiy "cat /opt/ebidoebi/app/main.py"
 ```
 
 Спроси себя:
@@ -31,11 +31,11 @@ ssh -i ~/.ssh/artemii_vps root@5.42.98.2 "cat /opt/ebidoebi/app/main.py"
 
 ```bash
 # Бэкап
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
+ssh arkentiy \
   "cp /opt/ebidoebi/app/X.py /opt/ebidoebi/app/X.py.bak.$(date +%Y%m%d_%H%M%S)"
 
 # Оставить только две последние версии
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
+ssh arkentiy \
   "ls -t /opt/ebidoebi/app/X.py.bak.* 2>/dev/null | tail -n +3 | xargs rm -f"
 ```
 
@@ -94,10 +94,10 @@ ssh ... "cd /opt/ebidoebi && docker compose up -d --build"
 
 ```bash
 # SCP файла на VPS
-scp -i ~/.ssh/artemii_vps app/jobs/new_module.py root@5.42.98.2:/opt/ebidoebi/app/jobs/
+scp -i ~/.ssh/cursor_arkentiy_vps app/jobs/new_module.py arkentiy:/opt/ebidoebi/app/jobs/
 
 # Build и запуск
-ssh -i ~/.ssh/artemii_vps root@5.42.98.2 \
+ssh arkentiy \
   "cd /opt/ebidoebi && docker compose build --no-cache && docker compose up -d"
 
 # ВАЖНО: docker compose restart НЕ применяет изменения кода, только .env

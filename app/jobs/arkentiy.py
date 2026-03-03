@@ -901,16 +901,6 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     if not city_branch_names:
         city_branch_names = [b["name"] for b in get_available_branches()]
 
-    # #region agent log D4587f2
-    import json as _j4587f2
-    _log_path_4587f2 = "/Users/artemii/Desktop/CURSOR/Бизнес/.cursor/debug-4587f2.log"
-    _dbg_tid = _ctx_tenant_id.get() if hasattr(_ctx_tenant_id, 'get') else 'N/A'
-    try:
-        open(_log_path_4587f2, 'a').write(_j4587f2.dumps({"sessionId":"4587f2","runId":"r1","hypothesisId":"A","location":"arkentiy.py:902","message":"search entry","data":{"tenant_id":_dbg_tid,"city_branch_names":city_branch_names,"is_phone":is_phone,"query":query[:30]},"timestamp":__import__('time').time_ns()//1000000}) + '\n')
-    except Exception:
-        pass
-    # #endregion
-
     rows: list[dict] = []
     total = 0
     query_type = "text"
@@ -969,14 +959,6 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             query_type = "text"
 
         rows = [dict(r) for r in pg_rows]
-
-        # #region agent log D4587f2
-        try:
-            import json as _j4587f2b, time as _t4587f2b
-            open("/Users/artemii/Desktop/CURSOR/Бизнес/.cursor/debug-4587f2.log", 'a').write(_j4587f2b.dumps({"sessionId":"4587f2","runId":"r1","hypothesisId":"CD","location":"arkentiy.py:971","message":"search pg result","data":{"rows_count":len(rows),"query_type":query_type,"phone_q":phone_q if is_phone else None},"timestamp":_t4587f2b.time_ns()//1000000}) + '\n')
-        except Exception:
-            pass
-        # #endregion
 
     else:
         def _city_clause() -> tuple[str, list]:
@@ -1796,19 +1778,6 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         get_available_branches(filter_q) if filter_q else get_available_branches()
     )}
 
-    # #region agent log D4587f2
-    try:
-        import json as _j4587f2d, time as _t4587f2d
-        _dbg_d142 = {}
-        for _bname, _bstate in _states.items():
-            _d = _bstate.deliveries.get("142310") or _bstate.deliveries.get(142310)
-            if _d:
-                _dbg_d142[_bname] = {"status": _d.get("status"), "planned": _d.get("planned_time")}
-        open("/Users/artemii/Desktop/CURSOR/Бизнес/.cursor/debug-4587f2.log", 'a').write(_j4587f2d.dumps({"sessionId":"4587f2","runId":"r1","hypothesisId":"GEF","location":"arkentiy.py:_handle_late","message":"late query","data":{"branch_names_set":list(branch_names_set),"order_142310_in_states":_dbg_d142},"timestamp":_t4587f2d.time_ns()//1000000}) + '\n')
-    except Exception:
-        pass
-    # #endregion
-
     results = []
     for branch_name, state in _states.items():
         if branch_name not in branch_names_set:
@@ -1827,7 +1796,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
             except ValueError:
                 continue
             overdue_min = (now_local - planned_dt).total_seconds() / 60
-            if overdue_min <= 0:
+            if overdue_min <= 0 or overdue_min > LATE_MAX_MIN:
                 continue
             results.append({
                 "branch": branch_name,

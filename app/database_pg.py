@@ -995,8 +995,13 @@ _EXACT_TIME_CONDITIONS_PG = """(
 _EXACT_TIME_FILTER_PG = f"\n    AND NOT {_EXACT_TIME_CONDITIONS_PG}\n"
 
 
-async def aggregate_orders_today(branch_name: str, date_iso: str) -> dict:
+async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int | None = None) -> dict:
     """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + времена)."""
+    from app.ctx import ctx_tenant_id as _ctx_tenant_id
+    
+    if tenant_id is None:
+        tenant_id = _ctx_tenant_id.get()
+    
     pool = get_pool()
 
     time_row = await pool.fetchrow(
@@ -1037,10 +1042,10 @@ async def aggregate_orders_today(branch_name: str, date_iso: str) -> dict:
                 END
             END) AS avg_delivery_min
         FROM orders_raw
-        WHERE branch_name = $1 AND date::text = $2
+        WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3
           AND status != 'Отменена'
           {_EXACT_TIME_FILTER_PG}""",
-        branch_name, date_iso,
+        tenant_id, branch_name, date_iso,
     )
 
     result = dict(time_row) if time_row else {}
@@ -1048,12 +1053,12 @@ async def aggregate_orders_today(branch_name: str, date_iso: str) -> dict:
     dt_rows = await pool.fetch(
         """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
            FROM orders_raw
-           WHERE branch_name = $1 AND date::text = $2
+           WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3
              AND discount_type IS NOT NULL AND discount_type != ''
              AND status != 'Отменена'
            GROUP BY discount_type
            ORDER BY total DESC""",
-        branch_name, date_iso,
+        tenant_id, branch_name, date_iso,
     )
 
     result["discount_types_agg"] = [

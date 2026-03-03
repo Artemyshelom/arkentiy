@@ -48,10 +48,12 @@ OLAP_ORDER_FIELDS = [
     "Delivery.CustomerPhone",
     "Delivery.CancelCause",
     "Delivery.ActualTime",
-    "Delivery.ExpectedDeliveryTime",   # planned_time
     "Delivery.Address",
     "Delivery.ServiceType",
+    "WaiterName",                      # курьер (в контексте доставки = курьер)
 ]
+# NOTE: Delivery.ExpectedDeliveryTime (planned_time) — не существует на всех серверах iiko.
+# Не использовать — вызывает 400 Unknown OLAP field.
 # NOTE: OpenDate intentionally excluded — causes Delivery.Number=null on some iiko servers.
 # Date comes from filter parameter instead.
 
@@ -140,10 +142,6 @@ def _parse_orders(rows: list[dict], branch_names: set, order_date: date) -> list
 
         cancel_cause = row.get("Delivery.CancelCause")
         service_type = row.get("Delivery.ServiceType") or ""
-        planned = row.get("Delivery.ExpectedDeliveryTime") or ""
-        if planned:
-            # normalize: "2026-02-01T13:24:00" → "2026-02-01 13:24:00"
-            planned = str(planned).replace("T", " ").split(".")[0]
 
         result.append({
             "delivery_num": str(int(num)),
@@ -152,11 +150,11 @@ def _parse_orders(rows: list[dict], branch_names: set, order_date: date) -> list
             "sum": float(row.get("DishDiscountSumInt") or 0),
             "date": order_date,
             "actual_time": row.get("Delivery.ActualTime") or "",
-            "planned_time": planned,
             "delivery_address": row.get("Delivery.Address") or "",
             "is_self_service": service_type.upper() == "PICKUP",
             "status": "Отменена" if cancel_cause else "Доставлена",
             "cancel_reason": cancel_cause or "",
+            "courier": (row.get("WaiterName") or "").strip(),
         })
     return result
 
@@ -170,19 +168,19 @@ async def _upsert_orders(pool: asyncpg.Pool, rows: list[dict]) -> int:
             """
             INSERT INTO orders_raw
                 (tenant_id, branch_name, delivery_num, client_phone, sum, date,
-                 actual_time, planned_time, delivery_address, is_self_service,
-                 status, cancel_reason, updated_at)
+                 actual_time, delivery_address, is_self_service,
+                 status, cancel_reason, courier, updated_at)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,now())
             ON CONFLICT (tenant_id, branch_name, delivery_num)
             DO UPDATE SET
                 client_phone     = COALESCE(NULLIF(EXCLUDED.client_phone,''), orders_raw.client_phone),
                 sum              = EXCLUDED.sum,
                 actual_time      = COALESCE(NULLIF(EXCLUDED.actual_time,''), orders_raw.actual_time),
-                planned_time     = COALESCE(NULLIF(EXCLUDED.planned_time,''), orders_raw.planned_time),
                 delivery_address = COALESCE(NULLIF(EXCLUDED.delivery_address,''), orders_raw.delivery_address),
                 is_self_service  = EXCLUDED.is_self_service,
                 status           = EXCLUDED.status,
                 cancel_reason    = EXCLUDED.cancel_reason,
+                courier          = COALESCE(NULLIF(EXCLUDED.courier,''), orders_raw.courier),
                 updated_at       = now()
             """,
             TENANT_ID,
@@ -192,11 +190,11 @@ async def _upsert_orders(pool: asyncpg.Pool, rows: list[dict]) -> int:
             r["sum"],
             r["date"],
             r["actual_time"],
-            r["planned_time"],
             r["delivery_address"],
             r["is_self_service"],
             r["status"],
             r["cancel_reason"],
+            r["courier"],
         )
         count += 1
     return count

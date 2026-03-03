@@ -69,7 +69,7 @@ class DailyStatsBackfiller:
             """SELECT DISTINCT 
                bo_url, bo_login, bo_password, city, dept_id
                FROM iiko_credentials
-               WHERE tenant_id = $1 AND status = 'active'
+               WHERE tenant_id = $1 AND is_active = true
                ORDER BY city""",
             self.tenant_id,
         )
@@ -80,7 +80,7 @@ class DailyStatsBackfiller:
         rows = await self.pool.fetch(
             """SELECT DISTINCT city as branch_name 
                FROM iiko_credentials
-               WHERE tenant_id = $1 AND status = 'active'
+               WHERE tenant_id = $1 AND is_active = true
                ORDER BY city""",
             self.tenant_id,
         )

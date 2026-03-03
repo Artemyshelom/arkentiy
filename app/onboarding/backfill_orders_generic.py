@@ -135,7 +135,7 @@ class GenericBackfiller:
         rows = await self.pool.fetch(
             """SELECT city, iiko_url, api_login, api_pass, bo_url, dept_id
                FROM iiko_credentials
-               WHERE tenant_id = $1 AND status = 'active'
+               WHERE tenant_id = $1 AND is_active = true
                ORDER BY city""",
             self.tenant_id,
         )

@@ -717,7 +717,14 @@ async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
     )
 
 
-async def get_module_chats_for_city(module: str, city: str, tenant_id: int = 1) -> list[int]:
+async def get_module_chats_for_city(module: str, city: str, tenant_id: int | None = None) -> list[int]:
+    """Получить чаты для модуля по городу.
+    
+    ВАЖНО: tenant_id должен быть передан явно. Ошибка если забыли.
+    """
+    if tenant_id is None:
+        raise ValueError("tenant_id must be specified explicitly in get_module_chats_for_city()")
+    
     chats = await get_all_tenant_chats(tenant_id)
     result: list[int] = []
     for chat in chats:
@@ -1258,11 +1265,19 @@ async def get_exact_time_orders(
     branch_name: str | None,
     date_iso: str,
     branch_names: list[str] | None = None,
+    tenant_id: int | None = None,
 ) -> list[dict]:
     """Возвращает заказы, определённые как 'на точное время' для даты."""
+    from app.ctx import ctx_tenant_id as _ctx_tenant_id
+    
     pool = get_pool()
-    conditions = [f"date::text = $1", "status != 'Отменена'"]
-    params: list = [date_iso]
+    
+    # Если tenant_id не передан, берём из контекста
+    if tenant_id is None:
+        tenant_id = _ctx_tenant_id.get()
+    
+    conditions = [f"tenant_id = $1", f"date::text = $2", "status != 'Отменена'"]
+    params: list = [tenant_id, date_iso]
 
     if branch_name:
         params.append(branch_name)

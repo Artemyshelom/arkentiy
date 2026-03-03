@@ -908,17 +908,18 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     if BACKEND == "postgresql":
         pool = get_pool()
         has_city = bool(city_branch_names)
+        tenant_id = _ctx_tenant_id.get()
 
         if is_numeric:
             if has_city:
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = $1 AND branch_name = ANY($2) ORDER BY planned_time DESC",
-                    query, city_branch_names,
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND delivery_num = $2 AND branch_name = ANY($3) ORDER BY planned_time DESC",
+                    tenant_id, query, city_branch_names,
                 )
             else:
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = $1 ORDER BY planned_time DESC",
-                    query,
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND delivery_num = $2 ORDER BY planned_time DESC",
+                    tenant_id, query,
                 )
             query_type = "numeric"
 
@@ -926,34 +927,34 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
             phone_q = query.lstrip("+")
             if has_city:
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE (client_phone LIKE $1 OR client_phone LIKE $2) AND branch_name = ANY($3) ORDER BY planned_time DESC LIMIT 30",
-                    f"%{phone_q}%", f"%{query}%", city_branch_names,
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND (client_phone LIKE $2 OR client_phone LIKE $3) AND branch_name = ANY($4) ORDER BY planned_time DESC LIMIT 30",
+                    tenant_id, f"%{phone_q}%", f"%{query}%", city_branch_names,
                 )
             else:
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE (client_phone LIKE $1 OR client_phone LIKE $2) ORDER BY planned_time DESC LIMIT 30",
-                    f"%{phone_q}%", f"%{query}%",
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND (client_phone LIKE $2 OR client_phone LIKE $3) ORDER BY planned_time DESC LIMIT 30",
+                    tenant_id, f"%{phone_q}%", f"%{query}%",
                 )
             query_type = "phone"
 
         else:
             if has_city:
                 count_row = await pool.fetchrow(
-                    "SELECT COUNT(*) FROM orders_raw WHERE (delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1) AND branch_name = ANY($2)",
-                    q, city_branch_names,
+                    "SELECT COUNT(*) FROM orders_raw WHERE tenant_id = $1 AND (delivery_num LIKE $2 OR client_phone LIKE $2 OR delivery_address LIKE $2 OR items LIKE $2) AND branch_name = ANY($3)",
+                    tenant_id, q, city_branch_names,
                 )
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE (delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1) AND branch_name = ANY($2) ORDER BY planned_time DESC LIMIT 20",
-                    q, city_branch_names,
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND (delivery_num LIKE $2 OR client_phone LIKE $2 OR delivery_address LIKE $2 OR items LIKE $2) AND branch_name = ANY($3) ORDER BY planned_time DESC LIMIT 20",
+                    tenant_id, q, city_branch_names,
                 )
             else:
                 count_row = await pool.fetchrow(
-                    "SELECT COUNT(*) FROM orders_raw WHERE delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1",
-                    q,
+                    "SELECT COUNT(*) FROM orders_raw WHERE tenant_id = $1 AND (delivery_num LIKE $2 OR client_phone LIKE $2 OR delivery_address LIKE $2 OR items LIKE $2)",
+                    tenant_id, q,
                 )
                 pg_rows = await pool.fetch(
-                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num LIKE $1 OR client_phone LIKE $1 OR delivery_address LIKE $1 OR items LIKE $1 ORDER BY planned_time DESC LIMIT 20",
-                    q,
+                    f"SELECT {COLS} FROM orders_raw WHERE tenant_id = $1 AND (delivery_num LIKE $2 OR client_phone LIKE $2 OR delivery_address LIKE $2 OR items LIKE $2) ORDER BY planned_time DESC LIMIT 20",
+                    tenant_id, q,
                 )
             total = count_row[0] if count_row else 0
             query_type = "text"

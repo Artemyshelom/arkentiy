@@ -1549,16 +1549,18 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
 
     if BACKEND == "postgresql":
         pool = get_pool()
+        tenant_id = _ctx_tenant_id.get()
+        
         stats_pg = await pool.fetch(
             """SELECT branch_name,
                       SUM(CASE WHEN is_self_service=false THEN 1 ELSE 0 END) AS delivery_cnt,
                       SUM(CASE WHEN is_self_service=true THEN 1 ELSE 0 END) AS pickup_cnt
                FROM orders_raw
-               WHERE date::text = $1
+               WHERE tenant_id = $1 AND date::text = $2
                  AND status IN ('Доставлена','Закрыта')
-                 AND branch_name = ANY($2)
+                 AND branch_name = ANY($3)
                GROUP BY branch_name""",
-            date, branch_names,
+            tenant_id, date, branch_names,
         )
         stats_rows = {r["branch_name"]: dict(r) for r in stats_pg}
 
@@ -1566,10 +1568,10 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
             """SELECT branch_name, delivery_num, courier, client_name,
                       planned_time, late_minutes, sum
                FROM orders_raw
-               WHERE date::text = $1 AND is_late = true AND is_self_service = false
-                 AND branch_name = ANY($2)
+               WHERE tenant_id = $1 AND date::text = $2 AND is_late = true AND is_self_service = false
+                 AND branch_name = ANY($3)
                ORDER BY branch_name, late_minutes DESC""",
-            date, branch_names,
+            tenant_id, date, branch_names,
         )
         delivery_late = [dict(r) for r in delivery_pg]
 
@@ -1577,10 +1579,10 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
             """SELECT branch_name, delivery_num, client_name,
                       planned_time, actual_time, late_minutes, sum, ready_time
                FROM orders_raw
-               WHERE date::text = $1 AND is_late = true AND is_self_service = true
-                 AND branch_name = ANY($2)
+               WHERE tenant_id = $1 AND date::text = $2 AND is_late = true AND is_self_service = true
+                 AND branch_name = ANY($3)
                ORDER BY branch_name, late_minutes DESC""",
-            date, branch_names,
+            tenant_id, date, branch_names,
         )
         pickup_late = [dict(r) for r in pickup_pg]
 

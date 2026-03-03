@@ -633,17 +633,41 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
 # ---------------------------------------------------------------------------
 
 async def job_audit_report(utc_offset: int = 7) -> None:
-    """Ежедневный аудит-отчёт. Запускается в 05:30 МСК (= 09:30 UTC+7)."""
+    """Ежедневный аудит-отчёт. Запускается в 05:30 МСК (= 09:30 UTC+7).
+    
+    Multi-tenant: берёт ветки для всех тенантов из БД (iiko_credentials),
+    запускает аудит для каждого тенанта отдельно.
+    """
     local_now = datetime.now(timezone.utc) + timedelta(hours=utc_offset)
     yesterday = (local_now - timedelta(days=1)).date()
     date_str = yesterday.isoformat()
 
     logger.info(f"[audit] Запуск аудита за {date_str}")
 
-    branches = settings.branches or []
-    if not branches:
-        logger.warning("[audit] Нет точек в branches.json — пропускаю")
+    pool = await get_pool()
+    
+    # Получаем все активные ветки по всем тенантам из БД
+    try:
+        all_iiko_creds = await pool.fetch(
+            "SELECT tenant_id, city, branch_name FROM iiko_credentials WHERE is_active = true"
+        )
+    except Exception as e:
+        logger.error(f"[audit] Ошибка чтения iiko_credentials: {e}")
+        all_iiko_creds = []
+    
+    if not all_iiko_creds:
+        logger.warning("[audit] Нет активных веток в БД — пропускаю")
         return
+    
+    # Группируем по tenant_id → city
+    tenant_cities: dict[int, set[str]] = {}
+    for row in all_iiko_creds:
+        tenant_id = row["tenant_id"]
+        city = row.get("city") or ""
+        if tenant_id not in tenant_cities:
+            tenant_cities[tenant_id] = set()
+        if city:
+            tenant_cities[tenant_id].add(city)
 
     await clear_audit_events(date_str)
 
@@ -658,24 +682,29 @@ async def job_audit_report(utc_offset: int = 7) -> None:
     unclosed = await _detect_unclosed_in_transit(date_str)
     report_events = all_findings + unclosed
 
-    for branch in branches:
-        try:
-            await _probe_cash_shifts(branch, date_str)
-        except Exception as e:
-            logger.debug(f"[audit] probe_cash_shifts exception {branch.get('name')}: {e}")
-
-    cities = sorted({b.get("city", "") for b in branches if b.get("city")})
-    for city in cities:
-        chat_ids = await get_module_chats_for_city("audit", city)
-        if not chat_ids:
+    # Проверяем cash shifts для всех веток (только для tenant_id=1, legacy)
+    for row in all_iiko_creds:
+        if row["tenant_id"] != 1:  # Legacy: только для первого тенанта
             continue
-        city_events = [e for e in report_events if e.get("city") == city]
-        report_text = _format_report(date_str, city, city_events)
-        for chat_id in chat_ids:
-            try:
-                await tg.send_message(str(chat_id), report_text)
-            except Exception as e:
-                logger.error(f"[audit] Ошибка отправки в {chat_id}: {e}")
+        try:
+            await _probe_cash_shifts({"name": row["branch_name"]}, date_str)
+        except Exception as e:
+            logger.debug(f"[audit] probe_cash_shifts exception {row['branch_name']}: {e}")
+
+    # Отправляем отчёты для каждого тенанта по его городам
+    for tenant_id, cities in tenant_cities.items():
+        for city in sorted(cities):
+            chat_ids = await get_module_chats_for_city("audit", city, tenant_id=tenant_id)
+            if not chat_ids:
+                continue
+            # Фильтруем события по городу (этот же город может быть у разных тенантов)
+            city_events = [e for e in report_events if e.get("city") == city]
+            report_text = _format_report(date_str, city, city_events)
+            for chat_id in chat_ids:
+                try:
+                    await tg.send_message(str(chat_id), report_text)
+                except Exception as e:
+                    logger.error(f"[audit] Ошибка отправки в {chat_id}: {e}")
 
     logger.info(f"[audit] Аудит завершён за {date_str}")
 

@@ -100,6 +100,8 @@ def _classify_role(role_code: str) -> str | None:
 class BranchState:
     bo_url: str
     branch_name: str
+    bo_login: str = ""
+    bo_password: str = ""
     revision: int = 0
     deliveries: dict = field(default_factory=dict)      # num → {status, courier, sum, planned_time, actual_time, ...}
     sessions: dict = field(default_factory=dict)        # user_id → {role_class, name, opened_at, closed_at}
@@ -295,9 +297,9 @@ class BranchState:
 # Auth (делегируем в iiko_auth — единый кеш токенов)
 # ---------------------------------------------------------------------------
 
-async def _get_token(bo_url: str, client: httpx.AsyncClient) -> str:
-    """Обёртка: передаёт httpx client в iiko_auth для переиспользования соединения."""
-    return await get_bo_token(bo_url, client=client)
+async def _get_token(bo_url: str, client: httpx.AsyncClient, bo_login: str = "", bo_password: str = "") -> str:
+    """Обёртка: передаёт httpx client и логин точки в iiko_auth."""
+    return await get_bo_token(bo_url, client=client, bo_login=bo_login or None, bo_password=bo_password or None)
 
 
 # ---------------------------------------------------------------------------
@@ -708,7 +710,7 @@ async def _seed_sessions_from_db(state):
 
 async def _full_load(state: BranchState, client: httpx.AsyncClient) -> None:
     """Полная загрузка всех событий с начала дня."""
-    token = await _get_token(state.bo_url, client)
+    token = await _get_token(state.bo_url, client, state.bo_login, state.bo_password)
     await _load_employees(state.bo_url, client, token)
 
     resp = await client.get(
@@ -742,7 +744,7 @@ async def _full_load(state: BranchState, client: httpx.AsyncClient) -> None:
 
 async def _incremental_poll(state: BranchState, client: httpx.AsyncClient) -> None:
     """Инкрементальный опрос новых событий с ревизии state.revision."""
-    token = await _get_token(state.bo_url, client)
+    token = await _get_token(state.bo_url, client, state.bo_login, state.bo_password)
 
     resp = await client.get(
         f"{state.bo_url}/api/events?from_rev={state.revision}&key={token}",
@@ -807,7 +809,12 @@ async def poll_all_branches() -> None:
         if not bo_url:
             continue
         if name not in _states:
-            _states[name] = BranchState(bo_url=bo_url, branch_name=name)
+            _states[name] = BranchState(
+                bo_url=bo_url,
+                branch_name=name,
+                bo_login=branch.get("bo_login", ""),
+                bo_password=branch.get("bo_password", ""),
+            )
 
     async def _poll_branch(branch: dict) -> None:
         name = branch["name"]

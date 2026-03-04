@@ -18,7 +18,7 @@ import httpx
 from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import _states
 from app.config import get_settings
-from app.db import BACKEND, get_pool
+from app.db import BACKEND, get_pool, get_branches
 
 logger = logging.getLogger(__name__)
 
@@ -26,14 +26,15 @@ LOCAL_UTC_OFFSET = 7
 
 
 async def _fetch_cancelled_from_server(
-    bo_url: str, date_from: str, date_to: str
+    bo_url: str, date_from: str, date_to: str,
+    bo_login: str | None = None, bo_password: str | None = None,
 ) -> list[dict]:
     """
     Запрашивает OLAP v2 для одного BO-сервера.
     Возвращает [{delivery_num, cancel_cause, branch_name}] — только отменённые.
     """
     try:
-        token = await get_bo_token(bo_url)
+        token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
     except Exception as e:
         logger.warning(f"cancel_sync: token error for {bo_url}: {e}")
         return []
@@ -90,29 +91,41 @@ async def _fetch_cancelled_from_server(
         return []
 
 
-async def job_cancel_sync() -> None:
+async def job_cancel_sync(tenant_id: int = 1) -> None:
     """
     Основной job: опрашивает все BO-серверы, получает отменённые заказы,
     обновляет orders_raw.status + cancel_reason, убирает из _states.
     """
-    settings = get_settings()
+    branches = get_branches(tenant_id)
+    if not branches:
+        return
+
+    utc_offset = branches[0].get("utc_offset", LOCAL_UTC_OFFSET)
     now_local = (
-        datetime.now(tz=timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET)
+        datetime.now(tz=timezone.utc) + timedelta(hours=utc_offset)
     ).replace(tzinfo=None)
     today_iso = now_local.strftime("%Y-%m-%d")
     yesterday_iso = (now_local - timedelta(days=1)).strftime("%Y-%m-%d")
     tomorrow_iso = (now_local + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
         url = branch.get("bo_url", "")
-        if url:
-            by_url[url].add(branch["name"])
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     all_cancelled: list[dict] = []
-    for bo_url, branch_names in by_url.items():
+    for (bo_url, _, __), srv in by_server.items():
+        branch_names = srv["names"]
         # Покрываем вчера+сегодня, чтобы к утреннему аудиту причины отмен были заполнены
-        cancelled = await _fetch_cancelled_from_server(bo_url, yesterday_iso, tomorrow_iso)
+        cancelled = await _fetch_cancelled_from_server(bo_url, yesterday_iso, tomorrow_iso,
+                                                       srv["login"], srv["password"])
         for c in cancelled:
             if c["branch_name"] in branch_names:
                 all_cancelled.append(c)
@@ -181,8 +194,10 @@ async def job_cancel_sync() -> None:
             if stale_dates:
                 extra_from = stale_dates[0]
                 extra_to = stale_cutoff
-                for bo_url, branch_names in by_url.items():
-                    rows = await _fetch_cancelled_from_server(bo_url, extra_from, extra_to)
+                for (bo_url, _, __), srv in by_server.items():
+                    branch_names = srv["names"]
+                    rows = await _fetch_cancelled_from_server(bo_url, extra_from, extra_to,
+                                                             srv["login"], srv["password"])
                     for c in rows:
                         if c["branch_name"] in branch_names:
                             cancelled_lookup[(c["branch_name"], c["delivery_num"])] = c

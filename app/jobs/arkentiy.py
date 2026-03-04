@@ -25,7 +25,6 @@ import re
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-import aiosqlite
 import httpx
 
 from app.jobs import bank_statement
@@ -39,10 +38,11 @@ from app.clients.iiko_bo_events import (
     _parse_customer_phone,
 )
 from app.config import get_settings
-from app.db import DB_PATH, BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
+from app.db import BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
 from app.database_pg import get_pool
 from app.services import access_manager
-from app.jobs.daily_report import _format_branch_report, _fmt_money
+from app.jobs.daily_report import _format_branch_report
+from app.utils.formatting import fmt_money as _fmt_money
 from app.jobs.iiko_status_report import (
     format_branch_status,
     get_available_branches,
@@ -961,56 +961,6 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
 
         rows = [dict(r) for r in pg_rows]
 
-    else:
-        def _city_clause() -> tuple[str, list]:
-            if city_branch_names:
-                placeholders = ",".join("?" * len(city_branch_names))
-                return f"AND branch_name IN ({placeholders})", list(city_branch_names)
-            return "", []
-
-        city_sql, city_params = _city_clause()
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-
-            if is_numeric:
-                async with db.execute(
-                    f"SELECT {COLS} FROM orders_raw WHERE delivery_num = ? {city_sql} ORDER BY planned_time DESC",
-                    (query, *city_params),
-                ) as cur:
-                    rows = [dict(r) for r in await cur.fetchall()]
-                query_type = "numeric"
-
-            elif is_phone:
-                phone_q = query.lstrip("+")
-                async with db.execute(
-                    f"""SELECT {COLS} FROM orders_raw
-                        WHERE (client_phone LIKE ? OR client_phone LIKE ?)
-                        {city_sql}
-                        ORDER BY planned_time DESC LIMIT 30""",
-                    (f"%{phone_q}%", f"%{query}%", *city_params),
-                ) as cur:
-                    rows = [dict(r) for r in await cur.fetchall()]
-                query_type = "phone"
-
-            else:
-                async with db.execute(
-                    f"""SELECT COUNT(*) FROM orders_raw
-                        WHERE (delivery_num LIKE ? OR client_phone LIKE ?
-                           OR delivery_address LIKE ? OR items LIKE ?) {city_sql}""",
-                    (q, q, q, q, *city_params),
-                ) as cur:
-                    total = (await cur.fetchone())[0]
-                async with db.execute(
-                    f"""SELECT {COLS} FROM orders_raw
-                        WHERE (delivery_num LIKE ? OR client_phone LIKE ?
-                           OR delivery_address LIKE ? OR items LIKE ?) {city_sql}
-                        ORDER BY planned_time DESC LIMIT 20""",
-                    (q, q, q, q, *city_params),
-                ) as cur:
-                    rows = [dict(r) for r in await cur.fetchall()]
-                query_type = "text"
-
     if not rows:
         await _send(chat_id, f"🔍 <code>{html.escape(query)}</code> — ничего не найдено.")
         return
@@ -1586,51 +1536,6 @@ async def _handle_day_delays(chat_id: int, arg: str, city_filter=None) -> None:
             tenant_id, date, branch_names,
         )
         pickup_late = [dict(r) for r in pickup_pg]
-
-    else:
-        placeholders = ",".join("?" * len(branch_names))
-        params_filter = tuple(branch_names)
-
-        async with aiosqlite.connect(DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
-
-            # Статистика: доставки и самовывозы по каждой точке
-            async with db.execute(
-                f"""SELECT branch_name,
-                           SUM(CASE WHEN is_self_service=0 THEN 1 ELSE 0 END) AS delivery_cnt,
-                           SUM(CASE WHEN is_self_service=1 THEN 1 ELSE 0 END) AS pickup_cnt
-                   FROM orders_raw
-                   WHERE date = ?
-                     AND status IN ('Доставлена','Закрыта')
-                     AND branch_name IN ({placeholders})
-                   GROUP BY branch_name""",
-                (date,) + params_filter,
-            ) as cur:
-                stats_rows = {r["branch_name"]: dict(r) for r in await cur.fetchall()}
-
-            # Опоздавшие доставки
-            async with db.execute(
-                f"""SELECT branch_name, delivery_num, courier, client_name,
-                           planned_time, late_minutes, sum
-                   FROM orders_raw
-                   WHERE date = ? AND is_late = 1 AND is_self_service = 0
-                     AND branch_name IN ({placeholders})
-                   ORDER BY branch_name, late_minutes DESC""",
-                (date,) + params_filter,
-            ) as cur:
-                delivery_late = [dict(r) for r in await cur.fetchall()]
-
-            # Опоздавшие самовывозы
-            async with db.execute(
-                f"""SELECT branch_name, delivery_num, client_name,
-                           planned_time, actual_time, late_minutes, sum, ready_time
-                   FROM orders_raw
-                   WHERE date = ? AND is_late = 1 AND is_self_service = 1
-                     AND branch_name IN ({placeholders})
-                   ORDER BY branch_name, late_minutes DESC""",
-                (date,) + params_filter,
-            ) as cur:
-                pickup_late = [dict(r) for r in await cur.fetchall()]
 
     total_late_d = len(delivery_late)
     total_late_p = len(pickup_late)

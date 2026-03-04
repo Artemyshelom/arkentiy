@@ -5,43 +5,22 @@ Cabinet API — личный кабинет клиента.
 tenant_id берётся из JWT payload, данные изолированы по тенанту.
 """
 
-import hashlib
 import json
 import logging
 from datetime import datetime, timedelta
 from typing import Optional
 
-import bcrypt
 import httpx
 import jwt
 from fastapi import APIRouter, HTTPException, Depends, Header
 from pydantic import BaseModel
 
 from app.config import get_settings
+from app.services.auth import JWT_ALGO, _jwt_secret, hash_password, verify_password
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cabinet", tags=["Cabinet"])
-
-JWT_ALGO = "HS256"
-
-
-# =====================================================================
-# Auth helpers (exported — used by onboarding.py)
-# =====================================================================
-
-def _jwt_secret() -> str:
-    return get_settings().jwt_secret
-
-
-def hash_password(plain: str) -> str:
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt()).decode()
-
-
-def verify_password(plain: str, hashed: str) -> bool:
-    if len(hashed) == 64 and all(c in "0123456789abcdef" for c in hashed):
-        return hashlib.sha256(plain.encode()).hexdigest() == hashed
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
 
 
 def get_tenant_id(authorization: str = Header(None)) -> int:
@@ -519,7 +498,11 @@ async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
 
     try:
         from app.clients.iiko_auth import get_bo_token
-        token = await get_bo_token(cred["bo_url"])
+        token = await get_bo_token(
+            cred["bo_url"],
+            bo_login=cred.get("bo_login") or None,
+            bo_password=cred.get("bo_password") or None,
+        )
         return {"status": "ok" if token else "error", "response_time_ms": 500}
     except Exception as e:
         return {"status": "error", "error": str(e)[:200]}

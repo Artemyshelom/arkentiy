@@ -9,26 +9,16 @@ Real-time данные (заказы, смены): app/clients/iiko_bo_events.py
 
 import html
 import logging
-from datetime import datetime, timezone, timedelta
+from datetime import datetime
 
 from app.clients.iiko_bo_events import get_branch_rt
 from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats
 from app.config import get_settings
 from app.db import aggregate_orders_today
+from app.utils.timezone import branch_tz, now_local
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-
-def branch_tz(branch: dict) -> timezone:
-    offset = branch.get("utc_offset", 7)
-    return timezone(timedelta(hours=offset))
-
-
-def now_local(tz: timezone | None = None) -> datetime:
-    if tz is None:
-        tz = settings.default_tz
-    return datetime.now(tz)
 
 
 async def get_branch_status(branch: dict) -> dict:
@@ -216,9 +206,8 @@ def get_available_branches(query: str | frozenset | None = None) -> list[dict]:
         from app.ctx import ctx_tenant_id
         from app.db import get_branches
         tenant_id = ctx_tenant_id.get()
-        branches = get_branches(tenant_id) if tenant_id != 1 else settings.branches
-        # Fallback: если кэш пуст для другого тенанта, используем настройки (это не идеально, но лучше чем ничего)
-        if not branches and tenant_id != 1:
+        branches = get_branches(tenant_id)
+        if not branches:
             branches = settings.branches
     except Exception:
         branches = settings.branches

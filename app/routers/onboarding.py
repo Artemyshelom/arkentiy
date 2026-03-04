@@ -17,7 +17,7 @@ from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.config import get_settings
-from app.routers.cabinet import hash_password, JWT_ALGO
+from app.services.auth import hash_password, JWT_ALGO
 
 logger = logging.getLogger(__name__)
 

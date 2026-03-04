@@ -33,6 +33,7 @@ from app.config import get_settings
 from app.db import (
     BACKEND,
     clear_audit_events,
+    get_all_branches,
     get_audit_events,
     get_module_chats_for_city,
     get_pool,
@@ -43,6 +44,14 @@ from app.clients.iiko_auth import get_bo_token
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _all_branches_map() -> dict[str, str]:
+    """branch_name → city для всех тенантов."""
+    try:
+        return {b["name"]: b.get("city", "") for b in get_all_branches()}
+    except Exception:
+        return {b["name"]: b.get("city", "") for b in (settings.branches or [])}
 
 # ---------------------------------------------------------------------------
 # Настройки порогов
@@ -222,8 +231,7 @@ async def _detect_unclosed_in_transit(date_str: str) -> list[dict]:
     """Живая проверка незакрытых заказов 'В пути к клиенту' из прошлых дней."""
     findings: list[dict] = []
     now_iso = datetime.now(timezone.utc).isoformat()
-    branches = settings.branches or []
-    branch_to_city = {b["name"]: b.get("city", "") for b in branches}
+    branch_to_city = _all_branches_map()
     pool = get_pool()
 
     rows = await pool.fetch(
@@ -272,8 +280,7 @@ async def _generate_audit_for_date(date_str: str) -> list[dict]:
     Без unclosed_in_transit (те генерируются живо).
     Включает дедупликацию cancel > storno.
     """
-    branches = settings.branches or []
-    branch_to_city = {b["name"]: b.get("city", "") for b in branches}
+    branch_to_city = _all_branches_map()
 
     all_findings = await _detect_from_orders_raw(date_str)
 
@@ -319,19 +326,26 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
     date_from = date_str
     date_to = (d + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    branches = settings.branches or []
-    branch_to_city = {b["name"]: b.get("city", "") for b in branches}
+    all_branches = get_all_branches()
+    branch_to_city = {b["name"]: b.get("city", "") for b in all_branches}
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in all_branches:
         url = branch.get("bo_url", "")
-        if url:
-            by_url[url].add(branch["name"])
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
-    async def _query_server(bo_url: str, target_names: set[str]) -> list[dict]:
+    async def _query_server(bo_url: str, target_names: set[str],
+                            bo_login=None, bo_password=None) -> list[dict]:
         server_findings: list[dict] = []
         try:
-            token = await get_bo_token(bo_url)
+            token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
         except Exception as e:
             logger.warning(f"[audit] storno_discount: auth error {bo_url}: {e}")
             return server_findings
@@ -461,7 +475,8 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
 
         return server_findings
 
-    tasks = [_query_server(url, names) for url, names in by_url.items()]
+    tasks = [_query_server(url, srv["names"], srv["login"], srv["password"])
+             for (url, _, __), srv in by_server.items()]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
     for result in results:
@@ -493,7 +508,9 @@ async def _probe_cash_shifts(branch: dict, date_str: str) -> None:
     base = bo_url
 
     try:
-        token = await get_bo_token(bo_url)
+        token = await get_bo_token(bo_url,
+                                   bo_login=branch.get("bo_login") or None,
+                                   bo_password=branch.get("bo_password") or None)
         async with httpx.AsyncClient(verify=False, timeout=20) as client:
             resp = await client.get(
                 f"{base}/api/v2/cashShifts",
@@ -760,7 +777,7 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
     branch_filter: Optional[str] = None
     city_query: Optional[str] = None
 
-    branches = settings.branches or []
+    branches = get_all_branches()
     branch_names = [b["name"] for b in branches]
     cities = list({b.get("city", "") for b in branches if b.get("city")})
 
@@ -803,7 +820,7 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
     # Live unclosed (всегда свежие, не из кэша)
     unclosed = await _detect_unclosed_in_transit(date_str)
     if city_query:
-        branch_to_city = {b["name"]: b.get("city", "") for b in (settings.branches or [])}
+        branch_to_city = _all_branches_map()
         unclosed = [u for u in unclosed if branch_to_city.get(u["branch_name"], "") == city_query]
     if branch_filter:
         unclosed = [u for u in unclosed if u["branch_name"] == branch_filter]

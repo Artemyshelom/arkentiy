@@ -16,12 +16,11 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
-import aiosqlite
 import httpx
 
 from app.clients.iiko_auth import get_bo_token
 from app.config import get_settings
-from app.db import DB_PATH, BACKEND, log_job_finish, log_job_start
+from app.db import get_branches, log_job_finish, log_job_start
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +54,11 @@ def _olap_body(date_from: str, date_to: str) -> dict:
 
 
 async def _fetch_enrichment(
-    bo_url: str, date_from: str, date_to: str
+    bo_url: str, date_from: str, date_to: str,
+    bo_login: str | None = None, bo_password: str | None = None,
 ) -> list[dict]:
     try:
-        token = await get_bo_token(bo_url)
+        token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
     except Exception as e:
         logger.warning(f"olap_enrichment: token error {bo_url}: {e}")
         return []
@@ -152,61 +152,74 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
     return result
 
 
-async def _update_orders_raw(enriched: dict) -> int:
-    """Обновляет orders_raw OLAP-полями. Не перезатирает непустые значения."""
+async def _update_orders_raw(enriched: dict, tenant_id: int) -> int:
+    """Обновляет orders_raw OLAP-полями (PostgreSQL). Не перезатирает непустые значения."""
     if not enriched:
         return 0
-    if BACKEND != "sqlite":
-        logger.warning("olap_enrichment._update_orders_raw: PG backend не реализован, пропуск")
-        return 0
+    from app.database_pg import get_pool
+
+    pool = get_pool()
     updated = 0
-    async with aiosqlite.connect(DB_PATH) as db:
-        for (branch, num), data in enriched.items():
-            sets = []
-            vals = []
-            for col, val in [
-                ("payment_type", data["payment_type"]),
-                ("pay_breakdown", data["pay_breakdown"]),
-                ("discount_type", data["discount_type"]),
-                ("source", data["source"]),
-                ("send_time", data["send_time"]),
-                ("service_print_time", data["service_print_time"]),
-                ("cooked_time", data["cooked_time"]),
-                ("opened_at", data["opened_at"]),
-            ]:
-                if val:
-                    sets.append(
-                        f"{col} = CASE WHEN {col} IS NULL OR {col} = '' "
-                        f"THEN ? ELSE {col} END"
-                    )
-                    vals.append(val)
+    for (branch, num), data in enriched.items():
+        sets = []
+        vals: list = [tenant_id]  # $1 = tenant_id
+        idx = 2
 
-            if not sets:
-                continue
+        for col, val in [
+            ("payment_type", data["payment_type"]),
+            ("pay_breakdown", data["pay_breakdown"]),
+            ("discount_type", data["discount_type"]),
+            ("source", data["source"]),
+            ("send_time", data["send_time"]),
+            ("service_print_time", data["service_print_time"]),
+            ("cooked_time", data["cooked_time"]),
+            ("opened_at", data["opened_at"]),
+        ]:
+            if val:
+                sets.append(
+                    f"{col} = CASE WHEN {col} IS NULL OR {col} = '' "
+                    f"THEN ${idx} ELSE {col} END"
+                )
+                vals.append(val)
+                idx += 1
 
-            sql = (
-                f"UPDATE orders_raw SET {', '.join(sets)}, "
-                f"updated_at = ? "
-                f"WHERE branch_name = ? AND delivery_num = ?"
-            )
-            vals.extend([
-                datetime.now(timezone.utc).isoformat(),
-                branch,
-                num,
-            ])
-            cursor = await db.execute(sql, vals)
-            updated += cursor.rowcount
+        if not sets:
+            continue
 
-        await db.commit()
+        vals.append(datetime.now(timezone.utc).isoformat())
+        updated_at_idx = idx
+        idx += 1
+        vals.append(branch)
+        branch_idx = idx
+        idx += 1
+        vals.append(num)
+        num_idx = idx
+
+        sql = (
+            f"UPDATE orders_raw SET {', '.join(sets)}, "
+            f"updated_at = ${updated_at_idx} "
+            f"WHERE tenant_id = $1 AND branch_name = ${branch_idx} "
+            f"AND delivery_num = ${num_idx}"
+        )
+        result = await pool.execute(sql, *vals)
+        count_str = result.split()[-1]
+        if count_str.isdigit():
+            updated += int(count_str)
+
     return updated
 
 
-async def job_olap_enrichment() -> None:
+async def job_olap_enrichment(tenant_id: int = 1) -> None:
     """Основной job: обогащает orders_raw за вчера данными из OLAP v2."""
-    log_id = await log_job_start("olap_enrichment")
-    settings = get_settings()
+    log_id = await log_job_start(f"olap_enrichment_t{tenant_id}")
 
-    now_local = datetime.now(timezone.utc) + timedelta(hours=LOCAL_UTC_OFFSET)
+    branches = get_branches(tenant_id)
+    if not branches:
+        await log_job_finish(log_id, "ok", f"Нет точек для tenant_id={tenant_id}")
+        return
+
+    utc_offset = branches[0].get("utc_offset", LOCAL_UTC_OFFSET)
+    now_local = datetime.now(timezone.utc) + timedelta(hours=utc_offset)
     yesterday = now_local - timedelta(days=1)
     yesterday_iso = yesterday.strftime("%Y-%m-%d")
     today_iso = now_local.strftime("%Y-%m-%d")
@@ -217,24 +230,26 @@ async def job_olap_enrichment() -> None:
     else:
         date_from = yesterday_iso
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
         url = branch.get("bo_url", "")
-        if url:
-            by_url[url].add(branch["name"])
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     all_enriched: dict = {}
-    tasks = []
-    for bo_url, names in by_url.items():
-        tasks.append((bo_url, names))
-
-    for bo_url, names in tasks:
-        rows = await _fetch_enrichment(bo_url, date_from, today_iso)
-        enriched = _aggregate_by_order(rows, names)
+    for (bo_url, _, __), srv in by_server.items():
+        rows = await _fetch_enrichment(bo_url, date_from, today_iso, srv["login"], srv["password"])
+        enriched = _aggregate_by_order(rows, srv["names"])
         all_enriched.update(enriched)
 
     total = len(all_enriched)
-    updated = await _update_orders_raw(all_enriched)
+    updated = await _update_orders_raw(all_enriched, tenant_id)
 
     period = f"{date_from}..{yesterday_iso}" if is_monday else yesterday_iso
     detail = f"period={period}, orders={total}, updated={updated}"

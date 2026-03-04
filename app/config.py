@@ -84,7 +84,7 @@ class Settings(BaseSettings):
 
     # Приложение
     log_level: str = "INFO"
-    database_url: str = "sqlite+aiosqlite:////app/data/app.db"
+    database_url: str = ""  # DATABASE_URL env var (postgresql://...)
 
     @property
     def competitor_sheets(self) -> dict[str, str]:

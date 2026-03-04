@@ -22,6 +22,8 @@ from app.db import (
     log_job_start,
     upsert_daily_stats_batch,
 )
+from app.utils.formatting import fmt_money as _fmt_money, fmt_num as _fmt_num, fmt_pct as _fmt_pct
+from app.utils.timezone import tz_from_offset as _branch_tz
 
 try:
     from app.db import get_all_branches as _get_all_branches, get_module_chats_for_city as _get_module_chats
@@ -31,31 +33,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
-
-
-def _branch_tz(utc_offset: int) -> timezone:
-    return timezone(timedelta(hours=utc_offset))
-
-
-def _fmt_money(v) -> str:
-    try:
-        return f"{int(v):,} ₽".replace(",", " ")
-    except (TypeError, ValueError):
-        return "—"
-
-
-def _fmt_num(v) -> str:
-    try:
-        return str(int(v))
-    except (TypeError, ValueError):
-        return "—"
-
-
-def _fmt_pct(v) -> str:
-    try:
-        return f"{float(v):.1f}%"
-    except (TypeError, ValueError):
-        return "—"
 
 
 def _format_branch_report(
@@ -182,7 +159,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
         return
 
     try:
-        all_stats = await get_all_branches_stats(yesterday)
+        all_stats = await get_all_branches_stats(yesterday, branches=branches)
     except Exception as e:
         logger.error(f"Ошибка iiko BO в утреннем отчёте: {e}")
         await telegram.error_alert(f"morning_report_utc{utc_offset}", str(e))

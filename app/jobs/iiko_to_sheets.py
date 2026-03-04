@@ -27,11 +27,12 @@ from app.clients.google_sheets import (
 from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.db import (
+    get_branches,
     log_job_finish,
     log_job_start,
     record_data_update,
 )
-from app.jobs.iiko_status_report import branch_tz
+from app.utils.timezone import branch_tz
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -164,19 +165,24 @@ def _safe_float(v) -> float | None:
         return None
 
 
-async def _compare_and_update_date(date: datetime, index: dict[str, dict[str, int]]) -> list[str]:
+async def _compare_and_update_date(
+    date: datetime,
+    index: dict[str, dict[str, int]],
+    branches: list[dict] | None = None,
+) -> list[str]:
     """
     Сравнивает данные в Sheets с iiko BO за дату.
     Обновляет строки если данные изменились.
     Возвращает список названий точек где были изменения.
     """
     date_iso = date.strftime("%Y-%m-%d")
-    branches = settings.branches
+    if branches is None:
+        branches = settings.branches
     if not branches or date_iso not in index:
         return []
 
     try:
-        all_stats = await get_all_branches_stats(date)
+        all_stats = await get_all_branches_stats(date, branches=branches)
     except Exception as e:
         logger.error(f"Ошибка iiko BO при перепроверке за {date_iso}: {e}")
         return []
@@ -226,17 +232,18 @@ async def _compare_and_update_date(date: datetime, index: dict[str, dict[str, in
     return changed
 
 
-async def export_day(date: datetime) -> list[list]:
+async def export_day(date: datetime, branches: list[dict] | None = None) -> list[list]:
     """
     Выгружает данные за один день. Возвращает список строк для Sheets.
     Используется и в ежедневном джобе, и при бэкфилле.
     """
-    branches = settings.branches
+    if branches is None:
+        branches = settings.branches
     if not branches:
-        logger.error("branches.json пуст")
+        logger.error("Нет точек для выгрузки")
         return []
 
-    all_stats = await get_all_branches_stats(date)
+    all_stats = await get_all_branches_stats(date, branches=branches)
     date_iso = date.strftime("%Y-%m-%d")
     rows = []
     for branch in branches:
@@ -286,9 +293,9 @@ async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
         await log_job_finish(log_id, "error", "GOOGLE_SHEETS_IIKO_ID не задан")
         return
 
-    branches = settings.branches
+    branches = get_branches(tenant_id)
     if not branches:
-        await log_job_finish(log_id, "error", "Нет точек в branches.json")
+        await log_job_finish(log_id, "error", f"Нет точек для tenant_id={tenant_id}")
         return
 
     tz = branch_tz(branches[0])
@@ -313,7 +320,7 @@ async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
     written = 0
     if not date_in_sheets:
         try:
-            rows = await export_day(today)
+            rows = await export_day(today, branches=branches)
         except Exception as e:
             logger.error(f"Ошибка сбора данных: {e}")
             await telegram.error_alert("iiko_to_sheets", str(e))
@@ -335,7 +342,7 @@ async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
         logger.info(f"Строки за {date_display} уже есть в Sheets — пропускаем append")
 
     # --- 2.2: Перепроверка текущего дня ---
-    changed = await _compare_and_update_date(today, index)
+    changed = await _compare_and_update_date(today, index, branches=branches)
     if changed:
         logger.info(f"Перепроверка {date_display}: обновлено точек: {len(changed)}")
     else:
@@ -347,13 +354,13 @@ async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
         logger.info("Понедельник: еженедельная перепроверка за 7 дней")
         for days_back in range(1, 7):
             past_date = today - timedelta(days=days_back)
-            weekly_changed = await _compare_and_update_date(past_date, index)
+            weekly_changed = await _compare_and_update_date(past_date, index, branches=branches)
             if weekly_changed:
                 logger.info(f"Обновлено за {past_date.strftime('%d.%m.%Y')}: {len(weekly_changed)} точек")
 
     # Итоговое уведомление
     try:
-        rows_for_notify = await export_day(today)
+        rows_for_notify = await export_day(today, branches=branches)
         total = sum(
             r[COL_REVENUE] for r in rows_for_notify if isinstance(r[COL_REVENUE], int)
         )

@@ -37,9 +37,7 @@ from app.routers.payments import router as payments_router
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
 from app.jobs.olap_enrichment import job_olap_enrichment
-# from app.jobs.telegram_commands import poll_telegram_commands  # Арсений отключён, заменён Аркентием
 from app.clients.iiko_bo_events import job_poll_iiko_events
-from app.monitoring.healthcheck import job_backup_sqlite
 from app.jobs.competitor_monitor import job_monitor_competitors
 from app.jobs.arkentiy import poll_analytics_bot, run_polling_loop
 from app.jobs.late_alerts import job_late_alerts
@@ -48,6 +46,7 @@ from app.jobs.audit import job_audit_report
 from app.jobs.cancel_sync import job_cancel_sync
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
+from app.utils.tenant import run_for_all_tenants
 
 settings = get_settings()
 
@@ -64,9 +63,6 @@ scheduler = AsyncIOScheduler(timezone="Europe/Moscow")
 def register_jobs() -> None:
     """Регистрирует все задачи в планировщике."""
 
-    # Арсений (telegram_commands.py) — отключён, заменён Аркентием (analytics_bot.py)
-    # scheduler.add_job(poll_telegram_commands, trigger=IntervalTrigger(seconds=3), ...)
-
     # iiko Events API (real-time заказы): каждые 30 секунд
     scheduler.add_job(
         job_poll_iiko_events,
@@ -78,44 +74,38 @@ def register_jobs() -> None:
     )
 
 
-    # ОТКЛЮЧЕНО: Стоп-лист iiko → Telegram (временно, коряво работает)
-    # scheduler.add_job(
-    #     job_check_stoplist,
-    #     trigger=IntervalTrigger(minutes=5),
-    #     id="iiko_stoplist",
-    #     name="Стоп-лист iiko → Telegram",
-    #     replace_existing=True,
-    #     misfire_grace_time=60,
-    # )
+    # OLAP enrichment orders_raw: каждый час в :00, за 25 мин до утреннего отчёта.
+    # Обогащает только тенантов, у которых сейчас 09:00 местного.
+    async def _olap_enrichment_by_tz():
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from app.db import get_all_branches
+        from app.ctx import ctx_tenant_id
+        msk_now = _dt.now(_tz(_td(hours=3)))
+        target_offset = 12 - msk_now.hour
+        all_branches = get_all_branches()
+        # Собираем tenant_id, у которых есть точки с нужным offset
+        tenant_ids = {b["tenant_id"] for b in all_branches if b.get("utc_offset", 7) == target_offset}
+        for tid in sorted(tenant_ids):
+            token = ctx_tenant_id.set(tid)
+            try:
+                await job_olap_enrichment(tenant_id=tid)
+            except Exception as e:
+                logger.error(f"olap_enrichment UTC+{target_offset} tenant={tid}: {e}", exc_info=True)
+            finally:
+                ctx_tenant_id.reset(token)
 
-    # OLAP enrichment orders_raw: 09:00 местного = 05:00 МСК (перед утренним отчётом)
     scheduler.add_job(
-        job_olap_enrichment,
-        trigger=CronTrigger(hour=5, minute=0),
+        _olap_enrichment_by_tz,
+        trigger=CronTrigger(minute=0),  # каждый час в :00
         id="olap_enrichment",
-        name="OLAP обогащение orders_raw",
+        name="OLAP обогащение orders_raw (по таймзонам)",
         replace_existing=True,
         misfire_grace_time=300,
     )
 
-    # Выгрузка iiko → Google Sheets: 05:26 МСК (23:31 местного для первого филиала)
-    # MULTI-TENANT: запускаем для каждого tenant отдельно
-    async def _run_export_for_all_tenants():
-        """Запускает export_iiko_to_sheets для каждого активного tenant."""
-        try:
-            from app.database_pg import get_pool as _get_pg_pool
-            pool = _get_pg_pool()
-            tenant_ids = await pool.fetch("SELECT id FROM tenants WHERE status = 'active'")
-            for row in tenant_ids:
-                try:
-                    await job_export_iiko_to_sheets(tenant_id=row["id"])
-                except Exception as e:
-                    logger.error(f"Ошибка export iiko sheets для tenant_id={row['id']}: {e}")
-        except Exception as e:
-            logger.error(f"Ошибка в _run_export_for_all_tenants: {e}")
-    
+    # Выгрузка iiko → Google Sheets: 05:26 МСК
     scheduler.add_job(
-        _run_export_for_all_tenants,
+        run_for_all_tenants(job_export_iiko_to_sheets),
         trigger=CronTrigger(hour=5, minute=26),
         id="iiko_to_sheets",
         name="iiko заказы → Google Sheets (все тенанты)",
@@ -123,40 +113,6 @@ def register_jobs() -> None:
         misfire_grace_time=300,
     )
 
-
-
-    # ОТКЛЮЧЕНО: Пре-встречные саммари (временно, коряво работает)
-    # scheduler.add_job(
-    #     job_check_upcoming_meetings,
-    #     trigger=IntervalTrigger(minutes=15),
-    #     id="pre_meeting",
-    #     name="Пре-встречные саммари → Telegram",
-    #     replace_existing=True,
-    #     misfire_grace_time=60,
-    # )
-
-    # Просроченные здачи Битрикс24: отключено
-    # scheduler.add_job(
-    #     job_check_overdue_tasks,
-    #     trigger=CronTrigger(hour=9, minute=0),
-    #     id="task_tracker",
-    #     name="Просроченные задачи Битрикс24 → Telegram",
-    #     replace_existing=True,
-    #     misfire_grace_time=300,
-    # )
-
-    # Heartbeat отключён — уведомления только при старте/падении через Аркентий
-    # scheduler.add_job(job_send_heartbeat, trigger=IntervalTrigger(minutes=30), ...)
-
-    # Бэкап SQLite в Google Drive: каждую ночь в 02:00
-    scheduler.add_job(
-        job_backup_sqlite,
-        trigger=CronTrigger(hour=2, minute=0),
-        id="backup_sqlite",
-        name="Бэкап SQLite → Google Drive",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
 
     # Мониторинг цен конкурентов: каждое воскресенье в 10:00 МСК
     scheduler.add_job(
@@ -178,34 +134,59 @@ def register_jobs() -> None:
         misfire_grace_time=60,
     )
 
-    # Утренний отчёт UTC+7: 09:25 лок = 05:25 МСК (после OLAP enrichment)
+    # Утренний отчёт: каждый час в :25, шлём тем offset'ам, у которых сейчас 09:25 местного.
+    # Scheduler в Europe/Moscow (UTC+3). Формула: target_offset = current_msk_hour + 3 + (25/60≈0) → round.
+    # Проще: если сейчас H:25 МСК, local_hour = H + (offset - 3). Нужно local_hour == 9.
+    # Значит offset = 9 - H + 3 = 12 - H.
+    async def _morning_report_by_tz():
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from app.db import get_all_branches
+        msk_now = _dt.now(_tz(_td(hours=3)))
+        target_offset = 12 - msk_now.hour  # offset, для которого сейчас 09:xx местного
+        offsets = {b.get("utc_offset", 7) for b in get_all_branches()}
+        if target_offset in offsets:
+            try:
+                await job_send_morning_report(utc_offset=target_offset)
+            except Exception as e:
+                logger.error(f"morning_report UTC+{target_offset}: {e}", exc_info=True)
+
     scheduler.add_job(
-        job_send_morning_report,
-        trigger=CronTrigger(hour=5, minute=25),
-        kwargs={"utc_offset": 7},
-        id="morning_report_utc7",
-        name="Утренний отчёт UTC+7 → Telegram",
+        _morning_report_by_tz,
+        trigger=CronTrigger(minute=25),  # каждый час в :25
+        id="morning_report",
+        name="Утренний отчёт → Telegram (по таймзонам)",
         replace_existing=True,
         misfire_grace_time=600,
     )
 
-    # Аудит опасных операций UTC+7: 09:27 лок = 05:27 МСК
+    # Аудит опасных операций: каждый час в :27, аналогичная логика.
+    async def _audit_report_by_tz():
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from app.db import get_all_branches
+        msk_now = _dt.now(_tz(_td(hours=3)))
+        target_offset = 12 - msk_now.hour
+        offsets = {b.get("utc_offset", 7) for b in get_all_branches()}
+        if target_offset in offsets:
+            try:
+                await job_audit_report(utc_offset=target_offset)
+            except Exception as e:
+                logger.error(f"audit_report UTC+{target_offset}: {e}", exc_info=True)
+
     scheduler.add_job(
-        job_audit_report,
-        trigger=CronTrigger(hour=5, minute=27),
-        kwargs={"utc_offset": 7},
-        id="audit_report_utc7",
-        name="Аудит опасных операций UTC+7 → Telegram",
+        _audit_report_by_tz,
+        trigger=CronTrigger(minute=27),  # каждый час в :27
+        id="audit_report",
+        name="Аудит опасных операций → Telegram (по таймзонам)",
         replace_existing=True,
         misfire_grace_time=600,
     )
 
-    # Синхронизация отменённых заказов из OLAP v2: каждые 3 минуты
+    # Синхронизация отменённых заказов из OLAP v2: каждые 3 минуты (все тенанты)
     scheduler.add_job(
-        job_cancel_sync,
+        run_for_all_tenants(job_cancel_sync),
         trigger=IntervalTrigger(minutes=3),
         id="cancel_sync",
-        name="Синхронизация отмен (OLAP v2)",
+        name="Синхронизация отмен (OLAP v2, все тенанты)",
         replace_existing=True,
         misfire_grace_time=120,
     )
@@ -416,7 +397,7 @@ async def run_backfill(date_from: str = "2026-02-01", date_to: str | None = None
     import datetime as _dt
     from app.jobs.iiko_to_sheets import reset_sheet_and_backfill
     from app.config import get_settings as _gs
-    from app.jobs.iiko_status_report import branch_tz
+    from app.utils.timezone import branch_tz
 
     _settings = _gs()
     branches = _settings.branches

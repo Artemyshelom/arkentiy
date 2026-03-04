@@ -25,7 +25,8 @@ from typing import Optional
 import httpx
 
 from app.config import get_settings
-from app.db import BACKEND, get_pool
+from app.ctx import ctx_tenant_id
+from app.db import BACKEND, get_branches, get_pool
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -182,7 +183,9 @@ async def parse_query_with_openrouter(query_text: str) -> dict:
 
     model = settings.openrouter_model or "google/gemini-2.5-flash"
     today = date.today().strftime("%d.%m.%Y")
-    branch_table = _build_branch_table(settings.branches)
+    tenant_id = ctx_tenant_id.get()
+    branches = get_branches(tenant_id)
+    branch_table = _build_branch_table(branches)
     system = _SYSTEM_PROMPT.format(today=today, branch_table=branch_table)
 
     async with httpx.AsyncClient(timeout=30) as client:
@@ -220,9 +223,11 @@ async def parse_query_with_openrouter(query_text: str) -> dict:
 
 def _get_branches_for_city(city: str) -> list[str]:
     """Возвращает список branch_name для указанного города."""
+    tenant_id = ctx_tenant_id.get()
+    branches = get_branches(tenant_id)
     return [
         b["name"]
-        for b in settings.branches
+        for b in branches
         if b.get("city", "").lower() == city.strip().lower()
     ]
 

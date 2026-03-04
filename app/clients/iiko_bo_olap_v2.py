@@ -84,12 +84,14 @@ async def _fetch_from_server(
     date_from: str,
     date_to: str,
     include_delivery: bool = True,
+    bo_login: str | None = None,
+    bo_password: str | None = None,
 ) -> dict[str, dict]:
     """
     2 OLAP v2 запроса к одному серверу.
     Возвращает метрики только для точек из target_names.
     """
-    token = await get_bo_token(bo_url)
+    token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
     stats: dict[str, dict] = defaultdict(lambda: {
         "revenue_net": None,
         "cogs_pct": None,
@@ -161,29 +163,43 @@ async def _fetch_from_server(
     return dict(stats)
 
 
-async def get_all_branches_stats(date: datetime) -> dict[str, dict]:
+async def get_all_branches_stats(
+    date: datetime,
+    branches: list[dict] | None = None,
+) -> dict[str, dict]:
     """
     Drop-in замена iiko_bo_olap.get_all_branches_stats().
     2 OLAP v2 запроса на сервер (vs 5 XML), параллельно по серверам.
 
+    branches — список точек для запроса. Если None, берёт settings.branches (tenant_id=1).
+
     Возвращает {dept_name: {revenue_net, cogs_pct, check_count, cash, noncash,
                              sailplay, discount_sum, discount_types, pickup_count}}.
     """
+    if branches is None:
+        branches = settings.branches
     date_iso = date.strftime("%Y-%m-%d")
     next_day = (date + timedelta(days=1)).strftime("%Y-%m-%d")
     logger.info(f"OLAP v2: запрашиваю метрики за {date_iso}")
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    # Группируем по (bo_url, bo_login, bo_password) — каждый тенант со своим логином
+    by_server: dict[tuple, dict] = {}  # (bo_url, bo_login, bo_pass) → {names, login, password}
+    for branch in branches:
         url = branch.get("bo_url", "")
         if not url:
             logger.warning(f"Точка {branch['name']} без bo_url — пропущена")
             continue
-        by_url[url].add(branch["name"])
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     tasks = [
-        _fetch_from_server(url, names, date_iso, next_day, include_delivery=True)
-        for url, names in by_url.items()
+        _fetch_from_server(url, srv["names"], date_iso, next_day, include_delivery=True,
+                           bo_login=srv["login"], bo_password=srv["password"])
+        for (url, _, __), srv in by_server.items()
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -197,24 +213,37 @@ async def get_all_branches_stats(date: datetime) -> dict[str, dict]:
     return merged
 
 
-async def get_payment_breakdown(date_from: str, date_to: str) -> dict[str, dict[str, float]]:
+async def get_payment_breakdown(
+    date_from: str,
+    date_to: str,
+    branches: list[dict] | None = None,
+) -> dict[str, dict[str, float]]:
     """
     Разбивка выручки по типам оплаты для каждой точки за период.
     date_from/date_to в ISO: "2026-02-20" / "2026-02-23" (to exclusive).
+    branches — список точек. Если None, берёт settings.branches (tenant_id=1).
     Возвращает: {"Барнаул_1 Ана": {"Картой при получении": 492668.0, "Сбербанк": 199273.0, ...}}
     """
+    if branches is None:
+        branches = settings.branches
     logger.info(f"OLAP v2: payment breakdown {date_from} — {date_to}")
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
         url = branch.get("bo_url", "")
-        if url:
-            by_url[url].add(branch["name"])
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     result: dict[str, dict[str, float]] = defaultdict(lambda: defaultdict(float))
 
-    async def _fetch_payments(bo_url: str, target_names: set[str]):
-        token = await get_bo_token(bo_url)
+    async def _fetch_payments(bo_url: str, target_names: set[str], bo_login=None, bo_password=None):
+        token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
         async with httpx.AsyncClient(verify=False) as client:
             rows = await _query_olap_v2(
                 bo_url, token,
@@ -231,26 +260,42 @@ async def get_payment_breakdown(date_from: str, date_to: str) -> dict[str, dict[
                 if pay_type and amount:
                     result[dept][pay_type] += amount
 
-    tasks = [_fetch_payments(url, names) for url, names in by_url.items()]
+    tasks = [
+        _fetch_payments(url, srv["names"], srv["login"], srv["password"])
+        for (url, _, __), srv in by_server.items()
+    ]
     await asyncio.gather(*tasks, return_exceptions=True)
 
     return {k: dict(v) for k, v in result.items()}
 
 
-async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str, dict]]:
+async def get_online_orders(
+    date_from: str,
+    date_to: str,
+    branches: list[dict] | None = None,
+) -> dict[str, dict[str, dict]]:
     """
     Онлайн-заказы (ТБанк: Оплата на сайте + СБП) по точкам.
     date_from/date_to в ISO: "2026-02-17" / "2026-02-25" (to exclusive).
+    branches — список точек. Если None, берёт settings.branches (tenant_id=1).
     Возвращает: {"Барнаул_1 Ана": {"90196": {"amount": 1850.0, "date": "2026-02-24"}, ...}}
     """
+    if branches is None:
+        branches = settings.branches
     logger.info(f"OLAP v2: online orders {date_from} — {date_to}")
     ONLINE_PAY_TYPES = {"Оплата на сайте", "СБП"}
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
         url = branch.get("bo_url", "")
-        if url:
-            by_url[url].add(branch["name"])
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     result: dict[str, dict[str, dict]] = defaultdict(dict)
 
@@ -266,8 +311,8 @@ async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str,
         except Exception:
             return val
 
-    async def _fetch_online(bo_url: str, target_names: set[str]):
-        token = await get_bo_token(bo_url)
+    async def _fetch_online(bo_url: str, target_names: set[str], bo_login=None, bo_password=None):
+        token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
         async with httpx.AsyncClient(verify=False) as client:
             rows = await _query_olap_v2(
                 bo_url, token,
@@ -291,7 +336,10 @@ async def get_online_orders(date_from: str, date_to: str) -> dict[str, dict[str,
                     else:
                         result[dept][order_num] = {"amount": amount, "date": order_date}
 
-    tasks = [_fetch_online(url, names) for url, names in by_url.items()]
+    tasks = [
+        _fetch_online(url, srv["names"], srv["login"], srv["password"])
+        for (url, _, __), srv in by_server.items()
+    ]
     await asyncio.gather(*tasks, return_exceptions=True)
 
     return dict(result)

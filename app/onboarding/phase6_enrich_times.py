@@ -55,26 +55,25 @@ async def _fetch_times_from_olap(
     async with httpx.AsyncClient(verify=False, timeout=60) as client:
         token = await _get_token(bo_url, bo_login, bo_password, client)
         
-        # Пробуем несколько вариантов полей
-        # ПРИМЕЧАНИЕ: Events API уже заполняет эти поля на 95%+
-        # Phase 6 используется для дополнения оставшихся 5% через OLAP
-        # Точные имена полей в OLAP зависят от версии iiko и конфигурации
+        # Пробуем два набора полей:
+        # Вариант A — проверенные поля (Канск, Зеленогорск): CookingFinishTime, BillTime, SendTime, PrintTime
+        # Вариант B — с ReadyTime (для iiko где оно есть)
         for attempt in range(2):
             if attempt == 0:
-                # Основные поля для основных филиалов
                 group_fields = [
                     "Delivery.Number", "Department",
-                    "DeliveryTime",
-                    "CookingFinishTime",
-                    "ReadyTime",
+                    "Delivery.CookingFinishTime",
+                    "Delivery.BillTime",
+                    "Delivery.SendTime",
+                    "Delivery.PrintTime",
                 ]
             else:
-                # Альтернативные имена для разных версий iiko
                 group_fields = [
                     "Delivery.Number", "Department",
-                    "Delivery.DeliveryTime",
                     "Delivery.CookingFinishTime",
                     "Delivery.ReadyTime",
+                    "Delivery.SendTime",
+                    "Delivery.PrintTime",
                 ]
             
             try:
@@ -111,10 +110,12 @@ async def _fetch_times_from_olap(
                         
                         key = (dept, dnum)
                         result[key] = {
-                            "cooked_time": row.get("CookingFinishTime") or row.get("Delivery.CookingFinishTime"),
-                            "ready_time": row.get("ReadyTime") or row.get("Delivery.ReadyTime"),
-                            "send_time": row.get("DeliveryTime") or row.get("Delivery.DeliveryTime"),
-                            "service_print_time": row.get("TerminalPrintTime") or row.get("Delivery.TerminalPrintTime"),
+                            "cooked_time": row.get("Delivery.CookingFinishTime"),
+                            # BillTime = время выдачи курьеру = ready_time (проверено на Зеленогорске)
+                            # ReadyTime — альтернатива для iiko где BillTime нет
+                            "ready_time": row.get("Delivery.BillTime") or row.get("Delivery.ReadyTime"),
+                            "send_time": row.get("Delivery.SendTime"),
+                            "service_print_time": row.get("Delivery.PrintTime"),
                         }
                     
                     if result:

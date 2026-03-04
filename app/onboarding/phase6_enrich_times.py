@@ -56,20 +56,25 @@ async def _fetch_times_from_olap(
         token = await _get_token(bo_url, bo_login, bo_password, client)
         
         # Пробуем несколько вариантов полей
+        # ПРИМЕЧАНИЕ: Events API уже заполняет эти поля на 95%+
+        # Phase 6 используется для дополнения оставшихся 5% через OLAP
+        # Точные имена полей в OLAP зависят от версии iiko и конфигурации
         for attempt in range(2):
             if attempt == 0:
+                # Основные поля для основных филиалов
                 group_fields = [
                     "Delivery.Number", "Department",
-                    "Delivery.CookingFinishTime",
-                    "Delivery.ReadyTime",
-                    "Delivery.SendTime",
+                    "DeliveryTime",
+                    "CookingFinishTime",
+                    "ReadyTime",
                 ]
             else:
+                # Альтернативные имена для разных версий iiko
                 group_fields = [
                     "Delivery.Number", "Department",
-                    "OrderItemsCookingTime",
-                    "Delivery.TerminalPrintTime",
-                    "Delivery.CourierAssignmentTime",
+                    "Delivery.DeliveryTime",
+                    "Delivery.CookingFinishTime",
+                    "Delivery.ReadyTime",
                 ]
             
             try:
@@ -106,10 +111,10 @@ async def _fetch_times_from_olap(
                         
                         key = (dept, dnum)
                         result[key] = {
-                            "cooked_time": row.get("Delivery.CookingFinishTime") or row.get("OrderItemsCookingTime"),
-                            "ready_time": row.get("Delivery.ReadyTime"),
-                            "send_time": row.get("Delivery.SendTime") or row.get("Delivery.CourierAssignmentTime"),
-                            "service_print_time": row.get("Delivery.TerminalPrintTime"),
+                            "cooked_time": row.get("CookingFinishTime") or row.get("Delivery.CookingFinishTime"),
+                            "ready_time": row.get("ReadyTime") or row.get("Delivery.ReadyTime"),
+                            "send_time": row.get("DeliveryTime") or row.get("Delivery.DeliveryTime"),
+                            "service_print_time": row.get("TerminalPrintTime") or row.get("Delivery.TerminalPrintTime"),
                         }
                     
                     if result:

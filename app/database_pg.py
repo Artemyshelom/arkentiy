@@ -221,11 +221,11 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                         date, is_late, late_minutes,
                         client_name, client_phone, delivery_address, items,
                         ready_time, cooked_time, comment, operator, opened_at,
-                        has_problem, problem_comment,
+                        has_problem,
                         payment_type, bonus_accrued, source, return_sum, service_charge,
-                        cancel_reason, cancel_comment, payment_changed, updated_at)
+                        cancel_reason, cancellation_details, payment_changed, updated_at)
                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,$31,now())
+                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,now())
                        ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
                          status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
                          planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
@@ -237,11 +237,10 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                          cooked_time=COALESCE(EXCLUDED.cooked_time, orders_raw.cooked_time),
                          comment=EXCLUDED.comment, operator=EXCLUDED.operator,
                          opened_at=EXCLUDED.opened_at, has_problem=EXCLUDED.has_problem,
-                         problem_comment=EXCLUDED.problem_comment,
                          payment_type=EXCLUDED.payment_type, bonus_accrued=EXCLUDED.bonus_accrued,
                          source=EXCLUDED.source, return_sum=EXCLUDED.return_sum,
                          service_charge=EXCLUDED.service_charge,
-                         cancel_reason=EXCLUDED.cancel_reason, cancel_comment=EXCLUDED.cancel_comment,
+                         cancel_reason=EXCLUDED.cancel_reason, cancellation_details=EXCLUDED.cancellation_details,
                          payment_changed=EXCLUDED.payment_changed,
                          updated_at=now()""",
                     tenant_id,
@@ -257,13 +256,12 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                     r.get("ready_time"), r.get("cooked_time") or None, r.get("comment"), r.get("operator"),
                     r.get("opened_at"),
                     bool(r.get("has_problem", False)),
-                    r.get("problem_comment") or None,
                     r.get("payment_type"),
                     float(r.get("bonus_accrued")) if r.get("bonus_accrued") is not None else None,
                     r.get("source"),
                     float(r.get("return_sum")) if r.get("return_sum") is not None else None,
                     float(r.get("service_charge")) if r.get("service_charge") is not None else None,
-                    r.get("cancel_reason"), r.get("cancel_comment") or None,
+                    r.get("cancel_reason"), r.get("cancellation_details") or None,
                     bool(r.get("payment_changed", False)),
                 )
 

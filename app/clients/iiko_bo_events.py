@@ -102,6 +102,7 @@ class BranchState:
     branch_name: str
     bo_login: str = ""
     bo_password: str = ""
+    tenant_id: int = 1
     revision: int = 0
     deliveries: dict = field(default_factory=dict)      # num → {status, courier, sum, planned_time, actual_time, ...}
     sessions: dict = field(default_factory=dict)        # user_id → {role_class, name, opened_at, closed_at}
@@ -577,14 +578,13 @@ def _delivery_to_row(branch_name: str, num: str, d: dict, now: str, ready_time_o
         "operator": d.get("operator", ""),
         "opened_at": d.get("opened_at", ""),
         "has_problem": 0,
-        "problem_comment": "",
         "payment_type": d.get("payment_type", ""),
         "bonus_accrued": None,
         "source": d.get("source", ""),
         "return_sum": None,
         "service_charge": None,
         "cancel_reason": d.get("cancel_reason", ""),
-        "cancel_comment": "",
+        "cancellation_details": "",
         "payment_changed": payment_changed,
         "updated_at": now,
     }
@@ -633,7 +633,7 @@ async def _save_to_db(state: BranchState) -> None:
             for num, d in state.deliveries.items()
         ]
         if order_rows:
-            await upsert_orders_batch(order_rows)
+            await upsert_orders_batch(order_rows, tenant_id=state.tenant_id)
 
         session_rows = [
             _session_to_row(state.branch_name, uid, s, now)
@@ -814,6 +814,7 @@ async def poll_all_branches() -> None:
                 branch_name=name,
                 bo_login=branch.get("bo_login", ""),
                 bo_password=branch.get("bo_password", ""),
+                tenant_id=branch.get("tenant_id", 1),
             )
 
     async def _poll_branch(branch: dict) -> None:

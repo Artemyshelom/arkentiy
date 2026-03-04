@@ -1104,38 +1104,50 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     time_row = await pool.fetchrow(
         f"""SELECT
             AVG(CASE
-                WHEN cooked_time != '' AND cooked_time IS NOT NULL
-                  AND opened_at != '' AND opened_at IS NOT NULL
+                WHEN cooked_time IS NOT NULL AND cooked_time != ''
+                  AND opened_at IS NOT NULL AND opened_at != ''
                   AND sum >= 200
                 THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (cooked_time::timestamp
-                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                    WHEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                          BETWEEN 1 AND 120
-                    THEN EXTRACT(EPOCH FROM (cooked_time::timestamp
-                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
+                    THEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                 END
             END) AS avg_cooking_min,
             AVG(CASE
-                WHEN send_time != '' AND send_time IS NOT NULL
-                  AND cooked_time != '' AND cooked_time IS NOT NULL
+                WHEN send_time IS NOT NULL AND send_time != ''
+                  AND cooked_time IS NOT NULL AND cooked_time != ''
                 THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (send_time::timestamp
-                         - cooked_time::timestamp)) / 60
+                    WHEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(send_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                          BETWEEN 0 AND 120
-                    THEN EXTRACT(EPOCH FROM (send_time::timestamp
-                         - cooked_time::timestamp)) / 60
+                    THEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(send_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                 END
             END) AS avg_wait_min,
             AVG(CASE
-                WHEN actual_time != '' AND actual_time IS NOT NULL
-                  AND send_time != '' AND send_time IS NOT NULL
+                WHEN actual_time IS NOT NULL AND actual_time != ''
+                  AND send_time IS NOT NULL AND send_time != ''
                   AND is_self_service = false
                 THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                         - send_time::timestamp)) / 60
+                    WHEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(actual_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(send_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                          BETWEEN 1 AND 120
-                    THEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                         - send_time::timestamp)) / 60
+                    THEN EXTRACT(EPOCH FROM (
+                        TO_TIMESTAMP(actual_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(send_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                    )) / 60
                 END
             END) AS avg_delivery_min
         FROM orders_raw

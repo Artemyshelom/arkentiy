@@ -909,6 +909,14 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
         pool = get_pool()
         has_city = bool(city_branch_names)
         tenant_id = _ctx_tenant_id.get()
+        # #region agent log
+        import json as _json, time as _time
+        try:
+            with open("/app/.cursor/debug-4587f2.log", "a") as _f:
+                _f.write(_json.dumps({"sessionId":"4587f2","hypothesisId":"H-A/B/C","location":"arkentiy.py:_handle_search","message":"search called","data":{"chat_id":chat_id,"query":query,"tenant_id":tenant_id,"city_filter":city_filter,"city_branch_names":city_branch_names,"is_numeric":is_numeric,"is_phone":is_phone},"timestamp":int(_time.time()*1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         if is_numeric:
             if has_city:
@@ -2298,6 +2306,14 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             _ctx_tenant_id.set(resolved if resolved is not None else tenant_id)
         except Exception:
             _ctx_tenant_id.set(tenant_id)
+        # #region agent log
+        import json as _json2, time as _time2
+        try:
+            with open("/app/.cursor/debug-4587f2.log", "a") as _f2:
+                _f2.write(_json2.dumps({"sessionId":"4587f2","hypothesisId":"H-D","location":"arkentiy.py:poll_loop","message":"tenant resolved","data":{"chat_id":chat_id,"user_id":user_id,"loop_tenant_id":tenant_id,"resolved":resolved if 'resolved' in dir() else "err","ctx_set":_ctx_tenant_id.get(),"text":text[:60] if text else ""},"timestamp":int(_time2.time()*1000)}) + "\n")
+        except Exception:
+            pass
+        # #endregion
 
         # Личка — только admin. Остальные игнорируются молча.
         if chat_id > 0 and not access.is_admin(user_id):

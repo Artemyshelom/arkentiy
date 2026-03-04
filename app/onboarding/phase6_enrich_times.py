@@ -42,12 +42,13 @@ async def _fetch_times_from_olap(
 ) -> dict:
     """
     Запрашивает OLAP v2 для извлечения временных полей.
-    Возвращает {(dept_name, delivery_num): {"cooked_time": ..., "ready_time": ...}}
+    Возвращает {(dept_name, delivery_num): {"cooked_time": ..., "ready_time": ..., "send_time": ...}}
     
-    Пробуем разные имена полей, так как точные имена неизвестны:
-    - Cooking.FinishTime или CookingFinishTime
-    - Delivery.ReadyTime или ReadyTime
-    - Service.PrintTime или ServicePrintTime
+    Пробуем разные имена полей:
+    - Cooking.FinishTime, CookingFinishTime, OrderItemsCookingTime
+    - Delivery.ReadyTime, ReadyTime
+    - Delivery.SendTime, CourierSendTime, DispatchTime (для send_time)
+    - Service.PrintTime, TerminalPrintTime, ServicePrintTime
     """
     
     result = {}
@@ -61,12 +62,14 @@ async def _fetch_times_from_olap(
                     "Delivery.Number", "Department",
                     "Delivery.CookingFinishTime",
                     "Delivery.ReadyTime",
+                    "Delivery.SendTime",
                 ]
             else:
                 group_fields = [
                     "Delivery.Number", "Department",
                     "OrderItemsCookingTime",
                     "Delivery.TerminalPrintTime",
+                    "Delivery.CourierAssignmentTime",
                 ]
             
             try:
@@ -105,6 +108,7 @@ async def _fetch_times_from_olap(
                         result[key] = {
                             "cooked_time": row.get("Delivery.CookingFinishTime") or row.get("OrderItemsCookingTime"),
                             "ready_time": row.get("Delivery.ReadyTime"),
+                            "send_time": row.get("Delivery.SendTime") or row.get("Delivery.CourierAssignmentTime"),
                             "service_print_time": row.get("Delivery.TerminalPrintTime"),
                         }
                     
@@ -171,11 +175,12 @@ async def main():
                     for (dept, dnum), times in times_map.items():
                         result = await conn.execute(
                             """UPDATE orders_raw
-                               SET cooked_time = $1, ready_time = $2, service_print_time = $3, updated_at = now()
-                               WHERE tenant_id = $4 AND branch_name = $5 AND delivery_num = $6
-                                 AND (cooked_time IS NULL OR ready_time IS NULL)""",
+                               SET cooked_time = $1, ready_time = $2, send_time = $3, service_print_time = $4, updated_at = now()
+                               WHERE tenant_id = $5 AND branch_name = $6 AND delivery_num = $7
+                                 AND (cooked_time IS NULL OR ready_time IS NULL OR send_time IS NULL)""",
                             times.get("cooked_time"),
                             times.get("ready_time"),
+                            times.get("send_time"),
                             times.get("service_print_time"),
                             TENANT_ID,
                             dept,

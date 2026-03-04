@@ -62,6 +62,7 @@ async def _fetch_times_from_olap(
             if attempt == 0:
                 group_fields = [
                     "Delivery.Number", "Department",
+                    "OpenTime",                      # время открытия заказа → opened_at
                     "Delivery.CookingFinishTime",
                     "Delivery.BillTime",
                     "Delivery.SendTime",
@@ -70,6 +71,7 @@ async def _fetch_times_from_olap(
             else:
                 group_fields = [
                     "Delivery.Number", "Department",
+                    "OpenTime",
                     "Delivery.CookingFinishTime",
                     "Delivery.ReadyTime",
                     "Delivery.SendTime",
@@ -110,6 +112,7 @@ async def _fetch_times_from_olap(
                         
                         key = (dept, dnum)
                         result[key] = {
+                            "opened_at": row.get("OpenTime"),
                             "cooked_time": row.get("Delivery.CookingFinishTime"),
                             # BillTime = время выдачи курьеру = ready_time (проверено на Зеленогорске)
                             # ReadyTime — альтернатива для iiko где BillTime нет
@@ -181,9 +184,12 @@ async def main():
                     for (dept, dnum), times in times_map.items():
                         result = await conn.execute(
                             """UPDATE orders_raw
-                               SET cooked_time = $1, ready_time = $2, send_time = $3, service_print_time = $4, updated_at = now()
-                               WHERE tenant_id = $5 AND branch_name = $6 AND delivery_num = $7
-                                 AND (cooked_time IS NULL OR ready_time IS NULL OR send_time IS NULL)""",
+                               SET opened_at = COALESCE(opened_at, $1),
+                                   cooked_time = $2, ready_time = $3, send_time = $4,
+                                   service_print_time = $5, updated_at = now()
+                               WHERE tenant_id = $6 AND branch_name = $7 AND delivery_num = $8
+                                 AND (opened_at IS NULL OR cooked_time IS NULL OR ready_time IS NULL OR send_time IS NULL)""",
+                            times.get("opened_at"),
                             times.get("cooked_time"),
                             times.get("ready_time"),
                             times.get("send_time"),

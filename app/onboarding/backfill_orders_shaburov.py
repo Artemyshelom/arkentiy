@@ -46,7 +46,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill_orders_shaburov")
 
-DATE_FROM = date(2026, 2, 1)
+DATE_FROM = date(2025, 1, 1)
 TENANT_ID = 3
 PROGRESS_FILE = "/app/data/backfill_orders_shaburov_progress.json"
 

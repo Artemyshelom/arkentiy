@@ -36,7 +36,7 @@ ENRICHMENT_FIELDS = [
 
 def _olap_body(date_from: str, date_to: str) -> dict:
     return {
-        "reportType": "SALES",
+        "reportType": "DELIVERIES",
         "buildSummary": "false",
         "groupByRowFields": ENRICHMENT_FIELDS,
         "aggregateFields": ["DishDiscountSumInt", "DiscountSum"],
@@ -123,19 +123,19 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
 
             st = r.get("Delivery.SendTime")
             if st and not send_time:
-                send_time = str(st).replace("T", " ").split(".")[0]
+                send_time = str(st)
 
             pt = r.get("Delivery.PrintTime")
             if pt and not print_time:
-                print_time = str(pt).replace("T", " ").split(".")[0]
+                print_time = str(pt)
 
             ct = r.get("Delivery.CookingFinishTime")
             if ct and not cooked_time:
-                cooked_time = str(ct).replace("T", " ").split(".")[0]
+                cooked_time = str(ct)
 
             ot = r.get("OpenTime")
             if ot and not opened_at:
-                opened_at = str(ot).replace("T", " ").split(".")[0]
+                opened_at = str(ot)
 
         main_pay = max(pay_parts, key=pay_parts.get) if pay_parts else ""
 

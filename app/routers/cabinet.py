@@ -29,7 +29,10 @@ def get_tenant_id(authorization: str = Header(None)) -> int:
     token = authorization[7:]
     try:
         payload = jwt.decode(token, _jwt_secret(), algorithms=[JWT_ALGO])
-        return payload.get("tenant_id", 1)
+        tenant_id = payload.get("tenant_id")
+        if tenant_id is None:
+            raise HTTPException(401, "Invalid token: tenant_id missing")
+        return int(tenant_id)
     except jwt.InvalidTokenError:
         raise HTTPException(401, "Invalid token")
 

@@ -222,10 +222,11 @@ async def _compare_and_update_date(
             changed.append(name)
 
             # Фиксируем в SQLite для утреннего отчёта
+            _tid = branch.get("tenant_id", 1)
             if revenue_changed:
-                await record_data_update(date_iso, name, "revenue", old_revenue, new_revenue)
+                await record_data_update(date_iso, name, "revenue", old_revenue, new_revenue, tenant_id=_tid)
             if checks_changed:
-                await record_data_update(date_iso, name, "check_count", old_checks, new_checks)
+                await record_data_update(date_iso, name, "check_count", old_checks, new_checks, tenant_id=_tid)
         except Exception as e:
             logger.error(f"Ошибка обновления строки {name}: {e}")
 

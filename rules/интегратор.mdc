@@ -201,8 +201,27 @@ scheduler.add_job(my_feature.main, trigger=IntervalTrigger(minutes=5))
 
 1. **Миграция**: `app/migrations/00X_<client>.sql` с INSERT в tenants + iiko_credentials
 2. **Бэкфилл** (опционально): скопируй `app/onboarding/backfill_shaburov.py` → адаптируй
-3. **Деплой**: `docs/rules/deploy-protocol.md`
+3. **Деплой**: `rules/integrator/deploy.md`
 4. **Проверка**: `/статус` → видны только его города, `/доступ` → только его чаты
+
+### 5. Файловая дисциплина
+
+**Разовые скрипты** (бэкфиллы, ручные синхронизации, импорты, одноразовые проверки):
+- Идут в `app/onboarding/` — это папка для всех "run once" скриптов, не только онбординга
+- После выполнения → **удалить**, если не нужен повторно
+
+**Тест-скрипты и отладочные проверки:**
+- `app/onboarding/check_<описание>.py` — и удалить сразу после
+
+**Корень проекта** — только инфраструктурные конфиги:
+```
+Dockerfile, docker-compose.yml, requirements.txt, .env.example, README.md
+```
+Никаких `.sh`-скриптов, `.py`-файлов, разовых отчётов в корне проекта.
+
+**Документация** — структура `docs/` зафиксирована:
+- Не создавать новые `.md` файлы. Вносить в существующие: `docs/journal.md`, `docs/CHANGELOG.md`, `rules/integrator/lessons.md`
+- Расширять структуру только по явному запросу Артемия
 
 ---
 

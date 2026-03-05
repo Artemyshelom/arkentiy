@@ -1,91 +1,104 @@
-# 📚 Аркентий — Документация
+# Аркентий — Документация
 
-**Telegram-бот для автоматизации доставки на базе iiko**
-
-> **Этот файл:** навигация по документации проекта.
-> **Чем пользоваться:** выбери своё направление (👇) и открой нужный документ.
-
-Мониторинг заказов, алерты опозданий, отчёты, интеграция с Google Sheets, личный кабинет клиента.
+> Навигация по документации проекта. Все файлы на латинице, структура по категориям.
 
 ---
 
-## Возможности
+## Навигация
 
-| Модуль | Описание |
+### Живые документы (корень)
+
+| Файл | Назначение |
+|------|-----------|
+| [journal.md](journal.md) | Технический журнал сессий — что сделано, где, зачем |
+| [CHANGELOG.md](CHANGELOG.md) | Пользовательский changelog — что видит клиент |
+| [BACKLOG.md](BACKLOG.md) | Задачи в работе и очереди |
+| [roadmap.md](roadmap.md) | Стратегия, 30/90-дневные приоритеты |
+
+---
+
+### Онбординг клиентов → `onboarding/`
+
+| Файл | Назначение |
+|------|-----------|
+| [onboarding/protocol.md](onboarding/protocol.md) | Пошаговый протокол подключения + troubleshooting |
+| [onboarding/registry.md](onboarding/registry.md) | Реестр подключённых клиентов |
+| [onboarding/data_checklist.md](onboarding/data_checklist.md) | SQL-запросы для проверки качества данных |
+
+---
+
+### Справочники → `reference/`
+
+| Файл | Назначение |
+|------|-----------|
+| [reference/modules.md](reference/modules.md) | Команды бота, модули, права доступа |
+| [reference/olap_fields.md](reference/olap_fields.md) | Маппинг OLAP полей → колонки БД, грабли iiko |
+| [reference/git_workflow.md](reference/git_workflow.md) | Git-процесс, репозитории, когда пушить |
+
+---
+
+### Правила для интегратора → `rules/integrator/`
+
+> Авторитетные источники истины для разработки. Читать по необходимости — не загружать весь контекст.
+
+| Файл | Когда читать |
+|------|-------------|
+| [rules/integrator/lessons.md](../rules/integrator/lessons.md) | **ПЕРЕД отладкой** — все антипаттерны и критические баги |
+| [rules/integrator/iiko_api.md](../rules/integrator/iiko_api.md) | Перед работой с iiko — 60+ полей, Events API, OLAP |
+| [rules/integrator/architecture.md](../rules/integrator/architecture.md) | Jobs расписание, BranchState, таблицы БД |
+| [rules/integrator/access_architecture.md](../rules/integrator/access_architecture.md) | Система прав, модули, /доступ |
+| [rules/integrator/deploy.md](../rules/integrator/deploy.md) | **ПЕРЕД деплоем** — пошаговый протокол |
+| [rules/integrator/database.md](../rules/integrator/database.md) | Схема таблиц, UPSERT-правила |
+| [rules/integrator/infrastructure.md](../rules/integrator/infrastructure.md) | VPS, SSH, пути, Google SA |
+| [rules/integrator/stack.md](../rules/integrator/stack.md) | Выбор технологии (Python vs GAS vs n8n) |
+| [rules/integrator/team_agents.md](../rules/integrator/team_agents.md) | Агенты, роли, specs |
+
+---
+
+### Specs → `specs/`
+
+Техзадания на фичи. Структура: `specs/tg/` (Telegram) и `specs/web/` (веб).
+
+---
+
+### Архив → `archive/`
+
+Старые документы, снапшоты, legacy. Не вести — только хранить.
+
+- [archive/journal_2025.md](archive/journal_2025.md) — сессии 1–39
+- [archive/LESSONS_LEARNED_Shaburov.md](archive/LESSONS_LEARNED_Shaburov.md) — кейс-стади онбординга Шабурова
+
+---
+
+## Быстрые маршруты
+
+| Задача | Куда идти |
 |--------|----------|
-| 🚨 Алерты | Уведомления об опозданиях доставки в реальном времени |
-| 📊 Отчёты | Ежедневные отчёты по выручке, чекам, времени доставки |
-| 🔍 Поиск | Быстрый поиск заказов по номеру или телефону |
-| 📋 Аудит | Проверка заполненности полей курьерами |
-| 💰 Финансы | Сверка эквайринга с банковскими выписками |
-| 📄 Sheets | Выгрузка данных в Google Sheets |
-| 🖥 Кабинет | Веб-панель для клиентов (SaaS) |
+| Встал баг | [rules/integrator/lessons.md](../rules/integrator/lessons.md) |
+| Деплою | [rules/integrator/deploy.md](../rules/integrator/deploy.md) |
+| Подключаю клиента | [onboarding/protocol.md](onboarding/protocol.md) |
+| Работаю с iiko API | [rules/integrator/iiko_api.md](../rules/integrator/iiko_api.md) |
+| Что нового у пользователей | [CHANGELOG.md](CHANGELOG.md) |
+| Стратегия / приоритеты | [roadmap.md](roadmap.md) |
+| Что в работе | [BACKLOG.md](BACKLOG.md) |
 
 ---
 
-## 📋 Быстрые маршруты
-
-| Ты хочешь | Начни отсюда | Потом |
-|-----------|--------------|-------|
-| **Понять стратегию** | [Дорожная карта](Дорожная%20карта.md) | [Архитектура](../99_Системное/Интегратор/Архитектура.md) |
-| **Посмотреть техническую историю** | [Журнал.md](Журнал.md) | [Уроки_и_баги](Уроки_и_баги.md) |
-| **Узнать текущие задачи** | [BACKLOG.md](BACKLOG.md) | [CHANGELOG.md](CHANGELOG.md) |
-| **Что нового для пользователей** | [CHANGELOG.md](CHANGELOG.md) | — |
-| **Подключить нового клиента** | [Протокол_онбординга.md](Протокол_онбординга.md) | [Журнал_онбордингов.md](Журнал_онбордингов.md) |
-| **Отладить проблему с онбордингом** | [Troubleshooting_онбординга.md](Troubleshooting_онбординга.md) | [OLAP_field_mapping.md](OLAP_field_mapping.md) |
-| **Проверить качество данных** | [Чеклист_проверки_данных.md](Чеклист_проверки_данных.md) | — |
-| **Узнать про историю Shaburov** | [LESSONS_LEARNED_Shaburov.md](LESSONS_LEARNED_Shaburov.md) | — |
-| **Посмотреть интерфейс бота** | [Модули_и_команды_бота.md](Модули_и_команды_бота.md) | [specs/README.md](specs/README.md) |
-| **Встал баг — где искать решение** | [Уроки_и_баги.md](Уроки_и_баги.md) | [LESSONS_LEARNED_Shaburov.md](LESSONS_LEARNED_Shaburov.md) |
-
----
-
----
-
-## 🔧 Для интегратора и ПМ
-
-### Справочники
-
-| Документ | Находится | Зачем | Когда открывать |
-|----------|-----------|-------|-----------------|
-| **Архитектура** | `99_Системное/Интегратор/` | Структура проекта, модули, расписание job'ов | Перед любой задачей |
-| **API_iiko** | `99_Системное/Интегратор/` | Справочник всех iiko API (Events, OLAP, endpoints) | Когда работаешь с iiko |
-| **Архитектура_доступа** | `99_Системное/Интегратор/` | Иерархия чатов, система прав, модули | Когда меняешь доступ |
-| **Уроки_и_баги** | `99_Системное/Интегратор/` | Ловушки при разработке (ОБЯЗАТЕЛЬНО перед отладкой!) | Перед отладкой |
-
-### Онбординг (1→2→3→4→5)
-
-1. **Протокол_онбординга.md** — рабочий чеклист (7 шагов, SQL, VPS команды)
-2. **Журнал_онбордингов.md** — реестр всех клиентов + шаблон для следующего
-3. **Чеклист_проверки_данных.md** — SQL диагностика (быстрая проверка за 1 минуту)
-4. **OLAP_field_mapping.md** — справочник OLAP полей (field names, грабли, версии iiko)
-5. **Troubleshooting_онбординга.md** — 6 критических багов + решения
-
-### История
-
-- **LESSONS_LEARNED_Shaburov.md** — полный отчёт первого онбординга (для образования и автоонбординга)
-
----
-
-## 📂 Структура проекта
+## Структура проекта
 
 ```
-02_Проекты/Аркентий/
-├── README.md (главный файл)
-├── ПЛАН_ЗАЩИТЫ_СЕКРЕТОВ.md (🔴 КРИТИЧНЫЙ)
-├── app/ (код: backend, jobs, интеграции)
-├── web/ (код: frontend личного кабинета)
-├── docs/ (эта папка)
-├── secrets/ (конфиги, не в git)
+arkentiy/
+├── app/          — backend: jobs, clients, services, routers
+├── web/          — frontend: личный кабинет
+├── docs/         — эта папка
+│   ├── onboarding/
+│   ├── reference/
+│   ├── specs/
+│   └── archive/
+├── rules/
+│   └── integrator/   — правила и справочники для интегратора
 └── ...
 ```
-
----
-
-## 💻 Быстрый старт разработки
-
-1. Клонировать репозиторий
-2. Скопировать `.env.example` → `.env` и заполнить
 3. Создать `secrets/branches.json` с конфигом точек
 4. Запустить: `docker compose up -d --build`
 5. Проверить: `curl http://localhost:8000/health`

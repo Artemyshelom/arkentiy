@@ -499,3 +499,80 @@ echo "PUBKEY" >> /root/.ssh/authorized_keys && chmod 600 /root/.ssh/authorized_k
 | `/поиск` возвращает чужие заказы | Нет фильтра по веткам когда `city_filter=None` | Проверить fallback в `_handle_search` |
 | `/поиск` ничего не находит | `orders_raw` имеют `tenant_id=1` | SQL UPDATE (раздел 4B) |
 | `/опоздания` показывает старые заказы | Нет фильтра `overdue_min > LATE_MAX_MIN` | Проверить `_handle_late` и `_handle_pickup` |
+
+---
+
+## ⚠️ Частые проблемы (Troubleshooting)
+
+> На основе опыта с Shaburov (tenant_id=3). Полный разбор — `rules/integrator/lessons.md`.
+
+### 1. Events API пишет заказы в неправильный `tenant_id`
+
+**Симптом:**
+```sql
+SELECT DISTINCT tenant_id, COUNT(*) FROM orders_raw
+WHERE branch_name IN ('Канск', 'Зеленогорск') GROUP BY tenant_id;
+-- Возвращает: tenant_id=1 (НЕПРАВИЛЬНО!)
+```
+**Причина:** `BranchState` не содержит `tenant_id` → дефолт =1.  
+**Решение:**
+1. Убедиться что `BranchState` содержит `tenant_id`, передаётся из конфига ветки
+2. Исправить данные в БД: `UPDATE orders_raw SET tenant_id = N WHERE branch_name IN (...) AND tenant_id = 1;`
+3. Перезапустить контейнер после правки БД (in-memory кэш иначе перезапишет фикс)
+
+---
+
+### 2. Временные поля полностью пусты
+
+**Симптом:** `opened_at` 8.9%, `cooked_time` 0%, `ready_time` 0%  
+**Причина:** Events API не логировал время; OLAP не настроен или нет Phase 6 backfill.  
+**Решение:** Запустить Phase 6 backfill (`app/onboarding/phase6_enrich_times.py`). Ожидаемый результат: 90%+ для всех.
+
+---
+
+### 3. OLAP field names неправильные
+
+**Симптом:** `400 Bad Request: Field not found: Delivery.ReadyTime`  
+**Правильные имена:**
+| Поле | Правильное имя | НЕ ИСПОЛЬЗОВАТЬ |
+|------|---------------|-----------------|
+| Время готовки | `Delivery.CookingFinishTime` | `Delivery.CookingTime` |
+| Время выдачи | `Delivery.BillTime` | `Delivery.ReadyTime` |
+| Время открытия | `OpenTime` (root) | `Delivery.OpenTime` |
+| Плановое | `Delivery.ExpectedTime` | `Delivery.ExpectedDeliveryTime` |
+
+---
+
+### 4. opened_at отсутствует на 90%+ заказов
+
+**Причина:** Events API не логировал `opened_at` до подписки.  
+**Решение:** Phase 8 recovery — восстановить из OLAP поля `OpenTime`. Ожидаемый результат: 100%.
+
+---
+
+### 5. `/статус` не показывает данные финансов
+
+**Причина:** `get_branch_olap_stats()` вызывается без tenant context → использует hardcoded branches.  
+**Решение:** Передавать ветки текущего тенанта явно: `get_branch_olap_stats(today, branches=tenant_branches)`.
+
+---
+
+### 6. `/повара` показывает 0 поваров для города
+
+**Симптом:** Один из городов показывает 0 поваров, хотя они есть.  
+**Причина:** Роли поваров (`ПС-АБ`, `ПБТ`) не попали в `_COOK_ROLE_PREFIXES`.  
+**Решение:** Проверить реальные `roleName` через Events API, добавить в префиксы в `arkentiy.py`.
+
+---
+
+### Метрики качества данных (целевые)
+
+| Поле | Минимум | Норма |
+|------|---------|-------|
+| `opened_at` | 90% | 100% (после Phase 8) |
+| `cooked_time` | 85% | 92%+ |
+| `ready_time` | 85% | 92%+ |
+| `cooking_duration` | 85% | 92%+ |
+| `total_duration` | 95% | 100% |
+
+Если ниже минимума — остановить и отладить до запуска следующей фазы.

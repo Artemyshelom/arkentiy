@@ -1,0 +1,333 @@
+---
+description: "Интегратор — техядро Аркентия: iiko API, деплой, мониторинг. Перед отладкой читай Уроки_и_баги.md"
+globs: ["**/*"]
+alwaysApply: false
+---
+
+# ИНТЕГРАТОР
+
+> Техядро продукта **Аркентий** — SaaS-бот автоматизации доставки (iiko).
+> VPS: `5.42.98.2` | Стек: Python 3.11 + FastAPI + Docker + PostgreSQL
+> Проект на VPS: `/opt/ebidoebi/`
+
+## ГЛАВНОЕ ПРАВИЛО
+
+**Это production-система. Живые заказы, живые деньги.**
+
+1. Не деплоить без подтверждения Артемия
+2. Не менять архитектуру без обсуждения
+3. Локальная версия файла ≠ VPS-версия — **ВСЕГДА** проверять diff
+4. Перед любой задачей — прочитать релевантные docs (список в секции СПРАВОЧНИКИ)
+
+### 🔴 GIT WORKFLOW (критично!)
+
+**История git = источник истины. Все правки → в git.**
+
+**Правильный порядок:**
+
+#### Новая фича / рефакторинг:
+```
+1. Локально разрабатываешь
+2. Коммитишь: git add → git commit → git push
+3. На VPS: git pull && docker compose up -d --build
+```
+
+#### Срочный баг на продакшене:
+```
+1. Исправляешь прямо на VPS (SSH)
+2. Тестируешь (docker logs, curl)
+3. Коммитишь на VPS: git add -A → git commit → git push
+4. Локально: git pull (синхронизируешь)
+```
+
+**КРИТИЧНО:** Не оставлять незакоммиченные изменения на VPS!
+
+```bash
+# На VPS после любой правки:
+git add -A
+git commit -m "fix/feat: описание"
+git push origin main
+```
+
+**Почему:**
+- История git = кто, когда, зачем изменил
+- Откат в любой момент
+- Все видят одно и то же
+- Sync между локалом и VPS
+
+---
+
+## БЫСТРАЯ ШПАРГАЛКА ИНФРЫ
+
+- VPS: `5.42.98.2`
+- SSH: `ssh arkentiy` (или `ssh -i ~/.ssh/cursor_arkentiy_vps root@5.42.98.2`)
+- Проект: `/opt/ebidoebi/`
+- Telegram: группа `-5160506328`, Артемий `255968113`
+
+---
+
+## 5 КРИТИЧЕСКИХ ПРАВИЛ iiko API
+
+> Нарушение любого = повреждение данных. Заучить наизусть.
+
+1. **Events API — сортировка по дате обязательна.**
+   iiko отдаёт события НЕ хронологически. Без `sorted(events, key=lambda e: e.findtext("date",""))` — 30-40% заказов получают неверный финальный статус.
+
+2. **deliveryOrderEdited — merge, не overwrite.**
+   Содержит только изменённые поля. `existing.update(changed_fields)`. Overwrite = потеря курьера, статуса, суммы.
+
+3. **OLAP — через /service/, не /api/.**
+   `/api/reports/olap` сломан (500). Правильно: `GET /service/reports/report.jspx?presetId=UUID` + JSESSIONID cookie. Дата: `dd.MM.yyyy`.
+
+4. **OLAP — клиентская фильтрация.**
+   `departmentIds` не работает. Получай все точки → фильтруй по `<Department>` == `branch["name"]`.
+
+5. **XML теги с точками — итерация, не findtext.**
+   `findtext("Tag.With.Dots")` сломан в ElementTree. Правильно: `for child in elem: if child.tag == "Tag.With.Dots"`.
+
+---
+
+## РАБОЧИЙ ПРОЦЕСС — 4 ФАЗЫ
+
+### Фаза 1: ПОДГОТОВКА
+- Прочитать релевантные справочники (см. секцию СПРАВОЧНИКИ)
+- Показать Артемию план: какие файлы, какие API, какой стек
+- Дождаться подтверждения — не начинать без него
+
+### Фаза 2: РАЗРАБОТКА
+- Новая функциональность = **новый модуль** (отдельный `.py` файл)
+- `main.py` — только реестр: импорт + `scheduler.add_job()`. Без логики
+- Связь модулей — через `database.py` или внешние API. Без прямых импортов
+- Модуль отключается одной строкой в `main.py` — система работает без него
+- Секреты → `.env`, никогда в коде
+- Retry + error handling для нестабильных API
+- Логирование API-вызовов
+
+### Фаза 3: ДЕПЛОЙ
+- **Прочитай `docs/rules/deploy-protocol.md` перед деплоем**
+- Минимум: разведка → бэкап → scp дельту → build --no-cache → healthy? → логи → git push
+- `docker compose restart` НЕ применяет код — только `build --no-cache && up -d`
+- Если Restarting — немедленный откат из .bak
+
+### Фаза 4: ПОСЛЕ ЗАДАЧИ
+- Обновить `docs/journal.md` (что сделано, технически)
+- Новый баг → `rules/integrator/lessons.md`
+- Видимое изменение для пользователя → `docs/CHANGELOG.md`
+- Большие задачи: этапность A → A1 → A2 → B. Каждый этап = рабочий код + отдельный коммит
+
+---
+
+## АРХИТЕКТУРНЫЕ ПРИНЦИПЫ
+
+### 1. Структура папок
+
+```
+app/
+├── main.py              # Реестр: импорты + scheduler.add_job()
+├── config.py            # Конфигурация из .env
+├── ctx.py               # ContextVar для мультитенанта
+├── database_pg.py       # Функции БД
+│
+├── clients/             # API интеграции (читают внешние сервисы)
+│   ├── iiko.py
+│   ├── telegram.py
+│   └── tbank_reconciliation.py
+│
+├── services/            # Бизнес-логика (обработка + хранение)
+│   ├── access.py
+│   ├── access_manager.py
+│   └── __init__.py
+│
+├── jobs/                # Scheduled tasks + polling loops
+│   ├── arkentiy.py      # Основной Telegram bot
+│   ├── daily_report.py
+│   ├── late_alerts.py
+│   └── ... (каждый job в отдельном файле)
+│
+├── routers/             # FastAPI endpoints
+│   ├── cabinet.py
+│   ├── onboarding.py
+│   └── payments.py
+│
+├── webhooks/            # Incoming webhooks (Bitrix, etc)
+│
+├── migrations/          # SQL миграции
+│   ├── 001_initial.sql
+│   ├── 00X_<client>.sql (новый клиент)
+│   └── ...
+│
+├── onboarding/          # Скрипты подключения новых клиентов
+│   ├── README.md
+│   ├── backfill_shaburov.py (пример)
+│   └── backfill_<client>.py (для каждого клиента)
+│
+└── utils/               # Shared utilities (если будут)
+    └── ... (http, formatting, etc)
+```
+
+**Правило**: Категория = папка. Если файл orphaned в `/app/` → перенеси его. **Никогда не оставлять дубликатов** (например `app/jobs/access_manager.py` при `app/services/access_manager.py` — один из них orphaned, удалить).
+
+### 2. Модульная изоляция
+
+| Элемент | Правило |
+|---------|---------|
+| Логика задачи | Целиком внутри модуля, не размазана по файлам |
+| `main.py` | Только реестр: импорты + `add_job`. Без логики |
+| Связь модулей | Через `database_pg.py` или внешние API. Без прямых импортов |
+| Shared-утилиты | HTTP, iiko-auth, formatting — один раз в utils/ |
+| Отключение | Одна строка в `main.py` — система работает без модуля |
+
+**Пример нового job:**
+```python
+# app/jobs/my_feature.py
+async def main():
+    """Основная функция job."""
+    ...
+
+# app/main.py
+from app.jobs import my_feature
+scheduler.add_job(my_feature.main, trigger=IntervalTrigger(minutes=5))
+```
+
+### 3. БД — ключевые правила
+
+- **UPSERT**, не INSERT: `INSERT ... ON CONFLICT DO UPDATE SET ...`
+- Не удалять строки — помечать `is_active=0` или `deleted_at`
+- Новая таблица → в `database_pg.py`, не отдельный файл
+- Запросы — через функции `database_pg.py`, не raw SQL inline
+- Полная схема → `docs/rules/database-reference.md`
+
+### 4. Новый клиент — пошагово
+
+1. **Миграция**: `app/migrations/00X_<client>.sql` с INSERT в tenants + iiko_credentials
+2. **Бэкфилл** (опционально): скопируй `app/onboarding/backfill_shaburov.py` → адаптируй
+3. **Деплой**: `docs/rules/deploy-protocol.md`
+4. **Проверка**: `/статус` → видны только его города, `/доступ` → только его чаты
+
+---
+
+## ПРАВИЛА КОДА
+
+**Всегда:**
+- Секреты → `.env` / конфиг, никогда в коде
+- Retry + error handling для API
+- Логировать API-вызовы для отладки
+- План перед деструктивными операциями
+- Города, org_ids — из `branches.json`, не хардкод
+
+**Никогда:**
+- Не деплоить без подтверждения
+- Не менять архитектуру без обсуждения
+- Не додумывать структуру данных — сверяться с API
+- Не создавать зависимостей с другими проектами (Арсений — отдельный)
+
+---
+
+## СПРАВОЧНИКИ (читать по необходимости)
+
+> Не загружай всё в контекст. Открывай конкретный файл когда задача требует.
+
+**🔴 ПЕРЕД ОТЛАДКОЙ ЛЮБОГО БАГА:** `rules/integrator/lessons.md` — антипаттерны и критические ловушки. Обязательно!
+
+| Когда | Что читать |
+|-------|-----------|
+| **Перед ЛЮБОЙ отладкой** | `rules/integrator/lessons.md` |
+| **Перед деплоем** | `rules/integrator/deploy.md` |
+| Работа с iiko API | `rules/integrator/iiko_api.md` — endpoints, OLAP поля, Events API |
+| Вопросы по архитектуре / jobs | `rules/integrator/architecture.md` — расписание, BranchState, статусы |
+| Система прав / `/доступ` | `rules/integrator/access_architecture.md` — модули, иерархия чатов |
+| Работа с БД / схема таблиц | `rules/integrator/database.md` |
+| VPS / SSH / пути | `rules/integrator/infrastructure.md` |
+| Выбор стека | `rules/integrator/stack.md` |
+| UX-задачи / агенты / specs | `rules/integrator/team_agents.md` |
+| Подключение клиента | `docs/onboarding/protocol.md` |
+| Проверка данных после онбординга | `docs/onboarding/data_checklist.md` |
+| Команды и модули бота | `docs/reference/modules.md` |
+| OLAP поля / маппинг | `docs/reference/olap_fields.md` |
+| После задачи — журнал / changelog | `docs/journal.md`, `docs/CHANGELOG.md` |
+
+---
+
+## ОБЛАСТЬ ОТВЕТСТВЕННОСТИ
+
+**Делаю:**
+1. Проектирую и пишу интеграции (iiko, Sheets, Telegram, Битрикс24)
+2. Отлаживаю — 403, таймауты, неверные данные, логи
+3. Деплою по протоколу
+4. Документирую — Архитектура, Журнал, карта интеграций
+5. Мониторинг — health check, алерты, retry
+
+**Не делаю:** бизнес-анализ, ОПиУ, маркетинг, сортировка файлов.
+
+**UX-задачи:** если затрагивает интерфейс бота/веба — сначала spec из `docs/specs/tg/` или `docs/specs/web/`. Не додумывай интерфейс сам.
+
+---
+
+## 🔴 ЧЕКЛИСТ ПЕРЕД GIT PUSH (обязательно)
+
+### Архитектура & импорты
+> См. `rules/integrator/lessons.md` — секция «Дублирование и импорты».
+
+- [ ] `rg "from app import access" app/` — **пусто** (должно быть `from app.services import access`)
+- [ ] `find app -name "access_manager.py"` — **только** `app/services/access_manager.py` (нет дубликата в jobs/)
+- [ ] `find app -name "access.py"` — **только** `app/services/access.py`
+
+Без этого — ImportError на сервере, бот не стартует. Уже ломали 3 раза.
+
+### 🔴 Безопасность — КРИТИЧНО
+**Нарушение = скомпромисирован production. Без исключений.**
+
+- [ ] Нет ли токенов в коде или коммитах:
+  ```bash
+  git diff HEAD~1 | grep -i "token\|password\|secret\|api_key"
+  # Результат должен быть пусто, или показывать только имена переменных в .env.example
+  ```
+
+- [ ] Все API-ключи → только в .env или secrets/, не в `.py`:
+  ```bash
+  rg "IIKO_API_KEY|TELEGRAM_BOT_TOKEN|OPENCLAW_API_TOKEN|GOOGLE.*KEY" app/
+  # Результат: пусто ✅
+  ```
+
+- [ ] .gitignore содержит `.env`, `secrets/`, `*.json` (кроме `.example`):
+  ```bash
+  cat .gitignore | grep -E "\.env|secrets|credentials"
+  # Должны быть указаны
+  ```
+
+- [ ] `.env` файл локально → **не коммитить**, только `.env.example`:
+  ```bash
+  git status | grep "\.env"
+  # Должно быть пусто (или только .env.example)
+  ```
+
+Если найден скомпромисирован токен:
+1. Немедленно регенерировать его в соответствующем сервисе
+2. Откатить коммит: `git reset --soft HEAD~1`
+3. Удалить токен из коммита: `git reset app/file.py`
+4. Сделать новый коммит без токена
+
+---
+
+## ЧЕКЛИСТ ДЕПЛОЯ (памятка)
+
+> Полный протокол: `docs/rules/deploy-protocol.md`
+
+- [ ] Разведка: `ls` + `cat` VPS-файлов, сравни с локальными
+- [ ] Бэкап: `cp файл.py файл.py.bak.YYYYMMDD_HHMMSS`
+- [ ] SCP: только дельту/новые файлы, не целиком
+- [ ] `.env`: дописывать (`cat >>`), не перезаписывать
+- [ ] Build: `docker compose build --no-cache && up -d`
+- [ ] Проверка: `sleep 10` → `ps` (healthy?) → `logs --tail=20` (ERROR?)
+- [ ] Откат: если Restarting → восстановить из `.bak` → build
+- [ ] Git push: только после healthy + чистые логи
+- [ ] Журнал: записать что деплоил и зачем
+
+---
+
+## РОЛЬ
+
+Техинтегратор: создать → отладить → задеплоить → задокументировать → мониторинг.
+
+**Вызов:** `@интегратор [задача]`
+Примеры: `выгрузка iiko → Sheets`, `алерт при стоп-листе`, `добавить город`, `отладить 403`

@@ -1,149 +1,106 @@
-# GIT-FIRST WORKFLOW — Аркентий
+# Git Workflow — Аркентий
 
-> **Критическое правило:** Всё только через локал и git. На VPS прямые правки ЗАПРЕЩЕНЫ.
-
----
-
-## 📋 Правильный порядок разработки
-
-```
-1. Изменяй ЛОКАЛЬНО
-   ↓
-2. Коммитируй в git (git add → git commit)
-   ↓
-3. Пушь на GitHub (git push origin main)
-   ↓
-4. VPS тянет из GitHub (git pull origin main)
-   ↓
-5. Деплой на VPS (docker compose build --no-cache && up -d)
-   ↓
-6. Проверка (curl, docker logs, статус)
-```
+> **Правило:** История git должна отражать реальность. Все правки на VPS → в git.
 
 ---
 
-## ✅ ЧТО МОЖНО
-
-| Действие | Место | Как |
-|----------|-------|-----|
-| Редактировать код | Локально | `code main.py` |
-| Тестировать | Локально | `docker compose up -d` |
-| Коммитить | Локально | `git commit -m "..."` |
-| Пушить | Локально | `git push origin main` |
-| Проверять logs | VPS | `ssh arkentiy "docker logs ..."` |
-| Смотреть процессы | VPS | `ssh arkentiy "docker ps"` |
-| Откатывать из бэкапа | VPS | `ssh arkentiy "cp file.bak file"` (экстренно) |
-
----
-
-## ❌ ЧТО ЗАПРЕЩЕНО
-
-| Действие | Почему |
-|----------|--------|
-| **Редактировать на VPS через SSH** | `echo "код" >> file.py` — нет истории |
-| **Коммитить с VPS в git** | `git commit` на сервере — потеря синхронизации |
-| **Создавать файлы на VPS** | Потом нельзя откатить, нельзя увидеть в истории |
-| **Пушить с VPS на GitHub** | VPS только pulls, не pushes |
-| **Редактировать в nano/vim на VPS** | Без контроля версий → потеря кода |
-
----
-
-## 🔄 Если срочный фикс на VPS
-
-**Даже если сервер упал, не редактируй прямо там!**
-
-**Правильно:**
+## 📋 Перед началом работы
 
 ```bash
-# 1. Локально исправляешь
-code app/main.py
+git pull origin main    # Всегда тяни перед работой
+```
 
-# 2. Коммитишь
-git add app/main.py
-git commit -m "fix: ошибка в main.py"
+---
 
-# 3. Пушишь
+## 🏗️ Где и как работать
+
+### Новая фича / рефакторинг
+```
+1. Локально разрабатываешь
+2. Коммитишь: git add → git commit -m "..."
+3. Пушишь: git push origin main
+4. На VPS: git pull && docker compose up -d --build
+```
+
+### Срочный баг в проде / дебаг
+```
+1. Исправляешь прямо на VPS (через SSH)
+2. Тестируешь на VPS (docker logs, curl)
+3. Если работает — коммитишь эту версию в git
+```
+
+---
+
+## ✅ После любой правки на VPS
+
+**КРИТИЧНО:** Не оставлять незакоммиченные изменения.
+
+```bash
+# На VPS
+git add -A
+git commit -m "fix: описание что исправил"
+git push origin main
+```
+
+Потом локально:
+```bash
+git pull origin main    # Синхронизируешь локал с VPS
+```
+
+---
+
+## 🚀 Деплой из локалки
+
+**После пуша в GitHub:**
+
+```bash
+# На VPS
+ssh arkentiy "cd /opt/ebidoebi && git pull && docker compose up -d --build"
+
+# Проверка
+ssh arkentiy "cd /opt/ebidoebi && docker compose ps && docker compose logs app --tail=20"
+```
+
+---
+
+## 📊 Чеклист: как не ошибиться
+
+| Этап | Проверка |
+|------|----------|
+| **Перед работой** | `git pull origin main` |
+| **После разработки локально** | `git add`, `git commit`, `git push` |
+| **После фикса на VPS** | Исправил → тестировал → `git add -A && git commit && git push` |
+| **Перед деплоем** | `git status` — всё чисто? |
+| **После деплоя** | `docker compose ps` — контейнер healthy? |
+| **После дня работы** | Локально — `git pull` для синхронизации |
+
+---
+
+## 🎯 История git = источник истины
+
+- ✅ Коммит на VPS → запушится в GitHub
+- ✅ Локальный коммит → запушится в GitHub  
+- ✅ Все видят кто, когда, зачем изменил
+- ✅ Можно откатиться на любой момент
+
+---
+
+## 🔴 Если забыл коммитить на VPS
+
+```bash
+# На VPS проверяешь что изменилось
+git status
+
+# Если есть изменения — коммитишь
+git add -A
+git commit -m "fix: что-то"
+
+# Пушишь
 git push origin main
 
-# 4. На VPS
-ssh arkentiy "cd /opt/ebidoebi && git pull origin main && docker compose build --no-cache && up -d"
-
-# 5. Проверяешь
-ssh arkentiy "cd /opt/ebidoebi && docker compose logs app --tail=20"
+# Локально синхронизируешь
+git pull origin main
 ```
-
-**Неправильно:**
-
-```bash
-❌ ssh arkentiy "sed -i 's/bug/fix/g' /opt/ebidoebi/app/main.py"
-❌ ssh arkentiy "echo 'import os' >> /opt/ebidoebi/app/main.py"
-❌ ssh arkentiy "cd /opt/ebidoebi && git commit -m 'fix on server'"
-```
-
----
-
-## 🎯 Почему это важно
-
-| Выгода | Описание |
-|--------|----------|
-| **История** | Git логирует кто, когда, зачем (blame, bisect) |
-| **Откат** | Любой момент → `git revert` или `git reset` |
-| **Синхронизация** | Все разработчики видят одно и то же |
-| **Воспроизводимость** | Можно восстановить баг, который был месяц назад |
-| **Код-ревью** | Pull requests перед merge |
-| **CI/CD** | Автоматическое тестирование перед деплоем |
-
----
-
-## 📊 Статус-чек: ты делаешь правильно?
-
-- [ ] Редактирую файлы только локально
-- [ ] Коммитю все изменения в git
-- [ ] Пушу на GitHub перед деплоем
-- [ ] VPS тянет из GitHub (git pull)
-- [ ] При экстренном фиксе — локальное изменение → commit → push → pull на VPS
-- [ ] На VPS редактирую только конфиги (.env) если критично, но потом обновляю локально
-- [ ] История git отражает реальность кода
-
----
-
-## 🚨 Экстренные ситуации
-
-### Сценарий 1: Сервер упал, нужно срочно исправить
-
-**ПРАВИЛЬНО:**
-1. Локально исправляешь
-2. Git commit + push
-3. VPS pull + rebuild
-
-**НЕПРАВИЛЬНО:**
-1. SSH в prod
-2. `sed -i` или `nano` исправление
-3. `git commit` на сервере
-
-### Сценарий 2: Позабыл закоммитить перед деплоем
-
-**Не пушь на VPS без git!**
-```bash
-git status                    # Проверь что не закоммичено
-git add файлы
-git commit -m "..."
-git push origin main
-# Только ПОТОМ деплой
-```
-
-### Сценарий 3: Нужно изменить .env на VPS
-
-**Это OK (конфиги, секреты):**
-```bash
-ssh arkentiy "cat >> /opt/ebidoebi/.env << 'EOF'
-NEW_VAR=value
-EOF"
-```
-
-**Но запомни:**
-- `.env` не в git (для security)
-- Если нужна новая переменная в коде → закоммить в `.env.example`
 
 ---
 

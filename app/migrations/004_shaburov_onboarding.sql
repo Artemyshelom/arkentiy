@@ -22,7 +22,7 @@ ON CONFLICT (slug) DO UPDATE SET status = 'active', updated_at = now();
 -- 2. Subscription
 INSERT INTO subscriptions (tenant_id, status, plan, modules_json, branches_count, amount_monthly, started_at, created_at, updated_at)
 SELECT id, 'active', 'base',
-    '["audit","search","reports","late_alerts","alerts","iiko_to_sheets"]'::jsonb,
+    '["audit","search","reports","late_alerts","late_queries","iiko_to_sheets"]'::jsonb,
     3, 15000, now(), now(), now()
 FROM tenants WHERE slug = 'shaburov'
 ON CONFLICT (tenant_id) DO NOTHING;
@@ -54,9 +54,9 @@ ON CONFLICT (tenant_id, branch_name) DO NOTHING;
 
 -- 4. Telegram chats
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -5128713915, 'Отчёты', '["reports","alerts"]'::jsonb, NULL, true
+SELECT id, -5128713915, 'Отчёты', '["reports","late_queries"]'::jsonb, NULL, true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["reports","alerts"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["reports","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
 SELECT id, -5114358382, 'Аудит', '["audit"]'::jsonb, NULL, true
@@ -64,24 +64,24 @@ FROM tenants WHERE slug = 'shaburov'
 ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["audit"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -5169819257, 'Поиск заказов', '["search"]'::jsonb, NULL, true
+SELECT id, -5169819257, 'Поиск заказов', '["search","late_queries"]'::jsonb, NULL, true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["search"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["search","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -4860116340, 'Опоздания Ижевск', '["late_alerts"]'::jsonb, '["Ижевск"]', true
+SELECT id, -4860116340, 'Опоздания Ижевск', '["late_alerts","late_queries"]'::jsonb, '["Ижевск"]', true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Ижевск"]', modules_json = '["late_alerts"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Ижевск"]', modules_json = '["late_alerts","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -5168619845, 'Опоздания Зеленогорск', '["late_alerts"]'::jsonb, '["Зеленогорск"]', true
+SELECT id, -5168619845, 'Опоздания Зеленогорск', '["late_alerts","late_queries"]'::jsonb, '["Зеленогорск"]', true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Зеленогорск"]', modules_json = '["late_alerts"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Зеленогорск"]', modules_json = '["late_alerts","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -5179980907, 'Опоздания Канск', '["late_alerts"]'::jsonb, '["Канск"]', true
+SELECT id, -5179980907, 'Опоздания Канск', '["late_alerts","late_queries"]'::jsonb, '["Канск"]', true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Канск"]', modules_json = '["late_alerts"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Канск"]', modules_json = '["late_alerts","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
 SELECT id, -5117954628, 'Маркетинг', '[]'::jsonb, NULL, false

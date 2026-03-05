@@ -383,9 +383,22 @@ def _user_screen(uid_str: str, cfg: dict) -> tuple[str, list]:
 # ---------------------------------------------------------------------------
 
 async def _refresh_cache(tenant_id: int = 1) -> dict:
-    """Перечитывает конфиг тенанта из БД. Для tenant_id=1 обновляет глобальный кэш access.py."""
+    """Перечитывает конфиг тенанта из БД. Обновляет глобальный merged кэш access.py (все тенанты)."""
     cfg = await _db.get_access_config_from_db(tenant_id)
-    if tenant_id == 1:
+    # Перезагружаем merged-кэш для всех активных тенантов, чтобы изменения для любого
+    # тенанта сразу применялись в get_permissions() без рестарта
+    try:
+        from app.database_pg import get_pool as _get_pg_pool
+        _pool = _get_pg_pool()
+        _rows = await _pool.fetch("SELECT id FROM tenants WHERE status = 'active' ORDER BY id")
+        merged: dict = {"chats": {}, "users": {}}
+        for _row in _rows:
+            _c = await _db.get_access_config_from_db(_row["id"])
+            merged["chats"].update(_c.get("chats", {}))
+            merged["users"].update(_c.get("users", {}))
+        access.update_db_cache(merged)
+    except Exception as _e:
+        logger.warning(f"[_refresh_cache] Не удалось перезагрузить merged кэш: {_e}")
         access.update_db_cache(cfg)
     return cfg
 

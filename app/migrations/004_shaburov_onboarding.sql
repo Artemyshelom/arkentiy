@@ -64,9 +64,9 @@ FROM tenants WHERE slug = 'shaburov'
 ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["audit"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -5169819257, 'Поиск заказов', '["search","late_queries"]'::jsonb, NULL, true
+SELECT id, -5169819257, 'Поиск заказов', '["search"]'::jsonb, NULL, true
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["search","late_queries"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["search"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
 SELECT id, -4860116340, 'Опоздания Ижевск', '["late_alerts","late_queries"]'::jsonb, '["Ижевск"]', true

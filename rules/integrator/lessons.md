@@ -970,3 +970,36 @@ docker compose up -d
 **Урок:** Никогда не обновлять критические данные (tenant_id, status, branch_name) в live системе БЕЗ перезапуска. Production-системы с in-memory кэшем требуют hard restart для гарантии консистентности.
 
 ---
+
+## 🔴 [БЕЗОПАСНОСТЬ] Проверка секретов перед git push
+
+**Контекст:** 2 марта 2026 — OpenClaw токен утёк в публичный репо. GitGuardian поймал.
+
+**Обязательные проверки перед каждым `git push`:**
+
+```bash
+# 1. Нет ли токенов в diff:
+git diff HEAD~1 | grep -i "token\|password\|secret\|api_key"
+# Результат: пусто, или только имена переменных в .env.example
+
+# 2. Нет ли ключей в коде:
+rg "IIKO_API_KEY|TELEGRAM_BOT_TOKEN|OPENCLAW_API_TOKEN|GOOGLE.*KEY" app/
+# Результат: пусто ✅
+
+# 3. .gitignore актуален:
+cat .gitignore | grep -E "\.env|secrets|credentials"
+
+# 4. .env не в staging:
+git status | grep "\.env"
+# Должно быть пусто (или только .env.example)
+```
+
+**Если токен скомпрометирован:**
+1. Немедленно регенерировать в соответствующем сервисе
+2. `git reset --soft HEAD~1` — откатить коммит
+3. `git reset app/файл.py` — убрать файл с токеном из staging
+4. Новый коммит без токена
+
+**Урок:** Один утёкший токен = пересоздание всех ключей + инцидент. Проверка занимает 10 секунд, восстановление — часы.
+
+---

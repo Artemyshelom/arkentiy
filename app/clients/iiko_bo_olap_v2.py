@@ -345,24 +345,33 @@ async def get_online_orders(
     return dict(result)
 
 
-async def get_branch_olap_stats(date: datetime) -> dict[str, dict]:
+async def get_branch_olap_stats(date: datetime, branches: list[dict] | None = None) -> dict[str, dict]:
     """
     Drop-in замена iiko_bo_olap.get_branch_olap_stats() (для /статус).
     Без pickup_count (include_delivery=False).
+    branches — список точек. Если None, берёт settings.branches (tenant_id=1).
     """
+    if branches is None:
+        branches = settings.branches
     date_iso = date.strftime("%Y-%m-%d")
     next_day = (date + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    by_url: dict[str, set[str]] = defaultdict(set)
-    for branch in settings.branches:
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
         url = branch.get("bo_url", "")
         if not url:
             continue
-        by_url[url].add(branch["name"])
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
 
     tasks = [
-        _fetch_from_server(url, names, date_iso, next_day, include_delivery=False)
-        for url, names in by_url.items()
+        _fetch_from_server(url, srv["names"], date_iso, next_day, include_delivery=False,
+                           bo_login=srv["login"], bo_password=srv["password"])
+        for (url, _, __), srv in by_server.items()
     ]
     results = await asyncio.gather(*tasks, return_exceptions=True)
 

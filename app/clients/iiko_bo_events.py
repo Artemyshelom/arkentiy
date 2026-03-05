@@ -46,7 +46,7 @@ WAITING_STATUSES = frozenset({
     "Новая", "Не подтверждена", "Ждет отправки",
 })
 
-_COOK_ROLE_PREFIXES = ("повар", "cook", "пс", "пбт", "пов")
+_COOK_ROLE_PREFIXES = ("повар", "cook", "пс", "пбт", "пов", "пз", "кп")
 _COOK_ROLE_SUBSTRINGS = ("сушист", "kitchen", "помпов")  # кух убран: кухработники ≠ повара
 
 _COURIER_ROLE_PREFIXES = ("курьер", "courier", "delivery", "кур", "крс")
@@ -853,7 +853,22 @@ def get_branch_rt(branch_name: str) -> dict | None:
     Возвращает словарь RT-данных точки или None если данные ещё не загружены.
     """
     state = _states.get(branch_name)
-    if state is None or state.revision == 0:
+    if state is None:
+        # Вернуть пустой словарь вместо None если статс ещё не загружен
+        return {
+            "active_orders": 0,
+            "delivered_today": 0,
+            "orders_before_dispatch": 0,
+            "orders_cooking": 0,
+            "orders_ready": 0,
+            "orders_on_way": 0,
+            "couriers_on_shift": 0,
+            "cooks_on_shift": 0,
+            "total_cooks_today": 0,
+            "total_couriers_today": 0,
+            "delays": None,
+        }
+    if state.revision == 0:
         return None
     ds = state.delay_stats
     return {
@@ -896,13 +911,17 @@ def get_branch_staff(branch_name: str, role: str) -> list[dict] | None:
 def get_all_branches_staff(role: str) -> dict[str, list[dict]]:
     """
     Возвращает {branch_name: [staff_list]} для всех загруженных точек.
-    Если точка ещё не загружена — не включается в результат.
+    Если точка ещё не загружена — возвращает пустой список для точки.
     """
     result = {}
     for name, state in _states.items():
         if state.revision == 0:
+            # Вернуть пустой список вместо пропуска
+            result[name] = []
             continue
         staff = get_branch_staff(name, role)
         if staff is not None:
             result[name] = staff
+        else:
+            result[name] = []
     return result

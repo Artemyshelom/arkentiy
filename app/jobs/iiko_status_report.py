@@ -39,7 +39,9 @@ async def get_branch_status(branch: dict) -> dict:
     branch_olap = {}
 
     try:
-        olap = await get_branch_olap_stats(today)
+        # Передаём все ветки тенанта чтобы OLAP запросился к правильному серверу
+        all_branches = get_available_branches()
+        olap = await get_branch_olap_stats(today, branches=all_branches)
         branch_olap = olap.get(branch["name"], {})
         revenue = branch_olap.get("revenue_net")
         if revenue is not None:

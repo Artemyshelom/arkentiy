@@ -55,11 +55,13 @@
 
 ## 💡 Идеи / Обсуждение
 
+- [ ] `tenant_id_default_hardening` (P2) — убрать `tenant_id: int = 1` как дефолт из 50+ функций database_pg.py и изменить `ctx_tenant_id` с `default=1` на `default=None`. Сейчас любой забытый вызов без явного tenant_id молча работает с тенантом 1. Все критичные места уже исправлены (shifts, daily_stats, audit, silence_log, iiko_to_sheets, cabinet JWT). Задача — убрать сам anti-pattern чтобы будущий код ломался явно, а не молча.
 - [ ] `llm_recommendations` — рекомендации по меню/ценам после стабилизации core
 - [ ] `competitor_llm_brief` — краткие выводы по конкурентам вместо сырой ленты изменений
 
 ## ✅ Сделано (последние релевантные)
 
+- [x] `tenant_isolation_fix` — изоляция данных по tenant_id: shifts/daily_stats/audit/silence/iiko_to_sheets/cabinet + исправлены данные в БД (05.03.2026)
 - [x] `multi_tenant_bot` — мультитенант архитектура, один бот на несколько клиентов (02.03.2026)
 - [x] `shaburov_onboarding` — первый SaaS-клиент Никита Шабуров, 3 города (02.03.2026)
 - [x] `status_v2` — сводка по точкам в одном сообщении (26.02.2026)

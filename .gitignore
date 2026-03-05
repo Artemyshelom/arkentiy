@@ -46,3 +46,18 @@ logs/*.log
 # Development & debug scripts
 dev/
 test_*.py
+# Бэкапы и старые файлы
+_backups/
+app/_old_*.bak
+app/iiko_*.py  # Старые версии
+app/clients/tbank_reconciliation.py.bak.*
+app/onboarding/*.bak
+app/onboarding/check_*.py
+app/onboarding/phase*.py
+app/onboarding/recalc_*.py
+bitrix.py
+cabinet.py
+config.py
+payments.py
+recalc_*.py
+*.bak.*

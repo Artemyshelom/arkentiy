@@ -1946,7 +1946,8 @@ async def _handle_mute(chat_id: int, arg: str, user_id: int) -> None:
     until_dt = now_local + timedelta(minutes=minutes)
     _set_silence(chat_id, until_dt)
     try:
-        await log_silence(chat_id, minutes, user_id)
+        from app.ctx import ctx_tenant_id as _ctx_tid
+        await log_silence(chat_id, minutes, user_id, tenant_id=_ctx_tid.get())
     except Exception as e:
         logger.warning(f"[/тишина] log_silence error: {e}")
 

@@ -640,7 +640,7 @@ async def _save_to_db(state: BranchState) -> None:
             for uid, s in state.sessions.items()
         ]
         if session_rows:
-            await upsert_shifts_batch(session_rows)
+            await upsert_shifts_batch(session_rows, tenant_id=state.tenant_id)
     except Exception as e:
         logger.error(f"[{state.branch_name}] Ошибка сохранения в БД: {e}")
 

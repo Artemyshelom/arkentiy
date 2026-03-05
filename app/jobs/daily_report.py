@@ -216,7 +216,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
                 "avg_wait_min":        agg.get("avg_wait_min"),
                 "avg_delivery_min":    agg.get("avg_delivery_min"),
                 "exact_time_count":    agg.get("exact_time_count") or 0,
-            }])
+            }], tenant_id=branch.get("tenant_id", 1))
         except Exception as e:
             logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
 

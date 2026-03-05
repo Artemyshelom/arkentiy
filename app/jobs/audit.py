@@ -686,12 +686,21 @@ async def job_audit_report(utc_offset: int = 7) -> None:
         if city:
             tenant_cities[tenant_id].add(city)
 
+    # Строим карту branch_name → tenant_id для корректной записи событий
+    branch_tenant_map: dict[str, int] = {row["branch_name"]: row["tenant_id"] for row in all_iiko_creds}
+
     await clear_audit_events(date_str)
 
     all_findings = await _generate_audit_for_date(date_str)
 
     if all_findings:
-        await save_audit_events_batch(all_findings)
+        # Группируем по tenant_id и сохраняем с правильной изоляцией
+        by_tenant: dict[int, list] = {}
+        for f in all_findings:
+            tid = branch_tenant_map.get(f.get("branch_name", ""), 1)
+            by_tenant.setdefault(tid, []).append(f)
+        for tid, events in by_tenant.items():
+            await save_audit_events_batch(events, tenant_id=tid)
         logger.info(f"[audit] Сохранено {len(all_findings)} событий за {date_str}")
     else:
         logger.info(f"[audit] Подозрительных событий не найдено за {date_str}")
@@ -740,6 +749,8 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
       /аудит Томск_1 Яко    → конкретная точка
     """
     from app.clients.telegram import send_message
+    from app.ctx import ctx_tenant_id as _ctx_tid
+    current_tenant_id = _ctx_tid.get()
 
     parts = arg.split() if arg else []
 
@@ -806,14 +817,14 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
             city_query = city_filter
 
     # Запрашиваем из БД
-    events = await get_audit_events(date_str, city=city_query, branch_name=branch_filter)
+    events = await get_audit_events(date_str, city=city_query, branch_name=branch_filter, tenant_id=current_tenant_id)
 
     # Если пусто — генерируем на лету и сохраняем
     if not events:
         generated = await _generate_audit_for_date(date_str)
         if generated:
-            await clear_audit_events(date_str)
-            await save_audit_events_batch(generated)
+            await clear_audit_events(date_str, tenant_id=current_tenant_id)
+            await save_audit_events_batch(generated, tenant_id=current_tenant_id)
             logger.info(f"[audit] On-demand: сгенерировано {len(generated)} событий за {date_str}")
         events = await get_audit_events(date_str, city=city_query, branch_name=branch_filter)
 

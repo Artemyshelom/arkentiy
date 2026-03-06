@@ -498,9 +498,12 @@ def _process_events(state: BranchState, events_xml: list) -> None:
                 state.sessions[uid]["closed_at"] = ev_date
 
         else:
-            pass
+            if any(kw in ev_type.lower() for kw in ("cook", "kitchen", "готов", "station")):
+                logger.info(f"[events] cooking-related ev_type={ev_type!r} attrs={attrs}")
+            logger.debug(f"[events] unhandled ev_type={ev_type!r} attrs_keys={list(attrs.keys())}")
 
         if ev_type == "cookingStatusChangedToNext":
+            logger.info(f"[events] cookingStatusChangedToNext attrs={attrs}")
             order_num_str = attrs.get("orderNum", "")
             cooking_status = attrs.get("cookingStatus", "")
             if order_num_str and cooking_status:

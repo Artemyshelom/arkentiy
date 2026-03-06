@@ -48,6 +48,7 @@ from app.jobs.iiko_status_report import (
     get_available_branches,
     get_branch_status,
 )
+from app.utils.timezone import branch_tz as _branch_tz
 from app.jobs.late_alerts import (
     ACTIVE_DELIVERY_STATUSES,
     LATE_MAX_MIN,
@@ -59,6 +60,14 @@ from app.jobs.late_alerts import (
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+def _tz_for_branch(name: str) -> timezone:
+    """Timezone по имени точки (utc_offset из конфига текущего тенанта)."""
+    for b in get_available_branches():
+        if b["name"] == name:
+            return _branch_tz(b)
+    return settings.default_tz
 
 # #region agent log
 def _debug_log(location: str, message: str, data: dict, hypothesis_id: str = "") -> None:
@@ -505,7 +514,7 @@ def _parse_date_arg(arg: str) -> str:
     Поддерживает: '' (сегодня), 'вчера', 'YYYY-MM-DD', 'DD.MM.YYYY', 'DD.MM'
     """
     arg = arg.strip().lower()
-    today = datetime.now(timezone(timedelta(hours=7))).date()  # UTC+7 (Барнаул)
+    today = datetime.now(settings.default_tz).date()
 
     if not arg or arg in ("сегодня", "today"):
         return today.isoformat()
@@ -558,12 +567,14 @@ def _format_staff_block(branch_name: str, staff: list[dict], role: str) -> str:
 
 def _status_summary_line(data: dict) -> str:
     """Двухстрочный блок точки для сводки /статус (вариант А)."""
+    tz = data.get("tz") or settings.default_tz
+    now_tz = datetime.now(tz).strftime("%H:%M")
     name = html.escape(data["name"])
     rev = f"{data['revenue']:,} ₽".replace(",", " ") if data.get("revenue") is not None else "—"
     checks = f"{data['check_count']} чека" if data.get("check_count") is not None else "—"
 
-    # Строка 1: имя · выручка · чеки
-    line1 = f"<b>{name}</b> · {rev} · {checks}"
+    # Строка 1: имя · местное время · выручка · чеки
+    line1 = f"<b>{name}</b> · {now_tz} · {rev} · {checks}"
 
     # Строка 2: опоздания + активные заказы
     parts2: list[str] = []
@@ -603,9 +614,7 @@ def _status_summary_line(data: dict) -> str:
 
 def _build_status_summary(results: list[dict]) -> tuple[str, list]:
     """Строит сводное сообщение и клавиатуру для нескольких точек."""
-    from datetime import datetime, timezone, timedelta
-    now_str = datetime.now(timezone(timedelta(hours=7))).strftime("%H:%M")
-    blocks = [f"📊 <b>Статус</b> — {now_str}"]
+    blocks = ["📊 <b>Статус</b>"]
     for data in results:
         blocks.append(_status_summary_line(data))
 
@@ -734,10 +743,9 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
         late_str = "⏳ ещё не доставлен"
         if r.get("planned_time"):
             try:
-                from datetime import timezone, timedelta
-                LOCAL_TZ = timezone(timedelta(hours=7))
+                _local_tz = _tz_for_branch(r.get("branch_name", ""))
                 planned_dt = datetime.strptime(r["planned_time"].replace("T", " ").split(".")[0], "%Y-%m-%d %H:%M:%S")
-                now_local = datetime.now(tz=timezone.utc).astimezone(LOCAL_TZ).replace(tzinfo=None)
+                now_local = datetime.now(_local_tz).replace(tzinfo=None)
                 if now_local > planned_dt:
                     overdue_min = int((now_local - planned_dt).total_seconds() / 60)
                     late_str = f"⏳ ещё не доставлен | ⚠️ опаздывает {overdue_min} м"
@@ -799,10 +807,9 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
         stale_note = ""
         if r.get("status") in ("Новая", "Не подтверждена", "Ждет отправки") and r.get("planned_time"):
             try:
-                from datetime import timezone, timedelta as _td
                 clean_pt = r["planned_time"].replace("T", " ").split(".")[0]
                 planned_dt = datetime.strptime(clean_pt, "%Y-%m-%d %H:%M:%S")
-                now_local = (datetime.now(tz=timezone.utc) + _td(hours=7)).replace(tzinfo=None)
+                now_local = datetime.now(_tz_for_branch(r.get("branch_name", ""))).replace(tzinfo=None)
                 if (now_local - planned_dt).total_seconds() > 3600:
                     stale_note = "\n   ⚠️ <i>статус может быть устарел — iiko не прислала обновление</i>"
             except Exception:
@@ -1099,7 +1106,7 @@ def _parse_period(tokens: list[str]) -> tuple[str, str, str, list[str]]:
     Поддерживает: один день, диапазон DD.MM-DD.MM, Nд, неделя, месяц, название месяца.
     """
     import calendar
-    today = datetime.now(timezone(timedelta(hours=7))).date()
+    today = datetime.now(settings.default_tz).date()
     period_token = ""
     filter_tokens = []
 
@@ -1215,7 +1222,8 @@ async def _build_branch_report(
     # Если данных в daily_stats нет — пробуем live-отчёт из orders_raw
     is_live = False
     if not ds and is_single_day:
-        today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date().isoformat()
+        _br_cfg = next((b for b in get_available_branches() if b["name"] == name), {})
+        today_local = datetime.now(_branch_tz(_br_cfg) if _br_cfg else settings.default_tz).date().isoformat()
         if date_from == today_local:
             ds = await get_live_today_stats(name, date_from, tenant_id=_tid)
             is_live = True
@@ -1276,7 +1284,8 @@ async def _build_city_aggregate(
     count = 0
     all_dt: dict[str, dict] = {}
     any_live = False
-    today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date().isoformat()
+    _first_tz = _branch_tz(branches[0]) if branches else settings.default_tz
+    today_local = datetime.now(_first_tz).date().isoformat()
 
     for branch in branches:
         name = branch["name"]

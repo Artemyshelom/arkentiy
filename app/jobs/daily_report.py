@@ -24,6 +24,7 @@ from app.db import (
 )
 from app.utils.formatting import fmt_money as _fmt_money, fmt_num as _fmt_num, fmt_pct as _fmt_pct
 from app.utils.timezone import tz_from_offset as _branch_tz
+from app.utils.job_tracker import track_job
 
 try:
     from app.db import get_all_branches as _get_all_branches, get_module_chats_for_city as _get_module_chats
@@ -154,6 +155,7 @@ def _format_daily_summary(date_str: str, branches: list[tuple[str, float, int]])
     return f"📈 <b>Итоги {date_str}</b>\n\n<code>" + "\n".join(rows) + "</code>"
 
 
+@track_job("daily_report")
 async def job_send_morning_report(utc_offset: int) -> None:
     """Единственный ежедневный отчёт. Запускается утром за вчера.
     1) OLAP v2 → выручка, COGS, скидки

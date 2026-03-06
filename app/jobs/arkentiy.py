@@ -102,6 +102,7 @@ _CMD_MODULE: dict[str, str] = {
     "смены": "late_queries", "payment_changes": "late_queries",
     "конкуренты": "admin", "competitors": "admin",
     "доступ": "admin", "access": "admin",
+    "jobs": "admin",
 }
 
 
@@ -2483,6 +2484,48 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
             except Exception as e:
                 logger.error(f"[/конкуренты] Ошибка: {e}", exc_info=True)
                 await _send(chat_id, f"❌ Ошибка при обновлении: {e}")
+        elif cmd == "jobs" and perms.is_admin:
+            from app.utils.job_tracker import get_jobs_status
+            from datetime import timezone as _tz
+            try:
+                jobs = await get_jobs_status()
+                msk = datetime.now(timezone.utc).astimezone(
+                    __import__("datetime").timezone(__import__("datetime").timedelta(hours=3))
+                )
+                lines = ["📊 <b>Scheduled Jobs</b>\n"]
+                for j in jobs:
+                    status = j["status"]
+                    if status == "running":
+                        emoji = "⏳"
+                    elif status == "ok":
+                        emoji = "✅"
+                    elif status == "error":
+                        emoji = "❌"
+                    elif status == "never":
+                        emoji = "🔘"
+                    else:
+                        emoji = "❓"
+                    lines.append(f"{emoji} <b>{j['name']}</b>")
+                    if status == "never":
+                        lines.append("   никогда не запускался")
+                    elif j["started_at"]:
+                        import datetime as _dt_mod
+                        msk_offset = _dt_mod.timezone(_dt_mod.timedelta(hours=3))
+                        started_msk = j["started_at"].astimezone(msk_offset)
+                        time_str = started_msk.strftime("%d.%m %H:%M")
+                        if j["duration_sec"] is not None:
+                            dur = j["duration_sec"]
+                            dur_str = f"{dur} сек" if dur < 60 else f"{dur // 60} мин {dur % 60} сек"
+                            lines.append(f"   {time_str} · {dur_str}")
+                        else:
+                            lines.append(f"   {time_str} · выполняется…")
+                        if status == "error" and j["error"]:
+                            lines.append(f"   💥 {j['error'][:80]}")
+                    lines.append("")
+                await _send(chat_id, "\n".join(lines))
+            except Exception as e:
+                logger.error(f"[/jobs] Ошибка: {e}", exc_info=True)
+                await _send(chat_id, f"❌ Ошибка: {e}")
         elif required_module is None:
             await _send(chat_id, f"❓ Неизвестная команда: /{cmd}\n\nНапиши /помощь")
 

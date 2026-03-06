@@ -12,10 +12,12 @@ from datetime import datetime
 
 from app.clients.yukassa import create_payment, YukassaError
 from app.config import get_settings
+from app.utils.job_tracker import track_job
 
 logger = logging.getLogger(__name__)
 
 
+@track_job("recurring_billing")
 async def job_recurring_billing() -> None:
     """Автоматическое продление подписок."""
     try:

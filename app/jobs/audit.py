@@ -649,6 +649,7 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
 # Основной job
 # ---------------------------------------------------------------------------
 
+@track_job("audit_report")
 async def job_audit_report(utc_offset: int = 7) -> None:
     """Ежедневный аудит-отчёт. Запускается в 05:30 МСК (= 09:30 UTC+7).
     

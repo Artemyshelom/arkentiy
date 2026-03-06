@@ -21,6 +21,7 @@ import httpx
 from app.clients.iiko_auth import get_bo_token
 from app.config import get_settings
 from app.db import get_branches, log_job_finish, log_job_start
+from app.utils.job_tracker import track_job
 
 logger = logging.getLogger(__name__)
 
@@ -209,6 +210,7 @@ async def _update_orders_raw(enriched: dict, tenant_id: int) -> int:
     return updated
 
 
+@track_job("olap_enrichment")
 async def job_olap_enrichment(tenant_id: int = 1) -> None:
     """Основной job: обогащает orders_raw за вчера данными из OLAP v2."""
     log_id = await log_job_start(f"olap_enrichment_t{tenant_id}")

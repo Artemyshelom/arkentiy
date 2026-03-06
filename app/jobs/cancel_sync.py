@@ -13,6 +13,8 @@ import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 
+from app.utils.job_tracker import track_job
+
 import httpx
 
 from app.clients.iiko_auth import get_bo_token
@@ -91,6 +93,7 @@ async def _fetch_cancelled_from_server(
         return []
 
 
+@track_job("cancel_sync")
 async def job_cancel_sync(tenant_id: int = 1) -> None:
     """
     Основной job: опрашивает все BO-серверы, получает отменённые заказы,

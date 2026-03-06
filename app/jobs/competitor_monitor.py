@@ -23,6 +23,7 @@ from app.db import (
     log_job_start,
     save_competitor_items,
 )
+from app.utils.job_tracker import track_job
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -203,6 +204,7 @@ def _format_error(city: str, competitor_name: str, url: str) -> str:
 # Main job
 # ---------------------------------------------------------------------------
 
+@track_job("competitor_monitor")
 async def job_monitor_competitors() -> None:
     """Еженедельный обход сайтов конкурентов."""
     log_id = await log_job_start("competitor_monitor")

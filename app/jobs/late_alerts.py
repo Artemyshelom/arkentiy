@@ -16,6 +16,7 @@ from app.clients.iiko_bo_events import (
     _states,
 )
 from app.config import get_settings
+from app.utils.job_tracker import track_job
 from app.db import get_alert_chats_for_city, get_client_order_count
 
 try:
@@ -110,6 +111,7 @@ async def _send_alert(chat_id: int, text: str, token: str) -> None:
             logger.error(f"late_alerts: Telegram send error: {e}")
 
 
+@track_job("late_alerts")
 async def job_late_alerts() -> None:
     settings = get_settings()
     token = settings.telegram_analytics_bot_token

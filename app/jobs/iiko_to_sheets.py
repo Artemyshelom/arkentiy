@@ -32,6 +32,7 @@ from app.db import (
     log_job_start,
     record_data_update,
 )
+from app.utils.job_tracker import track_job
 from app.utils.timezone import branch_tz
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,7 @@ async def export_day(date: datetime, branches: list[dict] | None = None) -> list
     return rows
 
 
+@track_job("iiko_to_sheets")
 async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
     """
     Ежедневная выгрузка данных за сегодня в Google Sheets (23:31 местного).

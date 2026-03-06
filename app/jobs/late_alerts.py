@@ -197,7 +197,7 @@ async def job_late_alerts() -> None:
                 raw_phone = _parse_customer_phone(customer_raw) or ""
                 client_name = html.escape(_parse_customer_name(customer_raw) or "—")
                 client_phone = html.escape(raw_phone or "—")
-                order_count = await get_client_order_count(raw_phone)
+                order_count = await get_client_order_count(raw_phone, tenant_id=tenant_id)
                 if order_count == 1:
                     client_tag = "🆕 Новый клиент"
                 elif order_count > 1:

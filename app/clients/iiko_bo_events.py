@@ -465,6 +465,19 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             # Время создания заказа — фиксируем только при первом событии
             if ev_type == "deliveryOrderCreated" and not existing.get("opened_at"):
                 existing["opened_at"] = ev_date
+                # Замер задержки: лог для анализа лага между временем создания на кассе и моментом детектирования у нас
+                if ev_date:
+                    try:
+                        created_at = BranchState._parse_ts(ev_date)
+                        if created_at:
+                            lag_sec = (datetime.now() - created_at).total_seconds()
+                            logger.info(
+                                f"[latency] [{state.branch_name}] NEW ORDER #{num} "
+                                f"opened_at={ev_date} detected_at={datetime.now().strftime('%H:%M:%S')} "
+                                f"lag={lag_sec:.0f}s"
+                            )
+                    except Exception:
+                        pass
 
             if attrs.get("deliveryStatus"):
                 new_status = attrs["deliveryStatus"]

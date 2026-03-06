@@ -51,6 +51,8 @@
 
 ## 💡 Идеи / Обсуждение
 
+- [ ] `events_latency_measure` (P2) — замерить реальную задержку BO Events API: логировать `opened_at` (время создания на кассе) vs `datetime.now()` (время детектирования у нас) при первом появлении заказа. Понять насколько iikoChain-синхронизация вносит задержку поверх 30-секундного поллинга.
+- [ ] `iiko_webhooks` (P2) — интеграция push-нотификаций iikoCloud Transport API (`DeliveryOrderUpdate`). У нас уже есть: ключи API, Transport API клиент (`app/clients/iiko.py`), публичный домен, FastAPI. Нужно: добавить роут `POST /webhooks/iiko`, зарегистрировать URL через `POST /api/1/webhooks/update_settings` для каждой точки. Потенциал: снизить задержку с 30-60с до 1-10с.
 - [ ] `tenant_id_default_hardening` (P2) — убрать `tenant_id: int = 1` как дефолт из 50+ функций database_pg.py и изменить `ctx_tenant_id` с `default=1` на `default=None`. Сейчас любой забытый вызов без явного tenant_id молча работает с тенантом 1. Все критичные места уже исправлены (shifts, daily_stats, audit, silence_log, iiko_to_sheets, cabinet JWT). Задача — убрать сам anti-pattern чтобы будущий код ломался явно, а не молча.
 - [ ] `llm_recommendations` — рекомендации по меню/ценам после стабилизации core
 - [ ] `competitor_llm_brief` — краткие выводы по конкурентам вместо сырой ленты изменений

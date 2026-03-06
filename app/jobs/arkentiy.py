@@ -2166,6 +2166,17 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                 await access_manager.handle_callback(
                     cb_id, cb_user_id, cb_chat_id, cb_message_id, cb_data
                 )
+            elif cb_data.startswith("audit_detail:") or cb_data.startswith("audit_summary:"):
+                perms = access.get_permissions(cb_chat_id, cb_user_id)
+                if perms.has("audit"):
+                    await _answer_callback(cb_id)
+                    from app.jobs.audit import handle_audit_callback
+                    from app.ctx import ctx_tenant_id as _ctx_tid
+                    await handle_audit_callback(
+                        cb_id, cb_chat_id, cb_message_id, cb_data, _ctx_tid.get()
+                    )
+                else:
+                    await _answer_callback(cb_id, "🚫 Нет доступа")
             elif cb_data.startswith("tbank:"):
                 perms = access.get_permissions(cb_chat_id, cb_user_id)
                 if perms.has("finance"):

@@ -941,10 +941,10 @@ async def job_audit_report(utc_offset: int = 7) -> None:
             city_events = [e for e in report_events if e.get("city") == city]
             if not city_events:
                 continue  # дайджест уже показал «✅ чисто»
-            report_text = _format_report(date_str, city, city_events)
+            report_text, report_keyboard = _format_report_v2(date_str, city, city_events)
             for chat_id in chat_ids:
                 try:
-                    await tg.send_message(str(chat_id), report_text)
+                    await tg.send_message_with_keyboard(str(chat_id), report_text, report_keyboard)
                 except Exception as e:
                     logger.error(f"[audit] Ошибка отправки в {chat_id}: {e}")
 
@@ -1065,12 +1065,464 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
         return
 
     if branch_filter or city_query:
-        text = _format_report(date_str, scope_label, events)
-        await send_message(str(chat_id), text)
+        text, keyboard = _format_report_v2(date_str, scope_label, events)
+        from app.clients.telegram import send_message_with_keyboard
+        await send_message_with_keyboard(str(chat_id), text, keyboard)
     else:
         by_city: dict[str, list[dict]] = {}
         for e in events:
             by_city.setdefault(e.get("city", ""), []).append(e)
+        from app.clients.telegram import send_message_with_keyboard
         for city_name, city_events in sorted(by_city.items()):
-            text = _format_report(date_str, city_name, city_events)
-            await send_message(str(chat_id), text)
+            text, keyboard = _format_report_v2(date_str, city_name, city_events)
+            await send_message_with_keyboard(str(chat_id), text, keyboard)
+
+
+# ---------------------------------------------------------------------------
+# Форматировщики v2 — сводка + детали по кнопкам
+# ---------------------------------------------------------------------------
+
+def _meta(e: dict) -> dict:
+    """Безопасно парсит meta_json события."""
+    try:
+        return json.loads(e.get("meta_json", "{}"))
+    except Exception:
+        return {}
+
+
+def _get_sum(e: dict) -> float:
+    m = _meta(e)
+    return float(m.get("sum", 0) or 0)
+
+
+def _get_early_min(e: dict) -> float:
+    m = _meta(e)
+    return float(m.get("early_min", 0) or 0)
+
+
+def _fmt_sum(v: float) -> str:
+    return f"{int(v):,}".replace(",", "\u00a0") + "₽"
+
+
+def _attention_items(events: list[dict]) -> list[str]:
+    """Формирует список строк блока «Требует внимания»."""
+    items: list[str] = []
+
+    high = [e for e in events
+            if e["event_type"] in ("cancellation", "cancellation_with_reason")
+            and _get_sum(e) >= 5000]
+    if high:
+        total = sum(_get_sum(e) for e in high)
+        items.append(f"{len(high)} отмен >5000₽ · сумма {_fmt_sum(total)}")
+
+    crit_early = [e for e in events
+                  if e["event_type"] == "early_closure" and _get_early_min(e) >= 100]
+    if crit_early:
+        items.append(f"{len(crit_early)} закрытий >100 мин раньше плана")
+
+    storno = [e for e in events if e["event_type"] == "storno_discount"]
+    if storno:
+        total_st = sum(_meta(e).get("discount_sum", 0) for e in storno)
+        items.append(f"{len(storno)} сторно со скидкой · {_fmt_sum(total_st)}")
+
+    courier_mc = [e for e in events if e["event_type"] == "courier_multicancellation"
+                  and e.get("severity") == "critical"]
+    if courier_mc:
+        items.append(f"{len(courier_mc)} курьер(а) с 5+ отменами за день")
+
+    return items
+
+
+def _group_cancellations(events: list[dict]) -> dict[str, list[dict]]:
+    """
+    Группирует отмены: сначала крупные (>5000₽), потом по причине.
+    Ключ 'high_value' — крупные; остальные ключи — текст причины.
+    """
+    groups: dict[str, list[dict]] = {}
+    for e in events:
+        if e["event_type"] not in ("cancellation", "cancellation_with_reason"):
+            continue
+        m = _meta(e)
+        s = float(m.get("sum", 0) or 0)
+        reason = (m.get("cancel_reason", "") or "Без причины").strip()
+        if s >= 5000:
+            groups.setdefault("high_value", []).append(e)
+        else:
+            groups.setdefault(reason, []).append(e)
+    return groups
+
+
+def _group_attrs(group_events: list[dict]) -> str:
+    """Вычисляет общие признаки группы: 'без оплаты · не готовились'."""
+    metas = [_meta(e) for e in group_events]
+    no_pay = all(not (m.get("payment_type") or "").strip() for m in metas)
+    not_cooked = all(not m.get("cooked") for m in metas)
+    parts: list[str] = []
+    if no_pay:
+        parts.append("без оплаты")
+    if not_cooked:
+        parts.append("не готовились")
+    return " · ".join(parts) if parts else ""
+
+
+def _format_report_v2(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    """
+    Сводка аудита v2.
+    Возвращает (text, keyboard) — keyboard готов для Telegram InlineKeyboardMarkup.
+    """
+    cancels = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
+    early = [e for e in events if e["event_type"] == "early_closure"]
+    discounts = [e for e in events if e["event_type"] in ("storno_discount", "manual_discount")]
+    fast = [e for e in events if e["event_type"] == "fast_delivery"]
+    unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
+    courier_mc = [e for e in events if e["event_type"] == "courier_multicancellation"]
+
+    lines: list[str] = [
+        f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>",
+    ]
+
+    if not events:
+        lines.append("\n✅ Подозрительных операций не выявлено")
+        return "\n".join(lines), []
+
+    # Блок «Требует внимания»
+    attn = _attention_items(events)
+    if attn:
+        lines.append("\n⚠️ <b>Требует внимания:</b>")
+        for a in attn:
+            lines.append(f"• {html.escape(a)}")
+
+    # Сводка по категориям
+    lines.append("\n📊 <b>Итого:</b> " + str(len(events)) + " событий")
+
+    if unclosed:
+        lines.append(f"🚨 Незакрытые «В пути»: {len(unclosed)}")
+    if cancels:
+        total_c = sum(_get_sum(e) for e in cancels)
+        lines.append(f"❌ Отменённые: {len(cancels)} · {_fmt_sum(total_c)}")
+    if discounts:
+        total_d = sum(
+            _meta(e).get("discount_sum", 0) or _meta(e).get("discount_sum", 0)
+            for e in discounts
+        )
+        lines.append(f"💸 Скидки/сторно: {len(discounts)} · {_fmt_sum(total_d)}")
+    if courier_mc:
+        lines.append(f"👤 Курьеры с отменами: {len(courier_mc)}")
+    if early:
+        lines.append(f"🕐 Ранние закрытия: {len(early)}")
+    if fast:
+        lines.append(f"⚡ Быстрые доставки: {len(fast)}")
+
+    # Кнопки навигации
+    cb_prefix = f"audit_detail:{city}:{date_str}"
+    buttons: list[dict] = []
+    if cancels:
+        buttons.append({"text": "❌ Отмены", "callback_data": f"{cb_prefix}:cancellations"})
+    if discounts:
+        buttons.append({"text": "💸 Скидки", "callback_data": f"{cb_prefix}:discounts"})
+    if courier_mc:
+        buttons.append({"text": "👤 Курьеры", "callback_data": f"{cb_prefix}:couriers"})
+    if early:
+        buttons.append({"text": "🕐 Закрытия", "callback_data": f"{cb_prefix}:early"})
+    if fast:
+        buttons.append({"text": "⚡ Быстрые", "callback_data": f"{cb_prefix}:fast"})
+    if unclosed:
+        buttons.append({"text": "🚨 В пути", "callback_data": f"{cb_prefix}:unclosed"})
+
+    # Разбиваем кнопки по 3 в ряд
+    keyboard: list[list[dict]] = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
+
+    return "\n".join(lines), keyboard
+
+
+def _format_cancellations_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    cancels = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
+    groups = _group_cancellations(events)
+
+    lines = [f"❌ <b>Отменённые [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    # 1. Крупные
+    high = groups.pop("high_value", [])
+    if high:
+        total = sum(_get_sum(e) for e in high)
+        lines.append(f"🔴 <b>Крупные >5000₽ — {len(high)} шт · {_fmt_sum(total)}</b>")
+        for e in sorted(high, key=lambda x: -_get_sum(x)):
+            m = _meta(e)
+            num = m.get("delivery_num", "?")
+            s = _get_sum(e)
+            reason = (m.get("cancel_reason", "") or "без причины").strip()
+            cooked_lbl = "🍳 готовился" if m.get("cooked") else "без списания"
+            branch = e.get("branch_name", "")
+            tag = f"[{_branch_tag(branch)}] " if branch else ""
+            lines.append(f"  {tag}#{num} {_fmt_sum(s)} · {html.escape(reason)} · {cooked_lbl}")
+            comment = (m.get("comment", "") or "").strip()
+            if comment:
+                lines.append(f"    └ {html.escape(comment[:100])}")
+        lines.append("")
+
+    # 2. По причинам
+    for reason, group in sorted(groups.items(), key=lambda x: -len(x[1])):
+        total = sum(_get_sum(e) for e in group)
+        attrs = _group_attrs(group)
+        attr_str = f" · {attrs}" if attrs else ""
+        lines.append(f"<b>{html.escape(reason)} — {len(group)} шт · {_fmt_sum(total)}</b>{html.escape(attr_str)}")
+
+        # Группируем номера по ветке
+        by_branch: dict[str, list[str]] = {}
+        for e in sorted(group, key=lambda x: -_get_sum(x)):
+            m = _meta(e)
+            num = str(m.get("delivery_num", "?"))
+            branch = e.get("branch_name", "")
+            tag = _branch_tag(branch) if branch else "—"
+            by_branch.setdefault(tag, []).append(f"#{num}")
+        for tag, nums in sorted(by_branch.items()):
+            lines.append(f"  [{tag}] {' · '.join(nums)}")
+        lines.append("")
+
+    if not cancels:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+def _format_early_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    early = [e for e in events if e["event_type"] == "early_closure"]
+
+    crit = [e for e in early if _get_early_min(e) >= 100]
+    moderate = [e for e in early if 60 <= _get_early_min(e) < 100]
+
+    lines = [f"🕐 <b>Ранние закрытия [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    if crit:
+        lines.append(f"🔴 <b>Критичные >100 мин — {len(crit)} шт</b>")
+        for e in sorted(crit, key=lambda x: -_get_early_min(x)):
+            m = _meta(e)
+            num = m.get("delivery_num", "?")
+            em = int(_get_early_min(e))
+            courier = (m.get("courier", "") or "").strip()
+            s = float(m.get("sum", 0) or 0)
+            branch = e.get("branch_name", "")
+            tag = f"[{_branch_tag(branch)}] " if branch else ""
+            courier_str = f" · {html.escape(courier)}" if courier else ""
+            lines.append(f"  {tag}#{num} · −{em} мин{courier_str} · {_fmt_sum(s)}")
+        lines.append("")
+
+    if moderate:
+        lines.append(f"🟡 <b>Умеренные 60-100 мин — {len(moderate)} шт</b>")
+        # Компактно: по 4 в строку
+        by_branch: dict[str, list[str]] = {}
+        for e in sorted(moderate, key=lambda x: -_get_early_min(x)):
+            m = _meta(e)
+            num = m.get("delivery_num", "?")
+            em = int(_get_early_min(e))
+            branch = e.get("branch_name", "")
+            tag = _branch_tag(branch) if branch else "—"
+            by_branch.setdefault(tag, []).append(f"#{num} −{em}м")
+        for tag, items_list in sorted(by_branch.items()):
+            chunk = " · ".join(items_list)
+            lines.append(f"  [{tag}] {chunk}")
+        lines.append("")
+
+    if not early:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+def _format_discounts_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    discounts = [e for e in events if e["event_type"] in ("storno_discount", "manual_discount")]
+
+    lines = [f"💸 <b>Скидки / сторно [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    storno = [e for e in discounts if e["event_type"] == "storno_discount"]
+    manual = [e for e in discounts if e["event_type"] == "manual_discount"]
+
+    if storno:
+        lines.append(f"🔴 <b>Сторно + скидка — {len(storno)} шт</b>")
+        for e in sorted(storno, key=lambda x: -_meta(x).get("discount_sum", 0)):
+            m = _meta(e)
+            num = m.get("order_num", "?")
+            disc = float(m.get("discount_sum", 0))
+            branch = e.get("branch_name", "")
+            tag = f"[{_branch_tag(branch)}] " if branch else ""
+            open_t = m.get("open_time", "")
+            storno_t = m.get("storno_time", "")
+            pay_b = m.get("pay_before", "")
+            pay_a = m.get("pay_after", pay_b)
+            disc_type = m.get("discount_type", "ручная")
+            lines.append(f"  {tag}#{num}")
+            timeline: list[str] = []
+            if open_t and len(open_t) >= 16:
+                timeline.append(f"откр {open_t[11:16]}")
+            if storno_t and len(storno_t) >= 16:
+                timeline.append(f"сторно {storno_t[11:16]}")
+            if timeline:
+                lines.append(f"    📅 {' → '.join(timeline)}")
+            if pay_b != pay_a and pay_a:
+                lines.append(f"    💳 оплата: {html.escape(pay_b)} → {html.escape(pay_a)}")
+            else:
+                lines.append(f"    💳 {html.escape(pay_b or '—')}")
+            lines.append(f"    💰 скидка: {html.escape(disc_type)} {_fmt_sum(disc)}")
+        lines.append("")
+
+    if manual:
+        total_m = sum(_meta(e).get("discount_sum", 0) for e in manual)
+        lines.append(f"🟡 <b>Ручные скидки — {len(manual)} шт · {_fmt_sum(total_m)}</b>")
+        for e in sorted(manual, key=lambda x: -_meta(x).get("discount_sum", 0)):
+            m = _meta(e)
+            num = m.get("order_num", "?")
+            disc = float(m.get("discount_sum", 0))
+            branch = e.get("branch_name", "")
+            tag = f"[{_branch_tag(branch)}] " if branch else ""
+            pay = (m.get("pay_types", "") or "").strip()
+            pay_str = f" · {html.escape(pay)}" if pay else ""
+            desc = e.get("description", "")
+            # Извлекаем время из description если оно там есть
+            time_part = ""
+            if " в " in desc:
+                time_part = " · " + desc.split(" в ")[-1].split(" ")[0]
+            lines.append(f"  {tag}#{num} {_fmt_sum(disc)}{time_part}{pay_str}")
+        lines.append("")
+
+    if not discounts:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+def _format_couriers_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    couriers = [e for e in events if e["event_type"] == "courier_multicancellation"]
+
+    lines = [f"👤 <b>Курьеры с отменами [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    for e in sorted(couriers, key=lambda x: -_meta(x).get("cancel_count", 0)):
+        m = _meta(e)
+        courier = m.get("courier", "?")
+        count = m.get("cancel_count", 0)
+        total = float(m.get("total_sum", 0))
+        nums = m.get("order_nums", [])
+        branch = e.get("branch_name", "")
+        tag = f"[{_branch_tag(branch)}] " if branch else ""
+        icon = "🔴" if e.get("severity") == "critical" else "🟡"
+        nums_str = " · ".join(f"#{n}" for n in nums[:5])
+        if len(nums) > 5:
+            nums_str += f" +{len(nums)-5}"
+        lines.append(f"{icon} {tag}<b>{html.escape(courier)}</b> — {count} отмен · {_fmt_sum(total)}")
+        lines.append(f"   {nums_str}")
+        lines.append("")
+
+    if not couriers:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+def _format_fast_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    fast = [e for e in events if e["event_type"] == "fast_delivery"]
+
+    lines = [f"⚡ <b>Быстрые доставки [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    for e in sorted(fast, key=lambda x: _meta(x).get("delta_min", 99)):
+        m = _meta(e)
+        num = m.get("delivery_num", "?")
+        delta = m.get("delta_min", 0)
+        courier = (m.get("courier", "") or "").strip()
+        s = float(m.get("sum", 0) or 0)
+        branch = e.get("branch_name", "")
+        tag = f"[{_branch_tag(branch)}] " if branch else ""
+        icon = "🔴" if e.get("severity") == "critical" else "🟡"
+        courier_str = f" · {html.escape(courier)}" if courier else ""
+        lines.append(f"{icon} {tag}#{num} — {delta:.0f} мин{courier_str} · {_fmt_sum(s)}")
+
+    if not fast:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+def _format_unclosed_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
+
+    lines = [f"🚨 <b>Незакрытые «В пути» [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    for e in unclosed:
+        m = _meta(e)
+        num = m.get("delivery_num", "?")
+        order_date = m.get("order_date", "")
+        courier = (m.get("courier", "") or "").strip()
+        s = float(m.get("sum", 0) or 0)
+        branch = e.get("branch_name", "")
+        tag = f"[{_branch_tag(branch)}] " if branch else ""
+        courier_str = f" · {html.escape(courier)}" if courier else ""
+        date_str_e = f" (от {order_date})" if order_date else ""
+        lines.append(f"🔴 {tag}#{num}{date_str_e}{courier_str} · {_fmt_sum(s)}")
+
+    if not unclosed:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
+async def handle_audit_callback(
+    cb_id: str,
+    cb_chat_id: int,
+    cb_message_id: int,
+    cb_data: str,
+    current_tenant_id: int,
+) -> None:
+    """
+    Обрабатывает нажатия inline-кнопок аудита.
+    cb_data форматы:
+      audit_detail:{city}:{date}:{type}
+      audit_summary:{city}:{date}
+    """
+    from app.clients.telegram import edit_message_with_keyboard
+
+    if cb_data.startswith("audit_summary:"):
+        parts = cb_data.split(":", 3)
+        if len(parts) < 4:
+            return
+        _, city, date_str = parts[1], parts[2], parts[3]
+        events = await get_audit_events(date_str, city=city, tenant_id=current_tenant_id)
+        unclosed = await _detect_unclosed_in_transit(date_str)
+        branch_to_city = _all_branches_map()
+        unclosed = [u for u in unclosed if branch_to_city.get(u["branch_name"], "") == city]
+        events = [e for e in events if e.get("event_type") != "unclosed_in_transit"]
+        events.extend(unclosed)
+        text, keyboard = _format_report_v2(date_str, city, events)
+        await edit_message_with_keyboard(cb_chat_id, cb_message_id, text, keyboard)
+
+    elif cb_data.startswith("audit_detail:"):
+        parts = cb_data.split(":", 4)
+        if len(parts) < 5:
+            return
+        _, city, date_str, detail_type = parts[1], parts[2], parts[3], parts[4]
+        events = await get_audit_events(date_str, city=city, tenant_id=current_tenant_id)
+        unclosed = await _detect_unclosed_in_transit(date_str)
+        branch_to_city = _all_branches_map()
+        unclosed = [u for u in unclosed if branch_to_city.get(u["branch_name"], "") == city]
+        events_with_unclosed = [e for e in events if e.get("event_type") != "unclosed_in_transit"]
+        events_with_unclosed.extend(unclosed)
+
+        if detail_type == "cancellations":
+            text, keyboard = _format_cancellations_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "early":
+            text, keyboard = _format_early_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "discounts":
+            text, keyboard = _format_discounts_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "couriers":
+            text, keyboard = _format_couriers_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "fast":
+            text, keyboard = _format_fast_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "unclosed":
+            text, keyboard = _format_unclosed_detail(date_str, city, events_with_unclosed)
+        else:
+            return
+
+        await edit_message_with_keyboard(cb_chat_id, cb_message_id, text, keyboard)

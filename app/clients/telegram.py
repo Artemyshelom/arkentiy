@@ -170,3 +170,67 @@ async def error_alert(job_name: str, error: str) -> bool:
         f"<code>{error[:500]}</code>"
     )
     return await monitor(text)
+
+
+async def send_message_with_keyboard(
+    chat_id: str,
+    text: str,
+    keyboard: list[list[dict]],
+    parse_mode: str = "HTML",
+) -> int | None:
+    """Отправляет сообщение с InlineKeyboard. Возвращает message_id или None."""
+    token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
+    if not token:
+        await send_message(chat_id, text, parse_mode=parse_mode)
+        return None
+    payload: dict = {
+        "chat_id": chat_id,
+        "text": text[:4096],
+        "parse_mode": parse_mode,
+    }
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/sendMessage",
+                json=payload,
+            )
+            data = resp.json()
+            if data.get("ok"):
+                return data["result"]["message_id"]
+            logger.error(f"send_message_with_keyboard error: {data}")
+    except Exception as e:
+        logger.error(f"send_message_with_keyboard exception: {e}")
+    return None
+
+
+async def edit_message_with_keyboard(
+    chat_id: int,
+    message_id: int,
+    text: str,
+    keyboard: list[list[dict]],
+    parse_mode: str = "HTML",
+) -> None:
+    """Редактирует сообщение с InlineKeyboard."""
+    token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
+    if not token:
+        return
+    payload: dict = {
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text[:4096],
+        "parse_mode": parse_mode,
+    }
+    if keyboard:
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
+    try:
+        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            resp = await client.post(
+                f"https://api.telegram.org/bot{token}/editMessageText",
+                json=payload,
+            )
+            if not resp.json().get("ok"):
+                logger.error(f"edit_message_with_keyboard error: {resp.json()}")
+    except Exception as e:
+        logger.error(f"edit_message_with_keyboard exception: {e}")

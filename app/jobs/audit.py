@@ -62,6 +62,8 @@ FAST_DELIVERY_MIN = 15             # доставка за N мин от соз�
 CANCEL_HIGH_SUM = 500              # отмена ≥ N₽ без причины = warning
 CANCEL_WITH_REASON_SUM = 200       # отмена ≥ N₽ с указанной причиной = warning
 EARLY_CLOSURE_MIN = 60             # закрыт на N+ мин раньше плана = подозрительно
+MANUAL_DISCOUNT_MIN = 500          # ручная скидка ≥ N₽ без сторно = warning
+COURIER_CANCEL_THRESHOLD = 3       # курьер с N+ отменами за день = подозрительно
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +277,55 @@ async def _detect_unclosed_in_transit(date_str: str) -> list[dict]:
     return findings
 
 
+async def _detect_courier_multicancellation(date_str: str) -> list[dict]:
+    """
+    Курьер с 3+ отменами за день — подозрение на намеренные отмены.
+    Severity: warning при ≥3, critical при ≥5 отменах.
+    """
+    findings: list[dict] = []
+    now_iso = datetime.now(timezone.utc).isoformat()
+    pool = get_pool()
+
+    rows = await pool.fetch(
+        """SELECT branch_name, courier,
+                  COUNT(*)::int AS cancel_count,
+                  COALESCE(SUM(sum::numeric), 0)::int AS total_sum,
+                  array_agg(delivery_num ORDER BY sum::numeric DESC NULLS LAST) AS order_nums
+           FROM orders_raw
+           WHERE date::text = $1
+             AND status = 'Отменена'
+             AND courier IS NOT NULL AND courier != ''
+           GROUP BY branch_name, courier
+           HAVING COUNT(*) >= $2
+           ORDER BY cancel_count DESC, total_sum DESC""",
+        date_str,
+        COURIER_CANCEL_THRESHOLD,
+    )
+    for r in rows:
+        count = r["cancel_count"]
+        total = r["total_sum"]
+        total_str = f"{total:,}".replace(",", "\u00a0")
+        courier = r["courier"]
+        nums = list(r["order_nums"])[:3]
+        nums_str = ", ".join(f"#{n}" for n in nums)
+        if len(r["order_nums"]) > 3:
+            nums_str += f" +{len(r['order_nums']) - 3}"
+        findings.append({
+            "branch_name": r["branch_name"],
+            "event_type": "courier_multicancellation",
+            "severity": "critical" if count >= 5 else "warning",
+            "description": f"{courier} — {count} отмен, {total_str}\u20bd · {nums_str}",
+            "meta_json": json.dumps({
+                "courier": courier,
+                "cancel_count": count,
+                "total_sum": total,
+                "order_nums": list(r["order_nums"]),
+            }, ensure_ascii=False),
+            "created_at": now_iso,
+        })
+    return findings
+
+
 async def _generate_audit_for_date(date_str: str) -> list[dict]:
     """
     Полная генерация аудит-событий для указанной даты.
@@ -284,6 +335,12 @@ async def _generate_audit_for_date(date_str: str) -> list[dict]:
     branch_to_city = _all_branches_map()
 
     all_findings = await _detect_from_orders_raw(date_str)
+
+    try:
+        courier_findings = await _detect_courier_multicancellation(date_str)
+        all_findings.extend(courier_findings)
+    except Exception as e:
+        logger.warning(f"[audit] Ошибка детектора courier_multicancellation: {e}")
 
     try:
         storno_findings = await _detect_storno_discount(date_str)
@@ -474,6 +531,49 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
                     "created_at": now_iso,
                 })
 
+        # Ручные скидки без сторно (не пересекаются со storno_discount)
+        seen_manual: set[tuple[str, str]] = set()
+        for row in data:
+            dept = row.get("Department", "").strip()
+            if dept not in target_names:
+                continue
+            order_num = str(row.get("OrderNum", ""))
+            key = (dept, order_num)
+            if key in storned_orders or key in seen_manual:
+                continue
+            disc_sum = float(row.get("DiscountSum", 0) or 0)
+            if (
+                row.get("Storned") == "FALSE"
+                and row.get("OrderDiscount.Type", "") == ""
+                and disc_sum >= MANUAL_DISCOUNT_MIN
+            ):
+                seen_manual.add(key)
+                sum_str = f"{int(disc_sum):,}".replace(",", "\u00a0")
+                close_t = ""
+                ct = row.get("CloseTime", "")
+                if ct and len(ct) >= 16:
+                    close_t = ct[11:16]
+                pay = (row.get("PayTypes", "") or "").strip()
+                pay_str = f" · {pay}" if pay else ""
+                server_findings.append({
+                    "branch_name": dept,
+                    "city": branch_to_city.get(dept, ""),
+                    "event_type": "manual_discount",
+                    "severity": "critical" if disc_sum >= 2000 else "warning",
+                    "description": (
+                        f"#{order_num} — ручная скидка {sum_str}\u20bd"
+                        + (f" в {close_t}" if close_t else "")
+                        + pay_str
+                    ),
+                    "meta_json": json.dumps({
+                        "order_num": order_num,
+                        "branch_name": dept,
+                        "discount_sum": disc_sum,
+                        "pay_types": pay,
+                    }, ensure_ascii=False),
+                    "created_at": now_iso,
+                })
+
         return server_findings
 
     tasks = [_query_server(url, srv["names"], srv["login"], srv["password"])
@@ -579,33 +679,57 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
     """Форматирует аудит-отчёт в HTML для Telegram."""
     unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
     fast = [e for e in events if e["event_type"] == "fast_delivery"]
+    courier_multi = [e for e in events if e["event_type"] == "courier_multicancellation"]
     cancelled = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
-    discounts = [e for e in events if e["event_type"] in ("storno_discount", "discount_manual")]
+    discounts = [e for e in events if e["event_type"] in ("storno_discount", "manual_discount")]
     early = [e for e in events if e["event_type"] == "early_closure"]
 
-    lines = [
-        f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>",
-        "",
-    ]
+    total = len(events)
+    lines = [f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>"]
+
+    if total == 0:
+        lines.append("✅ Чисто")
+        return "\n".join(lines)
+
+    total_crit = sum(1 for e in events if e.get("severity") == "critical")
+    total_warn = total - total_crit
+    summary_parts = []
+    if total_crit:
+        summary_parts.append(f"{total_crit}🔴")
+    if total_warn:
+        summary_parts.append(f"{total_warn}🟡")
+    lines.append(" · ".join(summary_parts))
+    lines.append("")
+
+    def _sort_sev(e: dict) -> int:
+        return 0 if e.get("severity") == "critical" else 1
 
     if unclosed:
-        lines.append(f"🚨 <b>Незакрытые заказы «В пути» ({len(unclosed)})</b>")
+        lines.append(f"🚨 <b>Незакрытые «В пути» ({len(unclosed)})</b>")
         for e in unclosed:
             desc = _tag_description(e["description"], e.get("branch_name", ""))
             lines.append(f"🔴 {html.escape(desc)}")
         lines.append("")
 
     if fast:
-        lines.append(f"⚡ <b>Аномально быстрые доставки ({len(fast)})</b>")
-        for e in fast:
+        lines.append(f"⚡ <b>Быстрые доставки ({len(fast)})</b>")
+        for e in sorted(fast, key=_sort_sev):
+            icon = "🔴" if e["severity"] == "critical" else "🟡"
+            desc = _tag_description(e["description"], e.get("branch_name", ""))
+            lines.append(f"{icon} {html.escape(desc)}")
+        lines.append("")
+
+    if courier_multi:
+        lines.append(f"👤 <b>Отмены по курьеру ({len(courier_multi)})</b>")
+        for e in sorted(courier_multi, key=_sort_sev):
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             desc = _tag_description(e["description"], e.get("branch_name", ""))
             lines.append(f"{icon} {html.escape(desc)}")
         lines.append("")
 
     if cancelled:
-        lines.append(f"❌ <b>Отменённые заказы с суммой ({len(cancelled)})</b>")
-        for e in cancelled:
+        lines.append(f"❌ <b>Отменённые заказы ({len(cancelled)})</b>")
+        for e in sorted(cancelled, key=_sort_sev):
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             desc = _tag_description(e["description"], e.get("branch_name", ""))
             lines.append(f"{icon} {html.escape(desc)}")
@@ -619,29 +743,92 @@ def _format_report(date_str: str, city: str, events: list[dict]) -> str:
         lines.append("")
 
     if discounts:
-        lines.append(f"💸 <b>Сторно + скидка ({len(discounts)})</b>")
-        for e in discounts:
+        lines.append(f"💸 <b>Скидки / сторно ({len(discounts)})</b>")
+        for e in sorted(discounts, key=_sort_sev):
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             desc = _tag_description(e["description"], e.get("branch_name", ""))
-            parts = desc.split(" | ")
-            lines.append(f"{icon} <b>{html.escape(parts[0])}</b>")
-            for p in parts[1:]:
-                lines.append(f"   {html.escape(p)}")
+            if e["event_type"] == "storno_discount":
+                parts_d = desc.split(" | ")
+                tail = " · ".join(parts_d[1:]) if len(parts_d) > 1 else ""
+                lines.append(
+                    f"{icon} <b>{html.escape(parts_d[0])}</b>"
+                    + (f"  {html.escape(tail)}" if tail else "")
+                )
+            else:
+                lines.append(f"{icon} {html.escape(desc)}")
         lines.append("")
 
     if early:
-        lines.append(f"🕐 <b>Ранние закрытия заказов ({len(early)})</b>")
-        for e in early:
+        lines.append(f"🕐 <b>Ранние закрытия ({len(early)})</b>")
+        for e in sorted(early, key=_sort_sev):
             icon = "🔴" if e["severity"] == "critical" else "🟡"
             desc = _tag_description(e["description"], e.get("branch_name", ""))
             lines.append(f"{icon} {html.escape(desc)}")
         lines.append("")
 
-    total = len(unclosed) + len(fast) + len(cancelled) + len(discounts) + len(early)
-    if total == 0:
-        lines.append("✅ Подозрительных операций не выявлено")
+    lines.append(f"<i>Итого: {total} событий</i>")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Дайджест (краткий кросс-городской отчёт)
+# ---------------------------------------------------------------------------
+
+_TYPE_LABEL: dict[str, str] = {
+    "fast_delivery": "быстро",
+    "cancellation": "отмена",
+    "cancellation_with_reason": "отмена",
+    "early_closure": "раньше",
+    "storno_discount": "сторно",
+    "manual_discount": "скидка",
+    "unclosed_in_transit": "незакрыт",
+    "courier_multicancellation": "курьер",
+}
+
+
+def _format_digest(date_str: str, all_events: list[dict]) -> str:
+    """Краткий дайджест аудита по всем городам одного тенанта."""
+    by_city: dict[str, list[dict]] = {}
+    for e in all_events:
+        city = e.get("city") or "—"
+        by_city.setdefault(city, []).append(e)
+
+    total_crit = sum(1 for e in all_events if e.get("severity") == "critical")
+    total_warn = sum(1 for e in all_events if e.get("severity") == "warning")
+
+    lines = [f"📋 <b>Аудит-дайджест — {_date_label(date_str)}</b>", ""]
+
+    for city in sorted(by_city):
+        events = by_city[city]
+        crit = sum(1 for e in events if e.get("severity") == "critical")
+        warn = sum(1 for e in events if e.get("severity") == "warning")
+        if crit == 0 and warn == 0:
+            lines.append(f"✅ {html.escape(city)}")
+        else:
+            badges: list[str] = []
+            if crit:
+                badges.append(f"{crit}🔴")
+            if warn:
+                badges.append(f"{warn}🟡")
+            type_counts: dict[str, int] = {}
+            for e in events:
+                lbl = _TYPE_LABEL.get(e["event_type"], e["event_type"])
+                type_counts[lbl] = type_counts.get(lbl, 0) + 1
+            type_str = ", ".join(f"{cnt}×{lbl}" for lbl, cnt in type_counts.items())
+            lines.append(
+                f"⚠️ <b>{html.escape(city)}</b>: {' '.join(badges)} — {html.escape(type_str)}"
+            )
+
+    lines.append("")
+    if total_crit == 0 and total_warn == 0:
+        lines.append("✅ Всё чисто")
     else:
-        lines.append(f"<i>Итого: {total} событий</i>")
+        summary: list[str] = []
+        if total_crit:
+            summary.append(f"{total_crit} критических🔴")
+        if total_warn:
+            summary.append(f"{total_warn} предупреждений🟡")
+        lines.append(f"<i>{' · '.join(summary)}</i>")
 
     return "\n".join(lines)
 
@@ -719,14 +906,41 @@ async def job_audit_report(utc_offset: int = 7) -> None:
         except Exception as e:
             logger.debug(f"[audit] probe_cash_shifts exception {row['branch_name']}: {e}")
 
+    # Строим карту tenant → ветки для фильтрации событий
+    tenant_branch_set: dict[int, set[str]] = {}
+    for row in all_iiko_creds:
+        tenant_branch_set.setdefault(row["tenant_id"], set()).add(row["branch_name"])
+
     # Отправляем отчёты для каждого тенанта по его городам
     for tenant_id, cities in tenant_cities.items():
+        branches_of_tenant = tenant_branch_set.get(tenant_id, set())
+        tenant_events = [
+            e for e in report_events
+            if e.get("branch_name", "") in branches_of_tenant
+        ]
+
+        # Дайджест: одно сжатое сообщение по всем городам тенанта
+        all_digest_chats: set[int] = set()
+        for city in sorted(cities):
+            cids = await get_module_chats_for_city("audit", city, tenant_id=tenant_id)
+            all_digest_chats.update(cids)
+
+        if all_digest_chats:
+            digest_text = _format_digest(date_str, tenant_events)
+            for chat_id in all_digest_chats:
+                try:
+                    await tg.send_message(str(chat_id), digest_text)
+                except Exception as e:
+                    logger.error(f"[audit] Ошибка отправки дайджеста в {chat_id}: {e}")
+
+        # Детальные отчёты только по городам с событиями
         for city in sorted(cities):
             chat_ids = await get_module_chats_for_city("audit", city, tenant_id=tenant_id)
             if not chat_ids:
                 continue
-            # Фильтруем события по городу (этот же город может быть у разных тенантов)
             city_events = [e for e in report_events if e.get("city") == city]
+            if not city_events:
+                continue  # дайджест уже показал «✅ чисто»
             report_text = _format_report(date_str, city, city_events)
             for chat_id in chat_ids:
                 try:

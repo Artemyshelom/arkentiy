@@ -443,10 +443,11 @@ async def _load_employees(bo_url: str, client: httpx.AsyncClient, token: str) ->
 # Обработка событий
 # ---------------------------------------------------------------------------
 
-def _process_events(state: BranchState, events_xml: list) -> None:
+def _process_events(state: BranchState, events_xml: list, incremental: bool = False) -> None:
     """
     Обрабатывает список событий, обновляет state.
     iiko Events XML: тип в <type>, данные в <attribute><name>/<value>.
+    incremental=True — включает лог замера задержки для новых заказов.
     """
     events_sorted = sorted(events_xml, key=lambda ev: ev.findtext("date", ""))
 
@@ -465,15 +466,18 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             # Время создания заказа — фиксируем только при первом событии
             if ev_type == "deliveryOrderCreated" and not existing.get("opened_at"):
                 existing["opened_at"] = ev_date
-                # Замер задержки: лог для анализа лага между временем создания на кассе и моментом детектирования у нас
-                if ev_date:
+                # Замер задержки: только при инкрементальном поллинге (не full_reload)
+                if incremental and ev_date:
                     try:
-                        created_at = BranchState._parse_ts(ev_date)
-                        if created_at:
-                            lag_sec = (datetime.now() - created_at).total_seconds()
+                        # Парсим с сохранением timezone (fromisoformat понимает +07:00)
+                        created_at_tz = datetime.fromisoformat(ev_date)
+                        now_utc = datetime.now(timezone.utc)
+                        # created_at_tz может быть naive (без tz) — тогда нельзя сравнивать с utc
+                        if created_at_tz.tzinfo is not None:
+                            lag_sec = (now_utc - created_at_tz).total_seconds()
                             logger.info(
                                 f"[latency] [{state.branch_name}] NEW ORDER #{num} "
-                                f"opened_at={ev_date} detected_at={datetime.now().strftime('%H:%M:%S')} "
+                                f"opened_at={ev_date} detected_utc={now_utc.strftime('%H:%M:%S')} "
                                 f"lag={lag_sec:.0f}s"
                             )
                     except Exception:
@@ -852,7 +856,7 @@ async def _incremental_poll(state: BranchState, client: httpx.AsyncClient) -> No
     if not events:
         return
 
-    _process_events(state, events)
+    _process_events(state, events, incremental=True)
     state.revision = max_revision
 
     logger.debug(

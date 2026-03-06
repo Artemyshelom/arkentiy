@@ -565,16 +565,18 @@ def _format_staff_block(branch_name: str, staff: list[dict], role: str) -> str:
 # RT handlers (статус, повара, курьеры) — читают из BranchState
 # ------------------------------------------------------------------
 
-def _status_summary_line(data: dict) -> str:
+def _status_summary_line(data: dict, show_time: bool = False) -> str:
     """Двухстрочный блок точки для сводки /статус (вариант А)."""
-    tz = data.get("tz") or settings.default_tz
-    now_tz = datetime.now(tz).strftime("%H:%M")
     name = html.escape(data["name"])
     rev = f"{data['revenue']:,} ₽".replace(",", " ") if data.get("revenue") is not None else "—"
     checks = f"{data['check_count']} чека" if data.get("check_count") is not None else "—"
 
-    # Строка 1: имя · местное время · выручка · чеки
-    line1 = f"<b>{name}</b> · {now_tz} · {rev} · {checks}"
+    if show_time:
+        tz = data.get("tz") or settings.default_tz
+        now_tz = datetime.now(tz).strftime("%H:%M")
+        line1 = f"<b>{name}</b> · {now_tz} · {rev} · {checks}"
+    else:
+        line1 = f"<b>{name}</b> · {rev} · {checks}"
 
     # Строка 2: опоздания + активные заказы
     parts2: list[str] = []
@@ -614,9 +616,20 @@ def _status_summary_line(data: dict) -> str:
 
 def _build_status_summary(results: list[dict]) -> tuple[str, list]:
     """Строит сводное сообщение и клавиатуру для нескольких точек."""
-    blocks = ["📊 <b>Статус</b>"]
+    # Если все точки в одной tz — время однажды в шапке; если tz разные — в каждой строке.
+    offsets = {int(r["tz"].utcoffset(None).total_seconds()) for r in results if r.get("tz")}
+    multi_tz = len(offsets) > 1
+
+    if multi_tz:
+        header = "📊 <b>Статус</b>"
+    else:
+        common_tz = next((r["tz"] for r in results if r.get("tz")), settings.default_tz)
+        now_str = datetime.now(common_tz).strftime("%H:%M")
+        header = f"📊 <b>Статус</b> — {now_str}"
+
+    blocks = [header]
     for data in results:
-        blocks.append(_status_summary_line(data))
+        blocks.append(_status_summary_line(data, show_time=multi_tz))
 
     keyboard: list[list[dict]] = []
     row_buf: list[dict] = []

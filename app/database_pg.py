@@ -1207,6 +1207,30 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     return result
 
 
+async def get_live_today_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -> dict | None:
+    """Базовая статистика за сегодня прямо из orders_raw (смена ещё не закрыта)."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """SELECT
+            COUNT(*) FILTER (WHERE status != 'Отменена') AS orders_count,
+            SUM(sum) FILTER (WHERE status != 'Отменена') AS revenue,
+            COUNT(*) FILTER (WHERE is_self_service = false AND status != 'Отменена') AS delivery_count,
+            COUNT(*) FILTER (WHERE is_self_service = true AND status != 'Отменена') AS pickup_count
+        FROM orders_raw
+        WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3""",
+        tenant_id, branch_name, date_iso,
+    )
+    if not row or not row["orders_count"]:
+        return None
+    result = dict(row)
+    rev = result.get("revenue") or 0
+    chk = result.get("orders_count") or 0
+    result["revenue"] = round(rev)
+    result["avg_check"] = round(rev / chk) if chk else 0
+    result["_is_live"] = True
+    return result
+
+
 async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenant_id: int = 1) -> dict | None:
     """Агрегирует daily_stats за период [date_from, date_to] для одной точки."""
     import json as _json
@@ -1230,10 +1254,18 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
             CASE WHEN SUM(revenue) > 0
                  THEN SUM(cogs_pct * revenue) / SUM(revenue)
             END AS cogs_pct,
-            AVG(avg_late_min) AS avg_late_min,
-            AVG(avg_cooking_min) AS avg_cooking_min,
-            AVG(avg_wait_min) AS avg_wait_min,
-            AVG(avg_delivery_min) AS avg_delivery_min,
+            SUM(avg_late_min * COALESCE(late_count, 0))
+                / NULLIF(SUM(CASE WHEN avg_late_min > 0 THEN COALESCE(late_count, 0) ELSE 0 END), 0)
+                AS avg_late_min,
+            SUM(avg_cooking_min * COALESCE(orders_count, 0))
+                / NULLIF(SUM(CASE WHEN avg_cooking_min IS NOT NULL THEN COALESCE(orders_count, 0) ELSE 0 END), 0)
+                AS avg_cooking_min,
+            SUM(avg_wait_min * COALESCE(total_delivered, 0))
+                / NULLIF(SUM(CASE WHEN avg_wait_min IS NOT NULL THEN COALESCE(total_delivered, 0) ELSE 0 END), 0)
+                AS avg_wait_min,
+            SUM(avg_delivery_min * COALESCE(total_delivered, 0))
+                / NULLIF(SUM(CASE WHEN avg_delivery_min IS NOT NULL THEN COALESCE(total_delivered, 0) ELSE 0 END), 0)
+                AS avg_delivery_min,
             SUM(COALESCE(exact_time_count, 0)) AS exact_time_count
         FROM daily_stats
         WHERE tenant_id = $1 AND branch_name = $2 AND date::text BETWEEN $3 AND $4""",

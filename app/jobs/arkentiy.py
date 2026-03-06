@@ -38,7 +38,7 @@ from app.clients.iiko_bo_events import (
     _parse_customer_phone,
 )
 from app.config import get_settings
-from app.db import BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_period_stats, log_silence
+from app.db import BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_live_today_stats, get_period_stats, log_silence
 from app.database_pg import get_pool
 from app.services import access_manager
 from app.jobs.daily_report import _format_branch_report
@@ -1210,6 +1210,15 @@ async def _build_branch_report(
     # #region agent log
     _debug_log("arkentiy:_build_branch_report:after", "stats result", {"branch": name, "has_data": ds is not None}, "H1")
     # #endregion
+
+    # Если данных в daily_stats нет — пробуем live-отчёт из orders_raw
+    is_live = False
+    if not ds and is_single_day:
+        today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date().isoformat()
+        if date_from == today_local:
+            ds = await get_live_today_stats(name, date_from, tenant_id=_tid)
+            is_live = True
+
     if not ds:
         return None
 
@@ -1235,7 +1244,10 @@ async def _build_branch_report(
             "exact_time_count": ds.get("exact_time_count") or 0,
         }
 
-    return _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
+    result = _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
+    if is_live:
+        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS и скидки появятся после закрытия)\n\n" + result
+    return result
 
 
 async def _build_city_aggregate(
@@ -1247,17 +1259,30 @@ async def _build_city_aggregate(
     _tid = _ctx_tenant_id.get()
     totals: dict = {}
     weighted_keys = ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min")
+    # weight column for each metric
+    _weight_col = {
+        "avg_cooking_min": "orders_count",
+        "avg_wait_min": "total_delivered",
+        "avg_delivery_min": "total_delivered",
+        "avg_late_min": "late_delivery_count",
+    }
     sum_keys = (
         "revenue", "orders_count", "discount_sum", "sailplay",
         "late_delivery_count", "total_delivered", "exact_time_count",
     )
     count = 0
     all_dt: dict[str, dict] = {}
+    any_live = False
+    today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date().isoformat()
 
     for branch in branches:
         name = branch["name"]
         if is_single_day:
             ds = await get_daily_stats(name, date_from, tenant_id=_tid)
+            if not ds and date_from == today_local:
+                ds = await get_live_today_stats(name, date_from, tenant_id=_tid)
+                if ds:
+                    any_live = True
             agg = await aggregate_orders_for_daily_stats(name, date_from) if ds else {}
         else:
             ds = await get_period_stats(name, date_from, date_to, tenant_id=_tid)
@@ -1274,10 +1299,16 @@ async def _build_city_aggregate(
         for k in weighted_keys:
             val = agg.get(k) if is_single_day else ds.get(k)
             if val is not None:
-                totals.setdefault(f"_{k}_sum", 0)
-                totals[f"_{k}_sum"] += val
-                totals.setdefault(f"_{k}_cnt", 0)
-                totals[f"_{k}_cnt"] += 1
+                w_col = _weight_col[k]
+                # for single day late count lives in agg, others in ds
+                if is_single_day and w_col == "late_delivery_count":
+                    w = agg.get("late_delivery_count") or 0
+                else:
+                    w = (ds.get(w_col) or agg.get(w_col) or 0)
+                totals.setdefault(f"_{k}_wsum", 0.0)
+                totals[f"_{k}_wsum"] += val * w
+                totals.setdefault(f"_{k}_wdenom", 0.0)
+                totals[f"_{k}_wdenom"] += w
 
         cogs_pct = ds.get("cogs_pct")
         rev = ds.get("revenue") or ds.get("revenue_net") or 0
@@ -1305,10 +1336,12 @@ async def _build_city_aggregate(
         return None
 
     for k in weighted_keys:
-        s = totals.pop(f"_{k}_sum", None)
-        c = totals.pop(f"_{k}_cnt", None)
-        if s is not None and c:
-            totals[k] = round(s / c, 1)
+        wsum = totals.pop(f"_{k}_wsum", None)
+        wdenom = totals.pop(f"_{k}_wdenom", None)
+        if wsum is not None and wdenom:
+            totals[k] = round(wsum / wdenom, 1)
+        else:
+            totals.pop(k, None)
 
     cogs_w = totals.pop("_cogs_w", None)
     cogs_rev = totals.pop("_cogs_rev", None)
@@ -1333,9 +1366,12 @@ async def _build_city_aggregate(
         "exact_time_count": totals.get("exact_time_count", 0),
     }
 
-    return _format_branch_report(
+    result = _format_branch_report(
         f"{city_name} (все точки)", totals, label, agg_out, is_period=not is_single_day,
     )
+    if any_live:
+        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS и скидки появятся после закрытия)\n\n" + result
+    return result
 
 
 async def _handle_day(chat_id: int, arg: str, city_filter=None) -> None:

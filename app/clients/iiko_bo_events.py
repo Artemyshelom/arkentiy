@@ -860,6 +860,11 @@ async def _incremental_poll(state: BranchState, client: httpx.AsyncClient) -> No
     if state.branch_name.startswith("Барнаул_3"):
         ev_types = [ev.findtext("type", "?") for ev in events]
         logger.info(f"[debug_inc] [{state.branch_name}] types={ev_types[:10]}")
+        for ev in events:
+            t = ev.findtext("type", "")
+            if "delivery" in t.lower():
+                attrs_d = {a.findtext("name"): a.findtext("value") for a in ev.findall("attribute")}
+                logger.info(f"[debug_delivery] [{state.branch_name}] type={t} num={attrs_d.get('deliveryNumber')} date={ev.findtext('date','')} attrs={dict(list(attrs_d.items())[:5])}")
 
     _process_events(state, events, incremental=True)
     state.revision = max_revision

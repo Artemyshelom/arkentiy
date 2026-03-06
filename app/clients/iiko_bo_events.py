@@ -869,6 +869,7 @@ def get_branch_rt(branch_name: str) -> dict | None:
         return {
             "active_orders": 0,
             "delivered_today": 0,
+            "orders_new": 0,
             "orders_before_dispatch": 0,
             "orders_cooking": 0,
             "orders_ready": 0,
@@ -885,6 +886,7 @@ def get_branch_rt(branch_name: str) -> dict | None:
     return {
         "active_orders": state.active_orders,
         "delivered_today": state.delivered_today,
+        "orders_new": state.orders_new,
         "orders_before_dispatch": state.orders_before_dispatch,
         "orders_cooking": state.orders_cooking,
         "orders_ready": state.orders_ready,

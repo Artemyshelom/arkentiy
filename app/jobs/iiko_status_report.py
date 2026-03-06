@@ -120,6 +120,7 @@ async def get_branch_status(branch: dict) -> dict:
         "tz": tz,
         "active_orders": rt_data["active_orders"] if rt_data else None,
         "delivered_today": rt_data["delivered_today"] if rt_data else None,
+        "orders_new": rt_data["orders_new"] if rt_data else None,
         "orders_before_dispatch": rt_data["orders_before_dispatch"] if rt_data else None,
         "orders_cooking": rt_data["orders_cooking"] if rt_data else None,
         "orders_ready": rt_data["orders_ready"] if rt_data else None,
@@ -219,21 +220,22 @@ def format_branch_status(data: dict) -> str:
 
         active = data.get("active_orders", 0) or 0
         delivered = data.get("delivered_today", 0) or 0
-        n_dispatch = data.get("orders_before_dispatch", 0) or 0
+        n_new = data.get("orders_new", 0) or 0
         n_cook = data.get("orders_cooking", 0) or 0
         n_ready = data.get("orders_ready", 0) or 0
         n_way = data.get("orders_on_way", 0) or 0
         lines.append(f"🚚 Заказы: {active} активных | доставлено: {delivered}")
-        if n_dispatch:
-            cook_parts = []
-            if n_cook:
-                cook_parts.append(f"готовится: {n_cook}")
-            if n_ready:
-                cook_parts.append(f"готовы: {n_ready}")
-            cook_hint = f" ({', '.join(cook_parts)})" if cook_parts else ""
-            lines.append(f"   └ до отправки: {n_dispatch}{cook_hint}")
+        stage_parts = []
+        if n_new:
+            stage_parts.append(f"🆕{n_new}")
+        if n_cook:
+            stage_parts.append(f"👨‍🍳{n_cook}")
+        if n_ready:
+            stage_parts.append(f"✅{n_ready}")
         if n_way:
-            lines.append(f"   └ в пути: {n_way}")
+            stage_parts.append(f"🛵{n_way}")
+        if stage_parts:
+            lines.append(f"   {('  '.join(stage_parts))}")
 
         cooks = data.get("cooks_on_shift")
         couriers = data.get("couriers_on_shift")

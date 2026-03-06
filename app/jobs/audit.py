@@ -1622,13 +1622,25 @@ def _format_discounts_detail(date_str: str, city: str, events: list[dict]) -> tu
             branch = e.get("branch_name", "")
             tag = f"[{_branch_tag(branch)}] " if branch else ""
             pay = (m.get("pay_types", "") or "").strip()
-            pay_str = f" · {html.escape(pay)}" if pay else ""
-            desc = e.get("description", "")
-            # Извлекаем время из description если оно там есть
-            time_part = ""
-            if " в " in desc:
-                time_part = " · " + desc.split(" в ")[-1].split(" ")[0]
-            lines.append(f"  {tag}#{num} {_fmt_sum(disc)}{time_part}{pay_str}")
+            cashier = (m.get("cashier_name", "") or "").strip()
+            disc_type = m.get("discount_type", "ручная")
+
+            # Время: из open_time в meta, иначе из description
+            open_t = m.get("open_time", "") or m.get("opened_at", "")
+            if not open_t:
+                desc = e.get("description", "")
+                if " в " in desc:
+                    open_t = desc.split(" в ")[-1].split(" ")[0]
+
+            lines.append(f"  {tag}#{num}")
+            if open_t and len(open_t) >= 5:
+                t = open_t[11:16] if len(open_t) > 10 else open_t[:5]
+                lines.append(f"    📅 {t}")
+            if pay:
+                lines.append(f"    {_pay_icon(pay)} {html.escape(pay)}")
+            lines.append(f"    💰 {html.escape(disc_type)} {_fmt_sum(disc)}")
+            if cashier:
+                lines.append(f"    👤 Админ: {html.escape(cashier)}")
         lines.append("")
 
     if not discounts:

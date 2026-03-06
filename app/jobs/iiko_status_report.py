@@ -40,7 +40,7 @@ async def get_cash_shift_open(branch: dict, date_iso: str) -> bool | None:
             "key": token,
             "openDateFrom": date_iso,
             "openDateTo": date_iso,
-            "status": "OPENED",
+            "status": "OPEN",
         }
         if dept_id:
             params["departmentId"] = dept_id

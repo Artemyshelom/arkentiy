@@ -107,6 +107,9 @@ async def get_branch_status(branch: dict) -> dict:
 
     cash_shift_open = await get_cash_shift_open(branch, date_iso)
 
+    # Если Events API ещё не загружен (revision=0 после рестарта) — подставляем
+    # счётчики из orders_raw как fallback. Они менее оперативны, но лучше пустого экрана.
+    db_fallback = rt_data is None
     return {
         "name": branch["name"],
         "city": branch.get("city", ""),
@@ -118,8 +121,8 @@ async def get_branch_status(branch: dict) -> dict:
         "discount_types_agg": orders_agg.get("discount_types_agg", []),
         "sailplay": sailplay,
         "tz": tz,
-        "active_orders": rt_data["active_orders"] if rt_data else None,
-        "delivered_today": rt_data["delivered_today"] if rt_data else None,
+        "active_orders": rt_data["active_orders"] if rt_data else orders_agg.get("active_count"),
+        "delivered_today": rt_data["delivered_today"] if rt_data else orders_agg.get("delivered_count"),
         "orders_new": rt_data["orders_new"] if rt_data else None,
         "orders_before_dispatch": rt_data["orders_before_dispatch"] if rt_data else None,
         "orders_cooking": rt_data["orders_cooking"] if rt_data else None,
@@ -132,6 +135,7 @@ async def get_branch_status(branch: dict) -> dict:
         "avg_wait_min": rt_data["avg_wait_min"] if rt_data else None,
         "avg_delivery_min": rt_data["avg_delivery_min"] if rt_data else None,
         "cash_shift_open": cash_shift_open,
+        "db_fallback": db_fallback,
     }
 
 
@@ -182,6 +186,7 @@ def format_branch_status(data: dict) -> str:
         lines.append(f"📦 Себестоимость: {cogs:.1f}%")
 
     has_rt = data.get("active_orders") is not None
+    db_fallback = data.get("db_fallback", False)
 
     cash_shift_open = data.get("cash_shift_open")
     if cash_shift_open is False:
@@ -195,7 +200,7 @@ def format_branch_status(data: dict) -> str:
     delays = data.get("delays")
     if has_rt:
         lines.append("")
-        if delays and delays.get("total_delivered", 0) > 0:
+        if not db_fallback and delays and delays.get("total_delivered", 0) > 0:
             late = delays["late_count"]
             total = delays["total_delivered"]
             pct = late / total * 100 if total else 0
@@ -214,30 +219,32 @@ def format_branch_status(data: dict) -> str:
         cook = data.get("avg_cooking_min")
         wait = data.get("avg_wait_min")
         delivery = data.get("avg_delivery_min")
-        lines.append(f"🚚 Заказы: {active} активных | доставлено: {delivered}")
-        stages = [
-            ("Новые",     n_new,  None),
-            ("Готовятся", n_cook, f"среднее: {cook} мин" if cook else None),
-            ("Готовы",    n_ready, f"ждут: {wait} мин" if wait else None),
-            ("В пути",    n_way,  f"среднее: {delivery} мин" if delivery else None),
-        ]
-        for label, cnt, hint in stages:
-            if cnt:
-                hint_str = f"  ({hint})" if hint else "  (—)"
-                lines.append(f"   {label + ':':<12}{cnt}{hint_str}")
+        if db_fallback:
+            lines.append(f"🚚 Заказы: ~{active} активных | доставлено: ~{delivered}")
+            lines.append("   ⏳ RT загружается, этапы появятся через ~30 сек")
+        else:
+            lines.append(f"🚚 Заказы: {active} активных | доставлено: {delivered}")
+            stages = [
+                ("Новые",     n_new,  None),
+                ("Готовятся", n_cook, f"среднее: {cook} мин" if cook else None),
+                ("Готовы",    n_ready, f"ждут: {wait} мин" if wait else None),
+                ("В пути",    n_way,  f"среднее: {delivery} мин" if delivery else None),
+            ]
+            for label, cnt, hint in stages:
+                if cnt:
+                    hint_str = f"  ({hint})" if hint else "  (—)"
+                    lines.append(f"   {label + ':':<12}{cnt}{hint_str}")
 
-        cooks = data.get("cooks_on_shift")
-        couriers = data.get("couriers_on_shift")
-        if cooks is not None or couriers is not None:
-            parts = []
-            if cooks is not None:
-                parts.append(f"поваров: {cooks}")
-            if couriers is not None:
-                parts.append(f"курьеров: {couriers}")
-            lines.append(f"👥 На смене: {', '.join(parts)}")
-    else:
-        lines.append("")
-        lines.append("⏳ RT-данные загружаются, повтори через 30 сек")
+        if not db_fallback:
+            cooks = data.get("cooks_on_shift")
+            couriers = data.get("couriers_on_shift")
+            if cooks is not None or couriers is not None:
+                parts = []
+                if cooks is not None:
+                    parts.append(f"поваров: {cooks}")
+                if couriers is not None:
+                    parts.append(f"курьеров: {couriers}")
+                lines.append(f"👥 На смене: {', '.join(parts)}")
 
     return "\n".join(lines)
 

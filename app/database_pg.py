@@ -994,59 +994,34 @@ _EXACT_TIME_FILTER_PG = f"\n    AND NOT {_EXACT_TIME_CONDITIONS_PG}\n"
 
 
 async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int | None = None) -> dict:
-    """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + времена)."""
+    """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + счётчики).
+
+    Примечание: avg-времена (avg_cooking_min и др.) намеренно не считаются —
+    send_time/cooked_time/opened_at для сегодняшних заказов всегда NULL
+    (заполняются OLAP enrichment только за вчера). RT-времена берутся из Events API.
+    """
     from app.ctx import ctx_tenant_id as _ctx_tenant_id
-    
+
     if tenant_id is None:
         tenant_id = _ctx_tenant_id.get()
-    
+
     pool = get_pool()
 
-    time_row = await pool.fetchrow(
-        f"""SELECT
-            AVG(CASE
-                WHEN cooked_time != '' AND cooked_time IS NOT NULL
-                  AND opened_at != '' AND opened_at IS NOT NULL
-                  AND sum >= 200
-                THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (cooked_time::timestamp
-                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
-                         BETWEEN 1 AND 120
-                    THEN EXTRACT(EPOCH FROM (cooked_time::timestamp
-                         - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp)) / 60
-                END
-            END) AS avg_cooking_min,
-            AVG(CASE
-                WHEN send_time != '' AND send_time IS NOT NULL
-                  AND cooked_time != '' AND cooked_time IS NOT NULL
-                THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (send_time::timestamp
-                         - cooked_time::timestamp)) / 60
-                         BETWEEN 0 AND 120
-                    THEN EXTRACT(EPOCH FROM (send_time::timestamp
-                         - cooked_time::timestamp)) / 60
-                END
-            END) AS avg_wait_min,
-            AVG(CASE
-                WHEN actual_time != '' AND actual_time IS NOT NULL
-                  AND send_time != '' AND send_time IS NOT NULL
-                  AND is_self_service = false
-                THEN CASE
-                    WHEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                         - send_time::timestamp)) / 60
-                         BETWEEN 1 AND 120
-                    THEN EXTRACT(EPOCH FROM (REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                         - send_time::timestamp)) / 60
-                END
-            END) AS avg_delivery_min
+    # Счётчики активных/доставленных — для fallback когда Events API ещё не загружен
+    cnt_row = await pool.fetchrow(
+        """SELECT
+            COUNT(*) FILTER (WHERE status NOT IN ('Доставлена','Закрыта','Отменена'))
+                AS active_count,
+            COUNT(*) FILTER (WHERE status IN ('Доставлена','Закрыта'))
+                AS delivered_count
         FROM orders_raw
-        WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3
-          AND status != 'Отменена'
-          {_EXACT_TIME_FILTER_PG}""",
+        WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3""",
         tenant_id, branch_name, date_iso,
     )
-
-    result = dict(time_row) if time_row else {}
+    result = {
+        "active_count": cnt_row["active_count"] if cnt_row else 0,
+        "delivered_count": cnt_row["delivered_count"] if cnt_row else 0,
+    }
 
     dt_rows = await pool.fetch(
         """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
@@ -1063,11 +1038,6 @@ async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int
         {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
         for r in dt_rows
     ] if dt_rows else []
-
-    for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min"):
-        v = result.get(k)
-        if v is not None:
-            result[k] = round(float(v), 1)
 
     return result
 

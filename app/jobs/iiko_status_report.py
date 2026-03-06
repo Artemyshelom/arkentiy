@@ -205,37 +205,26 @@ def format_branch_status(data: dict) -> str:
             else:
                 lines.append(f"✅ Опозданий: 0 из {total} доставок")
 
-        cook = data.get("avg_cooking_min")
-        wait = data.get("avg_wait_min")
-        delivery = data.get("avg_delivery_min")
-        time_parts = []
-        if cook is not None:
-            time_parts.append(f"готовка {cook}")
-        if wait is not None:
-            time_parts.append(f"ожидание {wait}")
-        if delivery is not None:
-            time_parts.append(f"в пути {delivery}")
-        if time_parts:
-            lines.append(f"🕐 {' → '.join(time_parts)} мин")
-
         active = data.get("active_orders", 0) or 0
         delivered = data.get("delivered_today", 0) or 0
         n_new = data.get("orders_new", 0) or 0
         n_cook = data.get("orders_cooking", 0) or 0
         n_ready = data.get("orders_ready", 0) or 0
         n_way = data.get("orders_on_way", 0) or 0
+        cook = data.get("avg_cooking_min")
+        wait = data.get("avg_wait_min")
+        delivery = data.get("avg_delivery_min")
         lines.append(f"🚚 Заказы: {active} активных | доставлено: {delivered}")
-        stage_parts = []
-        if n_new:
-            stage_parts.append(f"🆕{n_new}")
-        if n_cook:
-            stage_parts.append(f"👨‍🍳{n_cook}")
-        if n_ready:
-            stage_parts.append(f"✅{n_ready}")
-        if n_way:
-            stage_parts.append(f"🛵{n_way}")
-        if stage_parts:
-            lines.append(f"   {('  '.join(stage_parts))}")
+        stages = [
+            ("Новые",     n_new,  None),
+            ("Готовятся", n_cook, f"среднее: {cook} мин" if cook else None),
+            ("Готовы",    n_ready, f"ждут: {wait} мин" if wait else None),
+            ("В пути",    n_way,  f"среднее: {delivery} мин" if delivery else None),
+        ]
+        for label, cnt, hint in stages:
+            if cnt:
+                hint_str = f"  ({hint})" if hint else "  (—)"
+                lines.append(f"   {label + ':':<12}{cnt}{hint_str}")
 
         cooks = data.get("cooks_on_shift")
         couriers = data.get("couriers_on_shift")

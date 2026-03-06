@@ -139,7 +139,8 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
     rows2 = await pool.fetch(
         """SELECT branch_name, delivery_num, sum, cancel_reason,
                   client_name, client_phone, payment_type,
-                  cooked_time, comment
+                  cooked_time, comment,
+                  opened_at, planned_time, actual_time
            FROM orders_raw
            WHERE date::text = $1
              AND status = 'Отменена'
@@ -176,13 +177,16 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                     "comment": comment,
                     "client_name": r["client_name"],
                     "client_phone": r["client_phone"],
+                    "opened_at": r["opened_at"] or "",
+                    "planned_time": r["planned_time"] or "",
+                    "cancelled_at": r["actual_time"] or "",
                 }, ensure_ascii=False),
                 "created_at": now_iso,
             })
 
     # 3. Ранние закрытия: actual_time < planned_time - EARLY_CLOSURE_MIN мин
     rows3 = await pool.fetch(
-        """SELECT branch_name, delivery_num, sum, planned_time, actual_time,
+        """SELECT branch_name, delivery_num, sum, opened_at, planned_time, actual_time,
                   courier, client_name, client_phone
            FROM orders_raw
            WHERE date::text = $1
@@ -217,6 +221,7 @@ async def _detect_from_orders_raw(date_str: str) -> list[dict]:
                         "delivery_num": r["delivery_num"],
                         "sum": r["sum"],
                         "early_min": round(early_min, 1),
+                        "opened_at": r["opened_at"] or "",
                         "planned_time": r["planned_time"],
                         "actual_time": r["actual_time"],
                         "courier": r["courier"],
@@ -1291,6 +1296,37 @@ def _fmt_sum(v: float) -> str:
     return f"{int(v):,}".replace(",", "\u00a0") + "₽"
 
 
+_PAY_KEYWORD_MAP: list[tuple[str, str]] = [
+    ("нал", "💵 нал"),
+    ("cash", "💵 нал"),
+    ("карт", "💳 карта"),
+    ("card", "💳 карта"),
+    ("онлайн", "📱 онлайн"),
+    ("сайт", "📱 онлайн"),
+    ("sbp", "📱 СБП"),
+    ("сбп", "📱 СБП"),
+    ("перевод", "📱 онлайн"),
+]
+
+
+def _pay_icon(pay_type: str) -> str:
+    """Преобразует тип оплаты в читаемую иконку."""
+    if not pay_type or not pay_type.strip():
+        return "⭕ без оплаты"
+    low = pay_type.lower().strip()
+    for key, label in _PAY_KEYWORD_MAP:
+        if key in low:
+            return label
+    return f"💳 {pay_type}"
+
+
+def _hhmm(ts: str) -> str:
+    """Извлекает HH:MM из ISO-строки."""
+    if ts and len(ts) >= 16:
+        return ts[11:16]
+    return ""
+
+
 def _attention_items(events: list[dict]) -> list[str]:
     """Формирует список строк блока «Требует внимания»."""
     items: list[str] = []
@@ -1302,6 +1338,22 @@ def _attention_items(events: list[dict]) -> list[str]:
         total = sum(_get_sum(e) for e in high)
         items.append(f"{len(high)} отмен >5000₽ · сумма {_fmt_sum(total)}")
 
+    # Отмены с оплатой (деньги уже были взяты)
+    paid_cancels = [e for e in events
+                   if e["event_type"] in ("cancellation", "cancellation_with_reason")
+                   and (_meta(e).get("payment_type") or "").strip()]
+    if paid_cancels:
+        total_paid = sum(_get_sum(e) for e in paid_cancels)
+        items.append(f"{len(paid_cancels)} отмен с оплатой · {_fmt_sum(total_paid)}")
+
+    # Отмены готовых заказов (списание уже прошло)
+    cooked_cancels = [e for e in events
+                     if e["event_type"] in ("cancellation", "cancellation_with_reason")
+                     and _meta(e).get("cooked")]
+    if cooked_cancels:
+        total_cooked = sum(_get_sum(e) for e in cooked_cancels)
+        items.append(f"{len(cooked_cancels)} отмен с готовкой · {_fmt_sum(total_cooked)} (\U0001f373 списания не вернуть)")
+
     crit_early = [e for e in events
                   if e["event_type"] == "early_closure" and _get_early_min(e) >= 100]
     if crit_early:
@@ -1311,6 +1363,12 @@ def _attention_items(events: list[dict]) -> list[str]:
     if storno:
         total_st = sum(_meta(e).get("discount_sum", 0) for e in storno)
         items.append(f"{len(storno)} сторно со скидкой · {_fmt_sum(total_st)}")
+
+    fast_suspicious = [e for e in events
+                       if e["event_type"] == "fast_delivery"
+                       and _meta(e).get("delta_min", 99) < 10]
+    if fast_suspicious:
+        items.append(f"{len(fast_suspicious)} доставок <10 мин (подозрительно быстро)")
 
     courier_mc = [e for e in events if e["event_type"] == "courier_multicancellation"
                   and e.get("severity") == "critical"]

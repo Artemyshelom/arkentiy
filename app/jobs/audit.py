@@ -1485,10 +1485,10 @@ async def handle_audit_callback(
     from app.clients.telegram import edit_message_with_keyboard
 
     if cb_data.startswith("audit_summary:"):
-        parts = cb_data.split(":", 3)
-        if len(parts) < 4:
+        parts = cb_data.split(":", 2)
+        if len(parts) < 3:
             return
-        _, city, date_str = parts[1], parts[2], parts[3]
+        city, date_str = parts[1], parts[2]
         events = await get_audit_events(date_str, city=city, tenant_id=current_tenant_id)
         unclosed = await _detect_unclosed_in_transit(date_str)
         branch_to_city = _all_branches_map()
@@ -1499,10 +1499,10 @@ async def handle_audit_callback(
         await edit_message_with_keyboard(cb_chat_id, cb_message_id, text, keyboard)
 
     elif cb_data.startswith("audit_detail:"):
-        parts = cb_data.split(":", 4)
-        if len(parts) < 5:
+        parts = cb_data.split(":", 3)
+        if len(parts) < 4:
             return
-        _, city, date_str, detail_type = parts[1], parts[2], parts[3], parts[4]
+        city, date_str, detail_type = parts[1], parts[2], parts[3]
         events = await get_audit_events(date_str, city=city, tenant_id=current_tenant_id)
         unclosed = await _detect_unclosed_in_transit(date_str)
         branch_to_city = _all_branches_map()

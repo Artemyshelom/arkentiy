@@ -619,8 +619,20 @@ def _delivery_to_row(branch_name: str, num: str, d: dict, now: str, ready_time_o
     # Признак 1: комментарий содержит "смен"
     if "смен" in comment_text:
         payment_changed = 1
-    # Признак 2: ожидание >= 120 мин (ready_time давно) и время доставки = 0
-    # TODO: добавить когда будет ясна логика расчёта ожидания курьера
+    # Признак 2: курьер ждал заказ >= 120 мин, но доставка заняла < 5 мин
+    # Признак искусственно завершённого заказа при смене формы оплаты
+    if not payment_changed:
+        try:
+            ready_ts = BranchState._parse_ts(d.get("ready_time_actual"))
+            sent_ts = BranchState._parse_ts(d.get("sent_at"))
+            actual_ts = BranchState._parse_ts(actual)
+            if ready_ts and sent_ts and actual_ts:
+                idle_min = (sent_ts - ready_ts).total_seconds() / 60
+                delivery_min = (actual_ts - sent_ts).total_seconds() / 60
+                if idle_min >= 120 and delivery_min < 5:
+                    payment_changed = 1
+        except Exception:
+            pass
 
     customer_raw = d.get("customer_raw", "")
     return {

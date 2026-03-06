@@ -9,6 +9,156 @@
 
 ---
 
+## Сессия 57 — 6 марта 2026 (feat: station_breakdown + jobs_health_dashboard) ✅
+
+**Фокус:** Детализация заказов по этапам в `/статус` с реальными временами + dashboard статуса всех jobs.
+
+### 1. fix: shift_status_check — неверный enum `/статус` (коммит `4fcb700`)
+
+**Проблема:** `/статус` не показывал статус кассовой смены, в логах `409 Conflict` от iiko cashshifts API.
+
+**Причина:** передавался `status="OPENED"` — несуществующий enum. Правильный: `status="OPEN"`.
+
+**Фикс:** `app/jobs/iiko_status_report.py` — одна строка `"OPENED"` → `"OPEN"`.
+
+---
+
+### 2. feat: daily_revenue_by_branch — итоговая сводка по выручке (коммит `d036291`)
+
+**Что:** после утренних отчётов по каждой точке бот теперь отправляет одно итоговое сообщение с таблицей выручки по всем точкам (сортировка по убыванию + строка итого).
+
+**Где:** `app/jobs/daily_report.py` — функция `_format_daily_summary()` + сбор `branch_summaries` в основном цикле.
+
+---
+
+### 3. feat: station_breakdown_detail — разбивка заказов по этапам (коммиты `2da5f11`, `f452797`, `0bc8104`, `3a4dcb4`)
+
+**Что:** в `/статус` добавлена таблица активных заказов по стадиям с реальными временами ожидания.
+
+**Итоговый формат:**
+```
+🚚 Заказы: 41 активных | доставлено: 185
+   Новые:      18  (—)
+   Готовятся:  12  (среднее: 18 мин)
+   Готовы:      5  (ждут: 8 мин)
+   В пути:      6  (среднее: 22 мин)
+```
+
+**Критический баг по пути:** счётчики «Готовятся» и «Готовы» всегда были 0.
+
+**Причина бага:** в `iiko_bo_events.py` iiko передаёт `orderNum` как `"81317.000000000"` (float-string). `int("81317.000000000")` → `ValueError` → cooking statuses никогда не сохранялись.
+
+**Фикс:** `int(float(order_num_str))` — `app/clients/iiko_bo_events.py`.
+
+**Времена (3a4dcb4):** `orders_agg` из БД для сегодняшних заказов всегда пустой (`send_time`, `opened_at` не пишутся в течение дня — только при ночном OLAP-обогащении за вчера). Переключились на **честные RT-времена из Events API**:
+- `sent_at` — фиксируется при переходе статуса → "В пути к клиенту"
+- `cooked_time` / `ready_time_actual` — уже пишутся при `cookingStatusChangedToNext`
+- 3 новых property на `BranchState`: `avg_cooking_current_min`, `avg_wait_current_min`, `avg_delivery_current_min` — считают сколько **сейчас** висят заказы на каждом этапе
+- Прокинуты через `get_branch_rt()`
+
+**Файлы:** `app/clients/iiko_bo_events.py`, `app/jobs/iiko_status_report.py`.
+
+---
+
+### 4. feat: jobs_health_dashboard — /jobs + алерты при падении (коммит `358759a`)
+
+**Что:** мониторинг scheduled jobs — автоалерт при любом исключении + команда `/jobs` для ручной проверки.
+
+**Реализация:**
+
+`app/utils/job_tracker.py` (новый файл):
+- `@track_job("job_id")` — декоратор: при старте пишет `running` в `job_logs`, при успехе — `ok`, при исключении — `error` + алерт в monitoring chat через `telegram.error_alert()`, затем пробрасывает исключение
+- `get_jobs_status()` — читает последний запуск каждого job через `LIKE ANY(patterns)` (покрывает старые имена: `morning_report_utc7` → canonical `daily_report`)
+- `JOB_REGISTRY` — реестр 8 jobs с человеческими названиями
+
+**Декораторы добавлены к 8 jobs:**
+| Job | Файл |
+|-----|------|
+| `daily_report` | `jobs/daily_report.py` |
+| `iiko_to_sheets` | `jobs/iiko_to_sheets.py` |
+| `audit_report` | `jobs/audit.py` |
+| `olap_enrichment` | `jobs/olap_enrichment.py` |
+| `competitor_monitor` | `jobs/competitor_monitor.py` |
+| `late_alerts` | `jobs/late_alerts.py` |
+| `cancel_sync` | `jobs/cancel_sync.py` |
+| `recurring_billing` | `jobs/billing.py` |
+
+**Команда `/jobs`** (только admin, `app/jobs/arkentiy.py`):
+- Показывает статус каждого job: ✅/❌/⏳/🔘
+- Время последнего запуска (МСК) и длительность
+- Краткий текст ошибки при `status=error`
+
+**Примечание:** таблица `job_logs` уже существовала в схеме — никакой миграции не потребовалось.
+
+---
+
+**Коммиты сессии:** `4fcb700` → `d036291` → `2da5f11` → `f452797` → `0bc8104` → `3a4dcb4` → `358759a`
+
+**BACKLOG:** закрыты `shift_status_check`, `daily_revenue_by_branch`, `station_breakdown_detail`, `jobs_health_dashboard`.
+
+---
+
+## Сессия 58 — 6 марта 2026 (fix: payment_changed признак 2 + report_consistency) ✅
+
+**Фокус:** Завершение `payment_changes` (признак 2) + выравнивание метрик /отчёт.
+
+### 1. fix: импорт track_job в audit.py (коммит `c2c072b`)
+
+**Проблема:** после деплоя сессии 57 сервис падал с `NameError: name 'track_job' is not defined` на строке `@track_job("audit_report")` в `audit.py`.
+
+**Причина:** декоратор был добавлен в прошлой сессии, но строку импорта забыли.
+
+**Фикс:** `app/jobs/audit.py` — добавлен `from app.utils.job_tracker import track_job`.
+
+---
+
+### 2. feat: payment_changed признак 2 (коммит `0534eec`)
+
+**Что:** реализован второй критерий детектирования смены оплаты в `_delivery_to_row()`.
+
+**Логика признака 2:**
+- Курьер ждал заказ ≥ 120 мин (`sent_at - ready_time_actual ≥ 120 мин`)
+- При этом время доставки < 5 мин (`actual_time - sent_at < 5 мин`)
+- Значит заказ был искусственно закрыт без реальной доставки (классическая схема при смене формы оплаты)
+
+**Где:** `app/clients/iiko_bo_events.py`, функция `_delivery_to_row()`. Использует `BranchState._parse_ts()` для парсинга timestamp-строк из iiko.
+
+**Данные доступны** потому что `ready_time_actual` (статус "Собран") и `sent_at` (статус "В пути") начали фиксироваться ещё в сессии 57.
+
+**Итоговая логика детектирования:**
+```python
+# Признак 1: "смен" в комментарии
+# Признак 2: idle >= 120 мин И delivery < 5 мин
+```
+
+---
+
+### 3. fix: report_consistency — выравнивание метрик /отчёт (коммит `c137478`)
+
+**Что:** устранены 4 расхождения между режимами команды `/отчёт` (день / период / город).
+
+**Фикс ①: `payment_changed_count` в городском агрегате** (`_build_city_aggregate`)
+- **Было:** `payment_changed_count` отсутствовал в `sum_keys` → терялся при суммировании по точкам → строка `⚠️ Исключено из расчёта: N` никогда не появлялась для `/отчёт Иркутск`
+- **Стало:** добавлен в `sum_keys` и в `agg_out`
+
+**Фикс ②: штат (повара/курьеры) в городском однодневном отчёте**
+- **Было:** `cooks_today` и `couriers_today` принудительно = 0 даже при однодневном запросе
+- **Стало:** добавлены в `sum_keys`, суммируются по точкам через `ds.get(k) or agg.get(k)`
+
+**Фикс ③ и ④: живой баннер (одна точка и городской агрегат)**
+- **Было:** `"COGS и скидки появятся после закрытия"` — пользователь не понимал, почему нет строки `🕐`
+- **Стало:** `"COGS, скидки и времена этапов появятся после закрытия смены"` — теперь очевидно
+
+**Файл:** `app/jobs/arkentiy.py`.
+
+---
+
+**Коммиты сессии:** `c2c072b` → `0534eec` → `c137478`
+
+**BACKLOG:** закрыты `payment_changes`, `report_consistency`.
+
+---
+
 ## Сессия 53 — 5 марта 2026 (fix: изоляция тенантов — полный аудит и фикс) ✅
 
 **Фокус:** Комплексный аудит и устранение всех мест с хардкодом `tenant_id=1`, утечка данных Шабурова в тенант 1, фикс `_refresh_cache`.

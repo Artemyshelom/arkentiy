@@ -1248,7 +1248,7 @@ async def _build_branch_report(
 
     result = _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
     if is_live:
-        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS и скидки появятся после закрытия)\n\n" + result
+        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS, скидки и времена этапов появятся после закрытия смены)\n\n" + result
     return result
 
 
@@ -1271,6 +1271,7 @@ async def _build_city_aggregate(
     sum_keys = (
         "revenue", "orders_count", "discount_sum", "sailplay",
         "late_delivery_count", "total_delivered", "exact_time_count",
+        "payment_changed_count", "cooks_today", "couriers_today",
     )
     count = 0
     all_dt: dict[str, dict] = {}
@@ -1363,16 +1364,17 @@ async def _build_city_aggregate(
         "avg_wait_min": totals.get("avg_wait_min"),
         "avg_delivery_min": totals.get("avg_delivery_min"),
         "discount_types_agg": sorted(all_dt.values(), key=lambda x: x["sum"], reverse=True),
-        "cooks_today": 0,
-        "couriers_today": 0,
+        "cooks_today": totals.get("cooks_today", 0),
+        "couriers_today": totals.get("couriers_today", 0),
         "exact_time_count": totals.get("exact_time_count", 0),
+        "payment_changed_count": totals.get("payment_changed_count", 0),
     }
 
     result = _format_branch_report(
         f"{city_name} (все точки)", totals, label, agg_out, is_period=not is_single_day,
     )
     if any_live:
-        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS и скидки появятся после закрытия)\n\n" + result
+        result = "⚠️ <b>Смена не закрыта — данные неполные</b>\n(COGS, скидки и времена этапов появятся после закрытия смены)\n\n" + result
     return result
 
 

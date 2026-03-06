@@ -50,6 +50,7 @@ from app.jobs.iiko_status_report import (
 )
 from app.jobs.late_alerts import (
     ACTIVE_DELIVERY_STATUSES,
+    LATE_MAX_MIN,
     LOCAL_UTC_OFFSET as _LATE_UTC_OFFSET,
     set_silence as _set_silence,
     is_silenced as _is_silenced,

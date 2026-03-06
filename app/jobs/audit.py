@@ -41,6 +41,7 @@ from app.db import (
 )
 from app.clients import telegram as tg
 from app.clients.iiko_auth import get_bo_token
+from app.utils.job_tracker import track_job
 
 logger = logging.getLogger(__name__)
 settings = get_settings()

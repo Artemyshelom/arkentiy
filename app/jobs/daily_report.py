@@ -118,6 +118,9 @@ def _format_branch_report(
     exact_cnt = agg.get("exact_time_count") or 0
     if exact_cnt > 0:
         lines.append(f"📌 Точных заказов: {exact_cnt} (не в средних временах)")
+    pc_cnt = agg.get("payment_changed_count") or stats.get("payment_changed_count") or 0
+    if pc_cnt > 0:
+        lines.append(f"⚠️ Исключено из расчёта: {pc_cnt} (смена оплаты)")
     lines.append("")
 
     if not is_period:

@@ -1153,6 +1153,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
         FROM orders_raw
         WHERE branch_name = $1 AND date::text = $2
           AND status != 'Отменена'
+          AND COALESCE(payment_changed, false) = false
           {_EXACT_TIME_FILTER_PG}""",
         branch_name, date_iso,
     )
@@ -1304,6 +1305,16 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
          for r in dt_rows],
         ensure_ascii=False,
     ) if dt_rows else "[]"
+
+    pc_row = await pool.fetchrow(
+        """SELECT COUNT(*) AS payment_changed_count
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
+             AND COALESCE(payment_changed, false) = true
+             AND status != 'Отменена'""",
+        branch_name, date_from, date_to,
+    )
+    result["payment_changed_count"] = pc_row["payment_changed_count"] if pc_row else 0
 
     return result
 

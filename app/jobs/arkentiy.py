@@ -1242,6 +1242,7 @@ async def _build_branch_report(
             "cooks_today": ds.get("cooks_count") or 0,
             "couriers_today": ds.get("couriers_count") or 0,
             "exact_time_count": ds.get("exact_time_count") or 0,
+            "payment_changed_count": ds.get("payment_changed_count") or 0,
         }
 
     result = _format_branch_report(name, ds, label, agg, is_period=not is_single_day)

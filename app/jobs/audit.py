@@ -23,6 +23,7 @@ import asyncio
 import html
 import json
 import logging
+import re
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
@@ -413,7 +414,7 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
             "buildSummary": "false",
             "groupByRowFields": [
                 "Department", "OrderNum", "Storned", "OrderDiscount.Type",
-                "OpenTime", "CloseTime", "PayTypes",
+                "OpenTime", "CloseTime", "PayTypes", "CashierName",
             ],
             "aggregateFields": ["DiscountSum", "DishSumInt"],
             "filters": {
@@ -527,6 +528,7 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
                         "pay_before": pay_before,
                         "pay_after": pay_after or pay_before,
                         "discount_type": disc_type,
+                        "cashier_name": row.get("CashierName", ""),
                     }, ensure_ascii=False),
                     "created_at": now_iso,
                 })
@@ -570,6 +572,7 @@ async def _detect_storno_discount(date_str: str) -> list[dict]:
                         "branch_name": dept,
                         "discount_sum": disc_sum,
                         "pay_types": pay,
+                        "cashier_name": row.get("CashierName", ""),
                     }, ensure_ascii=False),
                     "created_at": now_iso,
                 })
@@ -955,19 +958,203 @@ async def job_audit_report(utc_offset: int = 7) -> None:
 # Обработчик команды /аудит
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Вспомогательные функции для работы с датами и периодами
+# ---------------------------------------------------------------------------
+
+def _parse_one_date(text: str, year: int) -> str | None:
+    """Парсит строку '1.03' или '01.03.2026' в ISO дату."""
+    chunks = text.strip().split(".")
+    try:
+        if len(chunks) == 2:
+            return date(year, int(chunks[1]), int(chunks[0])).isoformat()
+        if len(chunks) == 3:
+            return date(int(chunks[2]), int(chunks[1]), int(chunks[0])).isoformat()
+    except Exception:
+        pass
+    return None
+
+
+def _parse_date_range(arg: str, year: int) -> tuple[str, str, str] | None:
+    """
+    Ищет паттерн диапазона дат в строке arg.
+    Возвращает (date_from_iso, date_to_iso, arg_without_range) или None.
+    Поддерживает: '1.03-7.03', '01.03.2026—07.03.2026', '1.03 - 7.03'.
+    """
+    m = re.search(
+        r"(\d{1,2}\.\d{2}(?:\.\d{4})?)\s*[-–—]\s*(\d{1,2}\.\d{2}(?:\.\d{4})?)",
+        arg,
+    )
+    if not m:
+        return None
+    d1 = _parse_one_date(m.group(1), year)
+    d2 = _parse_one_date(m.group(2), year)
+    if not d1 or not d2:
+        return None
+    if d1 > d2:
+        d1, d2 = d2, d1
+    filter_text = (arg[: m.start()] + arg[m.end() :]).strip()
+    return d1, d2, filter_text
+
+
+def _period_label(date_from_str: str, date_to_str: str) -> str:
+    """Форматирует период: '1–7 марта 2026' или '28 февраля – 3 марта 2026'."""
+    d1 = datetime.strptime(date_from_str, "%Y-%m-%d")
+    d2 = datetime.strptime(date_to_str, "%Y-%m-%d")
+    if d1.month == d2.month and d1.year == d2.year:
+        return f"{d1.day}–{d2.day} {_MONTH_RU[d1.month]} {d1.year}"
+    if d1.year == d2.year:
+        return f"{d1.day} {_MONTH_RU[d1.month]} – {d2.day} {_MONTH_RU[d2.month]} {d1.year}"
+    return f"{_date_label(date_from_str)} – {_date_label(date_to_str)}"
+
+
+# ---------------------------------------------------------------------------
+# Форматировщик аудита за период
+# ---------------------------------------------------------------------------
+
+def _format_period_report(
+    date_from_str: str,
+    date_to_str: str,
+    city: str,
+    events_by_date: dict[str, list[dict]],
+) -> tuple[str, list[list[dict]]]:
+    """
+    Дайджест аудита за период.
+    Возвращает (text, keyboard) — кнопки на дни с событиями.
+    """
+    lines = [
+        f"📋 <b>Аудит [{html.escape(city or 'все города')}] — {_period_label(date_from_str, date_to_str)}</b>",
+        "",
+    ]
+
+    buttons: list[dict] = []
+    total_crit = total_warn = 0
+
+    d = datetime.strptime(date_from_str, "%Y-%m-%d").date()
+    d_end = datetime.strptime(date_to_str, "%Y-%m-%d").date()
+    while d <= d_end:
+        ds = d.isoformat()
+        events = events_by_date.get(ds, [])
+        crit = sum(1 for e in events if e.get("severity") == "critical")
+        warn = sum(1 for e in events if e.get("severity") == "warning")
+        total_crit += crit
+        total_warn += warn
+        d_label = f"{d.day} {_MONTH_RU[d.month]}"
+        if not events:
+            lines.append(f"✅ {d_label}")
+        else:
+            badges: list[str] = []
+            if crit:
+                badges.append(f"{crit}🔴")
+            if warn:
+                badges.append(f"{warn}🟡")
+            type_counts: dict[str, int] = {}
+            for e in events:
+                lbl = _TYPE_LABEL.get(e["event_type"], e["event_type"])
+                type_counts[lbl] = type_counts.get(lbl, 0) + 1
+            type_str = ", ".join(f"{cnt}×{lbl}" for lbl, cnt in type_counts.items())
+            lines.append(
+                f"⚠️ <b>{d_label}</b>: {' '.join(badges)} — {html.escape(type_str)}"
+            )
+            buttons.append({
+                "text": f"📅 {d_label}",
+                "callback_data": f"audit_summary:{city}:{ds}",
+            })
+        d += timedelta(days=1)
+
+    lines.append("")
+    total = total_crit + total_warn
+    if total == 0:
+        lines.append("✅ <i>За весь период подозрительных операций не выявлено</i>")
+    else:
+        parts_s: list[str] = []
+        if total_crit:
+            parts_s.append(f"{total_crit} критических🔴")
+        if total_warn:
+            parts_s.append(f"{total_warn} предупреждений🟡")
+        lines.append(f"<i>Итого: {' · '.join(parts_s)}</i>")
+
+    keyboard: list[list[dict]] = [buttons[i : i + 3] for i in range(0, len(buttons), 3)]
+    return "\n".join(lines), keyboard
+
+
 async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None:
     """
-    /аудит [фильтр] [дата]
+    /аудит [фильтр] [дата|период]
     Примеры:
-      /аудит                → вчера, все города по city_filter чата
-      /аудит Томск          → вчера, Томск
-      /аудит Томск 22.02    → конкретная дата
-      /аудит Томск_1 Яко    → конкретная точка
+      /аудит                    → вчера, все города по city_filter чата
+      /аудит Томск              → вчера, Томск
+      /аудит Томск 22.02        → конкретная дата
+      /аудит Томск 1.03-7.03    → период
+      /аудит Томск_1 Яко        → конкретная точка
     """
     from app.clients.telegram import send_message
     from app.ctx import ctx_tenant_id as _ctx_tid
     current_tenant_id = _ctx_tid.get()
 
+    utc_offset = 7
+    local_now = datetime.now(timezone.utc) + timedelta(hours=utc_offset)
+    today_local = local_now.date()
+
+    # --- Период: /аудит Томск 1.03-7.03 ---
+    range_result = _parse_date_range(arg or "", today_local.year)
+    if range_result:
+        date_from_str, date_to_str, filter_after_range = range_result
+
+        # Ограничиваем 30 днями
+        d_from = datetime.strptime(date_from_str, "%Y-%m-%d").date()
+        d_to = datetime.strptime(date_to_str, "%Y-%m-%d").date()
+        if (d_to - d_from).days > 29:
+            d_to = d_from + timedelta(days=29)
+            date_to_str = d_to.isoformat()
+
+        # Определяем фильтр города/точки из filter_after_range
+        branches = get_all_branches()
+        branch_names = [b["name"] for b in branches]
+        cities_list = list({b.get("city", "") for b in branches if b.get("city")})
+        low_f = filter_after_range.lower()
+        city_query_p: str | None = None
+        branch_filter_p: str | None = None
+        if filter_after_range:
+            matched_city = next((c for c in cities_list if low_f in c.lower()), None)
+            if matched_city:
+                city_query_p = matched_city
+            else:
+                matched_branch = next((b for b in branch_names if low_f in b.lower()), None)
+                if matched_branch:
+                    branch_filter_p = matched_branch
+                else:
+                    city_query_p = filter_after_range
+        if city_query_p is None and city_filter is not None:
+            if isinstance(city_filter, frozenset):
+                city_query_p = next(iter(city_filter), None)
+            elif isinstance(city_filter, str):
+                city_query_p = city_filter
+
+        # Загружаем события из БД для каждой даты
+        events_by_date: dict[str, list[dict]] = {}
+        d = d_from
+        while d <= d_to:
+            ds = d.isoformat()
+            evs = await get_audit_events(ds, city=city_query_p, branch_name=branch_filter_p, tenant_id=current_tenant_id)
+            unclosed = await _detect_unclosed_in_transit(ds)
+            branch_to_city_map = _all_branches_map()
+            if city_query_p:
+                unclosed = [u for u in unclosed if branch_to_city_map.get(u["branch_name"], "") == city_query_p]
+            if branch_filter_p:
+                unclosed = [u for u in unclosed if u["branch_name"] == branch_filter_p]
+            evs = [e for e in evs if e.get("event_type") != "unclosed_in_transit"]
+            evs.extend(unclosed)
+            events_by_date[ds] = evs
+            d += timedelta(days=1)
+
+        scope_p = branch_filter_p or city_query_p or "все города"
+        text, keyboard = _format_period_report(date_from_str, date_to_str, scope_p, events_by_date)
+        from app.clients.telegram import send_message_with_keyboard
+        await send_message_with_keyboard(str(chat_id), text, keyboard)
+        return
+
+    # --- Одна дата (существующая логика) ---
     parts = arg.split() if arg else []
 
     utc_offset = 7

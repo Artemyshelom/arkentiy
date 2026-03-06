@@ -128,9 +128,9 @@ async def get_branch_status(branch: dict) -> dict:
         "couriers_on_shift": rt_data["couriers_on_shift"] if rt_data else None,
         "cooks_on_shift": rt_data["cooks_on_shift"] if rt_data else None,
         "delays": rt_data["delays"] if rt_data else None,
-        "avg_cooking_min": orders_agg.get("avg_cooking_min"),
-        "avg_wait_min": orders_agg.get("avg_wait_min"),
-        "avg_delivery_min": orders_agg.get("avg_delivery_min"),
+        "avg_cooking_min": rt_data["avg_cooking_min"] if rt_data else None,
+        "avg_wait_min": rt_data["avg_wait_min"] if rt_data else None,
+        "avg_delivery_min": rt_data["avg_delivery_min"] if rt_data else None,
         "cash_shift_open": cash_shift_open,
     }
 

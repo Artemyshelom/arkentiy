@@ -109,6 +109,16 @@ class BranchState:
     employees: dict = field(default_factory=dict)       # user_id → {name, role, role_class}
     cooking_statuses: dict = field(default_factory=dict) # order_num_int → "Приготовлено" | "Собран"
 
+    @staticmethod
+    def _parse_ts(s: str | None) -> "datetime | None":
+        """Парсит строку timestamp из iiko событий в naive datetime."""
+        if not s:
+            return None
+        try:
+            return datetime.fromisoformat(s.replace("T", " ").split(".")[0])
+        except Exception:
+            return None
+
     def _cooking_status(self, delivery_num: str) -> str | None:
         """Возвращает cooking status для номера доставки (сопоставляет через int)."""
         try:
@@ -116,6 +126,47 @@ class BranchState:
             return self.cooking_statuses.get(num_int)
         except (ValueError, TypeError):
             return None
+
+    @property
+    def avg_cooking_current_min(self) -> int | None:
+        """Среднее время (мин) с момента создания для заказов, сейчас готовящихся на кухне."""
+        now = datetime.now()
+        times = [
+            (now - t).total_seconds() / 60
+            for num, d in self.deliveries.items()
+            if d.get("status") in WAITING_STATUSES
+            and self._cooking_status(str(num)) == "Приготовлено"
+            for t in (self._parse_ts(d.get("opened_at")),)
+            if t is not None and 0 < (now - t).total_seconds() / 60 < 120
+        ]
+        return round(sum(times) / len(times)) if times else None
+
+    @property
+    def avg_wait_current_min(self) -> int | None:
+        """Среднее время ожидания курьера для текущих готовых (собранных) заказов."""
+        now = datetime.now()
+        times = [
+            (now - t).total_seconds() / 60
+            for num, d in self.deliveries.items()
+            if d.get("status") in WAITING_STATUSES
+            and self._cooking_status(str(num)) == "Собран"
+            for t in (self._parse_ts(d.get("ready_time_actual")),)
+            if t is not None and 0 < (now - t).total_seconds() / 60 < 120
+        ]
+        return round(sum(times) / len(times)) if times else None
+
+    @property
+    def avg_delivery_current_min(self) -> int | None:
+        """Среднее время в пути для заказов, сейчас едущих к клиентам."""
+        now = datetime.now()
+        times = [
+            (now - t).total_seconds() / 60
+            for d in self.deliveries.values()
+            if d.get("status") == "В пути к клиенту"
+            for t in (self._parse_ts(d.get("sent_at")),)
+            if t is not None and 0 < (now - t).total_seconds() / 60 < 120
+        ]
+        return round(sum(times) / len(times)) if times else None
 
     @property
     def active_orders(self) -> int:
@@ -416,7 +467,11 @@ def _process_events(state: BranchState, events_xml: list) -> None:
                 existing["opened_at"] = ev_date
 
             if attrs.get("deliveryStatus"):
-                existing["status"] = attrs["deliveryStatus"]
+                new_status = attrs["deliveryStatus"]
+                # Фиксируем момент отправки курьера
+                if new_status == "В пути к клиенту" and not existing.get("sent_at"):
+                    existing["sent_at"] = ev_date
+                existing["status"] = new_status
             if attrs.get("deliveryCourier") is not None:
                 existing["courier"] = attrs.get("deliveryCourier", "")
             if attrs.get("deliverySum"):
@@ -880,6 +935,9 @@ def get_branch_rt(branch_name: str) -> dict | None:
             "total_cooks_today": 0,
             "total_couriers_today": 0,
             "delays": None,
+            "avg_cooking_min": None,
+            "avg_wait_min": None,
+            "avg_delivery_min": None,
         }
     if state.revision == 0:
         return None
@@ -897,6 +955,9 @@ def get_branch_rt(branch_name: str) -> dict | None:
         "total_cooks_today": state.total_cooks_today,
         "total_couriers_today": state.total_couriers_today,
         "delays": ds,
+        "avg_cooking_min": state.avg_cooking_current_min,
+        "avg_wait_min": state.avg_wait_current_min,
+        "avg_delivery_min": state.avg_delivery_current_min,
     }
 
 

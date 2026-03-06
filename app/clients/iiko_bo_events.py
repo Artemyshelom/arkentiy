@@ -856,6 +856,11 @@ async def _incremental_poll(state: BranchState, client: httpx.AsyncClient) -> No
     if not events:
         return
 
+    # TEMP DEBUG: dump event types to understand what comes through incrementally
+    if state.branch_name.startswith("Барнаул_3"):
+        ev_types = [ev.findtext("type", "?") for ev in events]
+        logger.info(f"[debug_inc] [{state.branch_name}] types={ev_types[:10]}")
+
     _process_events(state, events, incremental=True)
     state.revision = max_revision
 

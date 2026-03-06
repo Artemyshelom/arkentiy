@@ -137,6 +137,22 @@ def _format_branch_report(
     return "\n".join(lines)
 
 
+def _format_daily_summary(date_str: str, branches: list[tuple[str, float, int]]) -> str:
+    """Сводная таблица выручки по всем точкам тенанта за день."""
+    sorted_b = sorted(branches, key=lambda x: x[1] or 0, reverse=True)
+    total_rev = sum(r for _, r, _ in sorted_b if r)
+    total_chk = sum(c for _, _, c in sorted_b if c)
+
+    rows = []
+    for name, rev, chk in sorted_b:
+        short = html.escape(name[:20])
+        rev_str = _fmt_money(rev) if rev else "—"
+        rows.append(f"{short:<20}  {rev_str:>12}  {chk} чек")
+    rows.append("─" * 40)
+    rows.append(f"{'Итого:':<20}  {_fmt_money(total_rev):>12}  {total_chk} чек")
+
+    return f"📈 <b>Итоги {date_str}</b>\n\n<code>" + "\n".join(rows) + "</code>"
+
 
 async def job_send_morning_report(utc_offset: int) -> None:
     """Единственный ежедневный отчёт. Запускается утром за вчера.
@@ -174,6 +190,10 @@ async def job_send_morning_report(utc_offset: int) -> None:
     for u in updates:
         updates_by_branch.setdefault(u["branch"], []).append(u)
 
+    # Для итоговой сводки: (name, rev, chk) по тенанту + чаты для рассылки
+    branch_summaries: dict[int, list[tuple[str, float, int]]] = {}
+    tenant_report_chats: dict[int, set[int]] = {}
+
     sent = 0
     for branch in branches:
         name = branch["name"]
@@ -184,6 +204,8 @@ async def job_send_morning_report(utc_offset: int) -> None:
 
         rev = stats.get("revenue_net") or 0
         chk = stats.get("check_count") or 0
+        tenant_id = branch.get("tenant_id", 1)
+        branch_summaries.setdefault(tenant_id, []).append((name, rev, chk))
 
         discount_types_json = json.dumps(
             agg.get("discount_types_agg") or stats.get("discount_types") or [],
@@ -252,7 +274,6 @@ async def job_send_morning_report(utc_offset: int) -> None:
                 lines.append(f"\n<i>{html.escape(quip)}</i>")
 
             full_msg = "\n".join(lines)
-            tenant_id = branch.get("tenant_id", 1)
             city = branch.get("city", "")
 
             if _get_module_chats and tenant_id != 1:
@@ -260,11 +281,13 @@ async def job_send_morning_report(utc_offset: int) -> None:
                 report_chats = await _get_module_chats("reports", city, tenant_id)
                 for chat_id in report_chats:
                     await telegram.send_message(str(chat_id), full_msg)
+                    tenant_report_chats.setdefault(tenant_id, set()).add(chat_id)
                 if report_chats:
                     sent += 1
             else:
                 # Ёбидоёби (tenant_id=1) — глобальный канал
                 await telegram.report(full_msg)
+                tenant_report_chats.setdefault(1, set()).add(0)  # маркер «слали в основной канал»
                 sent += 1
         except Exception as e:
             logger.error(f"Ошибка отправки утреннего отчёта [{name}]: {e}")
@@ -273,5 +296,21 @@ async def job_send_morning_report(utc_offset: int) -> None:
         await clear_updates_for_date(date_iso)
     except Exception as e:
         logger.warning(f"Не удалось очистить report_updates за {date_iso}: {e}")
+
+    # Итоговая сводка по тенанту (только если точек ≥ 2)
+    date_str_fmt = yesterday.strftime("%d.%m.%Y")
+    for tid, br_list in branch_summaries.items():
+        if len(br_list) < 2:
+            continue
+        try:
+            summary_msg = _format_daily_summary(date_str_fmt, br_list)
+            if tid == 1:
+                await telegram.report(summary_msg)
+            else:
+                chat_ids = tenant_report_chats.get(tid, set())
+                for chat_id in chat_ids:
+                    await telegram.send_message(str(chat_id), summary_msg)
+        except Exception as e:
+            logger.error(f"Ошибка отправки итоговой сводки [tenant_id={tid}]: {e}")
 
     await log_job_finish(log_id, "ok", f"Отправлено: {sent}/{len(branches)}")

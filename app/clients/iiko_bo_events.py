@@ -203,6 +203,8 @@ class BranchState:
         total_delivered = 0
         delay_minutes = []
 
+        today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
+
         for d in self.deliveries.values():
             if d.get("status") not in ("Доставлена", "Закрыта"):
                 continue
@@ -210,10 +212,19 @@ class BranchState:
                 continue
             if "смен" in (d.get("comment") or "").lower():
                 continue  # смена оплаты — iiko пересоздаёт заказ, время доставки = 0
-            total_delivered += 1
             planned = d.get("planned_time")
+            if not planned:
+                continue
+            # Фильтр по дате: только заказы сегодняшнего дня (UTC+7)
+            try:
+                planned_date = datetime.fromisoformat(planned.replace("T", " ").split(".")[0]).date()
+                if planned_date != today_local:
+                    continue
+            except Exception:
+                continue
+            total_delivered += 1
             actual = d.get("actual_time")
-            if planned and actual:
+            if actual:
                 try:
                     def _parse_dt(s: str) -> datetime:
                         return datetime.fromisoformat(s.replace("T", " ").split(".")[0])

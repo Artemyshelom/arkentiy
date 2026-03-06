@@ -971,6 +971,25 @@ docker compose up -d
 
 ---
 
+## 🔴 [BUG] delay_stats считал опоздания с прошлого дня (март 2026)
+
+**Симптом:** `/статус` показывал ≈326 мин среднего опоздания на 2 заказах (Канск).
+
+**Причина:** `BranchState.delay_stats()` итерировал ВСЕ `deliveries` со статусом "Доставлена"/"Закрыта" без фильтрации по дате. `_states` накапливает заказы с момента последнего full reload (раз в 6 часов). Если full reload происходил в начале дня и iiko вернул события прошлой смены (часть рабочего дня пересекает полночь) — старые заказы с `planned_time` = вчера попадали в расчёт среднего.
+
+**Фикс:** Добавлен date-фильтр в `delay_stats()`:
+```python
+today_local = (datetime.now(timezone.utc) + timedelta(hours=7)).date()
+# ...
+planned_date = datetime.fromisoformat(planned...).date()
+if planned_date != today_local:
+    continue
+```
+
+**Урок:** Любая RT-агрегация из `_states` (опоздания, выручка, чеки) должна фильтровать по `planned_time.date() == today_local`. `_states` — NOT day-scoped хранилище.
+
+---
+
 ## 🔴 [БЕЗОПАСНОСТЬ] Проверка секретов перед git push
 
 **Контекст:** 2 марта 2026 — OpenClaw токен утёк в публичный репо. GitGuardian поймал.

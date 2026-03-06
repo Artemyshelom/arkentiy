@@ -498,8 +498,6 @@ def _process_events(state: BranchState, events_xml: list) -> None:
                 state.sessions[uid]["closed_at"] = ev_date
 
         else:
-            if any(kw in ev_type.lower() for kw in ("cook", "kitchen", "готов", "station")):
-                logger.info(f"[events] cooking-related ev_type={ev_type!r} attrs={attrs}")
             logger.debug(f"[events] unhandled ev_type={ev_type!r} attrs_keys={list(attrs.keys())}")
 
         if ev_type == "cookingStatusChangedToNext":
@@ -508,7 +506,7 @@ def _process_events(state: BranchState, events_xml: list) -> None:
             cooking_status = attrs.get("cookingStatus", "")
             if order_num_str and cooking_status:
                 try:
-                    num_int = int(order_num_str)
+                    num_int = int(float(order_num_str))  # приходит как "81317.000000000"
                     state.cooking_statuses[num_int] = cooking_status
                     # Сохраняем timestamps этапов приготовления для расчёта опоздания самовывоза
                     if cooking_status in ("Приготовлено", "Собран"):

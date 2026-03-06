@@ -11,6 +11,9 @@ import html
 import logging
 from datetime import datetime
 
+import httpx
+
+from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import get_branch_rt
 from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats
 from app.config import get_settings
@@ -19,6 +22,45 @@ from app.utils.timezone import branch_tz, now_local
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
+
+
+async def get_cash_shift_open(branch: dict, date_iso: str) -> bool | None:
+    """Возвращает True если кассовая смена открыта, False если закрыта, None если API недоступен."""
+    bo_url = branch.get("bo_url", "")
+    dept_id = branch.get("dept_id", "")
+    if not bo_url:
+        return None
+    try:
+        token = await get_bo_token(
+            bo_url,
+            bo_login=branch.get("bo_login") or None,
+            bo_password=branch.get("bo_password") or None,
+        )
+        params = {
+            "key": token,
+            "openDateFrom": date_iso,
+            "openDateTo": date_iso,
+            "status": "OPENED",
+        }
+        if dept_id:
+            params["departmentId"] = dept_id
+        async with httpx.AsyncClient(verify=False, timeout=10) as client:
+            resp = await client.get(
+                f"{bo_url.rstrip('/')}/api/v2/cashshifts/list",
+                params=params,
+            )
+        if resp.status_code == 200:
+            data = resp.json()
+            # Если есть хоть одна открытая смена — возвращаем True
+            if isinstance(data, list):
+                return len(data) > 0
+            return None
+        elif resp.status_code in (404, 403):
+            return None  # эндпоинт недоступен
+        return None
+    except Exception as e:
+        logger.debug(f"get_cash_shift_open [{branch['name']}]: {e}")
+        return None
 
 
 async def get_branch_status(branch: dict) -> dict:
@@ -63,6 +105,8 @@ async def get_branch_status(branch: dict) -> dict:
     except Exception as e:
         logger.warning(f"Ошибка aggregate_orders_today [{branch['name']}]: {e}")
 
+    cash_shift_open = await get_cash_shift_open(branch, date_iso)
+
     return {
         "name": branch["name"],
         "city": branch.get("city", ""),
@@ -86,6 +130,7 @@ async def get_branch_status(branch: dict) -> dict:
         "avg_cooking_min": orders_agg.get("avg_cooking_min"),
         "avg_wait_min": orders_agg.get("avg_wait_min"),
         "avg_delivery_min": orders_agg.get("avg_delivery_min"),
+        "cash_shift_open": cash_shift_open,
     }
 
 
@@ -136,6 +181,15 @@ def format_branch_status(data: dict) -> str:
         lines.append(f"📦 Себестоимость: {cogs:.1f}%")
 
     has_rt = data.get("active_orders") is not None
+
+    cash_shift_open = data.get("cash_shift_open")
+    if cash_shift_open is False:
+        lines.append("")
+        lines.append("🔴 Кассовая смена закрыта")
+    elif cash_shift_open is True:
+        lines.append("")
+        lines.append("✅ Кассовая смена открыта")
+    # None — не показываем (API недоступен)
 
     delays = data.get("delays")
     if has_rt:

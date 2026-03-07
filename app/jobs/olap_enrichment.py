@@ -187,7 +187,7 @@ async def _update_orders_raw(enriched: dict, tenant_id: int) -> int:
         if not sets:
             continue
 
-        vals.append(datetime.now(timezone.utc).isoformat())
+        vals.append(datetime.now(timezone.utc))
         updated_at_idx = idx
         idx += 1
         vals.append(branch)

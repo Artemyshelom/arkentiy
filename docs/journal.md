@@ -9,6 +9,55 @@
 
 ---
 
+## Сессия 68 — 8 марта 2026 (feat: customer_stats в отчётах) ✅
+
+**Фокус:** Статистика новых и повторных клиентов в ежедневном и еженедельном отчётах (коммит `3bcd01d`).
+
+### Что сделано
+
+**Миграция** `app/migrations/006_customer_stats.sql` — 4 новые колонки в `daily_stats`:
+```sql
+new_customers, new_customers_revenue, repeat_customers, repeat_customers_revenue
+```
+Применять: `psql $DATABASE_URL -f app/migrations/006_customer_stats.sql`
+
+**`app/database_pg.py`:**
+- `aggregate_orders_for_daily_stats()` — добавлен SQL-запрос клиентской статистики. «Новый» клиент — у кого первый заказ в нужной точке пришёлся именно на эту дату. Самозаказы (пустой телефон) исключаются.
+- `upsert_daily_stats_batch()` — добавлены 4 новых колонки в INSERT/ON CONFLICT.
+- `get_period_stats()` — добавлен `SUM(COALESCE(...))` для 4 новых колонок.
+- `get_repeat_conversion(branch_names, tenant_id)` — новая функция. Считает: сколько клиентов сделали ПЕРВЫЙ заказ в прошлом полном календарном месяце → сколько из них заказали повторно позже. Возвращает `{new_count, converted, conversion_pct, month_label}`.
+
+**`app/jobs/daily_report.py`:**
+- `_format_branch_report()` — новый блок в конце отчёта (виден для daily И period):
+  ```
+  👥 Клиенты:
+     Новых: 12 · 28 400₽ (12%)
+     Повторных: 77 · 217 400₽ (88%)
+  ```
+- `job_send_morning_report()` — передаёт 4 новых поля в `upsert_daily_stats_batch`.
+
+**`app/jobs/weekly_report.py`:**
+- `_format_network_summary()` — суммирует клиентов по всем точкам + блок конверсии:
+  ```
+  👥 Клиенты за неделю:
+     Новых: 234 · 512 400₽ (12%)
+     Повторных: 1 308 · 3 737 600₽ (88%)
+
+  📈 Конверсия за февраль 2026: 34%
+     (из 856 новых 291 заказали повторно)
+  ```
+- `job_weekly_report()` — вызывает `get_repeat_conversion()`, передаёт результат в форматтер.
+- Детальные отчёты по точкам тоже содержат клиентский блок (через `_format_branch_report`).
+
+### Архитектурные решения
+- Данные хранятся в `daily_stats` при записи (daily_report), недельный лишь суммирует — без тяжёлых JOIN на лету.
+- Конверсия считается по прошлому полному календарному месяцу — достаточный горизонт для реальных данных.
+
+### Следующий шаг (pending)
+Применить миграцию на prod: `psql $DATABASE_URL -f app/migrations/006_customer_stats.sql`
+
+---
+
 ## Сессия 67 — 7 марта 2026 (feat: weekly_report_v1) ✅
 
 **Фокус:** Еженедельный отчёт по сети с WoW-сравнением (коммит `ba2e939`).

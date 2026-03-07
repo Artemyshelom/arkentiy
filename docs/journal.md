@@ -9,6 +9,89 @@
 
 ---
 
+## Сессия 66 — 7 марта 2026 (fix: диагностика Ижевска — подвешено) 🔄
+
+**Фокус:** Выяснить почему `Ижевск_1 Авт` не обогащается через OLAP — проверка dept_id и имён филиалов на сервере.
+
+### Что делали
+
+- В `iiko_credentials` tenant 3 — одна ижевская запись: `branch_name="Ижевск_1 Авт"`, `dept_id=5093557c-...`, `bo_url=yobidoyobi-izhevsk.iiko.it`
+- Авторизация работает (auth возвращает токен за ~1 сек)
+- OLAP-запрос к серверу падает с `ReadTimeout` (>90 сек) — сервер либо перегружен, либо запрос на `DELIVERIES` слишком тяжёлый
+- `SALES`-запрос через curl тоже вернул `Token is expired or invalid` (токен устарел за время curl)
+
+### Итог / следующий шаг
+
+Проблема не в dept_id и не в авторизации. Сервер `yobidoyobi-izhevsk.iiko.it` просто не отвечает на OLAP в разумное время.
+**Нужно:** выяснить правильное название филиала через iiko BO веб-интерфейс, уточнить активен ли филиал, и либо исправить `branch_name` в БД, либо пометить `is_active = false`.
+
+---
+
+## Сессия 65 — 7 марта 2026 (feat: backfill tenant 3 — Зеленогорск + Канск) ✅
+
+**Фокус:** Бэкфил OLAP-обогащения `orders_raw` для tenant 3 (Шабуров) за весь 2025 год, исключая Ижевск.
+
+### Результат
+
+```
+--tenant 3 --from 2025-01-01 --to 2026-02-01 --chunk 7 --exclude ижевск
+Точки: Зеленогорск_1 Изы, Канск_1 Сов
+✅ Итого обновлено: 86 320
+```
+
+Все заказы Зеленогорска и Канска с января 2025 по февраль 2026 теперь имеют `payment_type`, `pay_breakdown`, `discount_type`, `source` и временны́е поля.
+
+---
+
+## Сессия 64 — 7 марта 2026 (fix: два production-бага + backfill script) ✅
+
+**Фокус:** Два критических бага в продакшне, обнаруженных утром 7 марта. Создание CLI-скрипта для бэкфила.
+
+### Баг 1: `olap_enrichment.py` — asyncpg отказывал принимать строку в timestamp-колонку (коммит `21b376e`)
+
+**Симптом:** job `olap_enrichment` падал с `invalid input for query argument $9`.
+
+**Причина:** `vals.append(datetime.now(timezone.utc).isoformat())` — asyncpg требует Python-объект `datetime`, а не ISO-строку для колонки типа `timestamptz`.
+
+**Фикс:** убрали `.isoformat()`:
+```python
+# было
+vals.append(datetime.now(timezone.utc).isoformat())
+# стало
+vals.append(datetime.now(timezone.utc))
+```
+
+### Баг 2: `iiko_to_sheets.py` — мёртвый импорт (коммит `21b376e`)
+
+**Симптом:** job `iiko_to_sheets` падал при старте с `cannot import name 'get_iiko_credentials' from app.database_pg`.
+
+**Причина:** осталась строка `from app.database_pg import get_iiko_credentials` — функция была запланирована но никогда не реализована.
+
+**Фикс:** удалён мёртвый импорт и весь блок кода, который якобы использовал эту функцию (был мёртвым кодом).
+
+### Бэкфил для tenant 1 и 2
+
+После деплоя фиксов вручную прогнали `job_olap_enrichment` для tenant 1 и 2 — заполнили пропуски Feb 21 – Mar 05.
+
+### feat: `backfill_olap_enrichment.py` (коммиты `b54138d`, `3fee5d0`)
+
+Создан CLI-скрипт `app/onboarding/backfill_olap_enrichment.py` для ретроактивного обогащения `orders_raw`.
+
+**Параметры:**
+- `--tenant` — tenant_id (обязательно)
+- `--from` / `--to` — диапазон дат (YYYY-MM-DD)
+- `--chunk` — размер батча в днях (default 7)
+- `--dry-run` — показать план без записи в БД
+- `--exclude` — пропустить точки по подстроке имени (можно несколько раз)
+
+**Запуск:**
+```bash
+docker compose exec -e PYTHONPATH=/app app python3 app/onboarding/backfill_olap_enrichment.py \
+  --tenant 3 --from 2025-01-01 --to 2026-02-01 --chunk 7 --exclude ижевск
+```
+
+---
+
 ## Сессия 63 — 6 марта 2026 (feat: timezone_support — per-branch tz) ✅
 
 **Фокус:** Поддержка часовых поясов точек в `/статус`, `/отчёт`, `/поиск`. Убрали хардкод UTC+7 — теперь каждая точка показывает своё местное время из `utc_offset`.

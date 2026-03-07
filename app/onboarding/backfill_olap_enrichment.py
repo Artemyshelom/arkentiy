@@ -30,7 +30,7 @@ logging.basicConfig(level=logging.WARNING, format="%(levelname)s %(message)s")
 logger = logging.getLogger("backfill_olap")
 
 
-async def run(tenant_id: int, date_from: date, date_to: date, chunk: int, dry_run: bool) -> None:
+async def run(tenant_id: int, date_from: date, date_to: date, chunk: int, dry_run: bool, exclude: list[str] | None = None) -> None:
     from app.database_pg import init_db
     await init_db(os.environ["DATABASE_URL"])
 
@@ -41,6 +41,12 @@ async def run(tenant_id: int, date_from: date, date_to: date, chunk: int, dry_ru
     if not branches:
         print(f"❌ Нет точек для tenant_id={tenant_id}")
         return
+
+    exclude_lower = [e.lower() for e in (exclude or [])]
+    if exclude_lower:
+        branches = [b for b in branches if not any(e in b["name"].lower() for e in exclude_lower)]
+        print(f"Исключены точки содержащие: {exclude_lower}")
+
     print(f"Tenant {tenant_id}: {[b['name'] for b in branches]}")
     print(f"Период: {date_from} .. {date_to} (chunk={chunk}d, dry_run={dry_run})")
 
@@ -94,6 +100,7 @@ def main() -> None:
     parser.add_argument("--to", dest="date_to", required=True, help="End date YYYY-MM-DD (exclusive)")
     parser.add_argument("--chunk", type=int, default=7, help="Days per OLAP request (default: 7)")
     parser.add_argument("--dry-run", action="store_true", help="Do not write to DB")
+    parser.add_argument("--exclude", nargs="*", default=[], help="Branch name substrings to skip (case-insensitive)")
     args = parser.parse_args()
 
     asyncio.run(run(
@@ -102,6 +109,7 @@ def main() -> None:
         date_to=date.fromisoformat(args.date_to),
         chunk=args.chunk,
         dry_run=args.dry_run,
+        exclude=args.exclude,
     ))
 
 

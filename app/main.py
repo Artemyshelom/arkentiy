@@ -42,6 +42,7 @@ from app.jobs.competitor_monitor import job_monitor_competitors
 from app.jobs.arkentiy import poll_analytics_bot, run_polling_loop
 from app.jobs.late_alerts import job_late_alerts
 from app.jobs.daily_report import job_send_morning_report
+from app.jobs.weekly_report import job_weekly_report
 from app.jobs.audit import job_audit_report
 from app.jobs.cancel_sync import job_cancel_sync
 from app.jobs.billing import job_recurring_billing
@@ -177,6 +178,29 @@ def register_jobs() -> None:
         trigger=CronTrigger(minute=27),  # каждый час в :27
         id="audit_report",
         name="Аудит опасных операций → Telegram (по таймзонам)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Еженедельный отчёт: каждый понедельник в :30, аналогичная логика по таймзонам.
+    # 09:30 локального = понедельник и target_offset == 12 - msk_hour.
+    async def _weekly_report_by_tz():
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from app.db import get_all_branches
+        msk_now = _dt.now(_tz(_td(hours=3)))
+        target_offset = 12 - msk_now.hour
+        offsets = {b.get("utc_offset", 7) for b in get_all_branches()}
+        if target_offset in offsets:
+            try:
+                await job_weekly_report(utc_offset=target_offset)
+            except Exception as e:
+                logger.error(f"weekly_report UTC+{target_offset}: {e}", exc_info=True)
+
+    scheduler.add_job(
+        _weekly_report_by_tz,
+        trigger=CronTrigger(day_of_week="mon", minute=30),  # каждый пн в :30
+        id="weekly_report",
+        name="Еженедельный отчёт → Telegram (по таймзонам)",
         replace_existing=True,
         misfire_grace_time=600,
     )

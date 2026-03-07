@@ -488,7 +488,23 @@ def _process_events(state: BranchState, events_xml: list, incremental: bool = Fa
                 # Фиксируем момент отправки курьера
                 if new_status == "В пути к клиенту" and not existing.get("sent_at"):
                     existing["sent_at"] = ev_date
+                old_status = existing.get("status")
                 existing["status"] = new_status
+                # Замер задержки смены статуса — только инкрементально, только при смене
+                if incremental and ev_date and new_status != old_status:
+                    try:
+                        ev_ts = datetime.fromisoformat(ev_date)
+                        now_utc = datetime.now(timezone.utc)
+                        if ev_ts.tzinfo is not None:
+                            lag_sec = (now_utc - ev_ts).total_seconds()
+                            logger.info(
+                                f"[latency_status] [{state.branch_name}] ORDER #{num} "
+                                f"{old_status!r} → {new_status!r} "
+                                f"ev={ev_date} detected_utc={now_utc.strftime('%H:%M:%S')} "
+                                f"lag={lag_sec:.0f}s"
+                            )
+                    except Exception:
+                        pass
             if attrs.get("deliveryCourier") is not None:
                 existing["courier"] = attrs.get("deliveryCourier", "")
             if attrs.get("deliverySum"):
@@ -573,13 +589,27 @@ def _process_events(state: BranchState, events_xml: list, incremental: bool = Fa
             logger.debug(f"[events] unhandled ev_type={ev_type!r} attrs_keys={list(attrs.keys())}")
 
         if ev_type == "cookingStatusChangedToNext":
-            logger.info(f"[events] cookingStatusChangedToNext attrs={attrs}")
             order_num_str = attrs.get("orderNum", "")
             cooking_status = attrs.get("cookingStatus", "")
             if order_num_str and cooking_status:
                 try:
                     num_int = int(float(order_num_str))  # приходит как "81317.000000000"
                     state.cooking_statuses[num_int] = cooking_status
+                    # Замер задержки кухонного статуса
+                    if incremental and ev_date:
+                        try:
+                            ev_ts = datetime.fromisoformat(ev_date)
+                            now_utc = datetime.now(timezone.utc)
+                            if ev_ts.tzinfo is not None:
+                                lag_sec = (now_utc - ev_ts).total_seconds()
+                                logger.info(
+                                    f"[latency_cooking] [{state.branch_name}] ORDER #{num_int} "
+                                    f"cooking={cooking_status!r} "
+                                    f"ev={ev_date} detected_utc={now_utc.strftime('%H:%M:%S')} "
+                                    f"lag={lag_sec:.0f}s"
+                                )
+                        except Exception:
+                            pass
                     # Сохраняем timestamps этапов приготовления для расчёта опоздания самовывоза
                     if cooking_status in ("Приготовлено", "Собран"):
                         ts = ev_date or datetime.now(timezone.utc).isoformat()

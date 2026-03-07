@@ -20,6 +20,7 @@ from app.db import (
     get_branches,
     get_module_chats_for_city,
     get_period_stats,
+    get_repeat_conversion,
     log_job_finish,
     log_job_start,
 )
@@ -43,6 +44,7 @@ def _week_range(today: "date") -> tuple[str, str, str]:
 def _format_network_summary(
     label: str,
     branches_stats: list[tuple[str, dict, dict | None]],
+    conversion: dict | None = None,
 ) -> str:
     """Сводка по всей сети тенанта за неделю.
 
@@ -58,6 +60,11 @@ def _format_network_summary(
     prev_rev = 0
     has_prev = False
 
+    total_new_c = 0
+    total_new_r = 0.0
+    total_rep_c = 0
+    total_rep_r = 0.0
+
     branch_rows: list[str] = []
     for name, cur, prev in branches_stats:
         if not cur:
@@ -70,6 +77,10 @@ def _format_network_summary(
         total_chk += chk
         total_late += late
         total_delivered += deliv
+        total_new_c += cur.get("new_customers") or 0
+        total_new_r += cur.get("new_customers_revenue") or 0.0
+        total_rep_c += cur.get("repeat_customers") or 0
+        total_rep_r += cur.get("repeat_customers_revenue") or 0.0
 
         p_rev = (prev.get("revenue") or 0) if prev else 0
         if p_rev:
@@ -104,6 +115,24 @@ def _format_network_summary(
     if branch_rows:
         lines.append("По точкам:")
         lines.extend(branch_rows)
+
+    if total_new_c + total_rep_c > 0:
+        total_cr = total_new_r + total_rep_r
+        new_pct = round(total_new_r / total_cr * 100) if total_cr else 0
+        rep_pct = 100 - new_pct
+        lines.append("")
+        lines.append("👥 Клиенты за неделю:")
+        lines.append(f"   Новых: {_fmt_num(total_new_c)} · {_fmt(total_new_r)} ({new_pct}%)")
+        lines.append(f"   Повторных: {_fmt_num(total_rep_c)} · {_fmt(total_rep_r)} ({rep_pct}%)")
+
+    if conversion and conversion.get("new_count"):
+        lines.append("")
+        pct = conversion["conversion_pct"]
+        new_cnt = conversion["new_count"]
+        conv_cnt = conversion["converted"]
+        month = conversion.get("month_label", "прошлый месяц")
+        lines.append(f"📈 Конверсия за {month}: {pct}%")
+        lines.append(f"   (из {new_cnt} новых {conv_cnt} заказали повторно)")
 
     return "\n".join(lines)
 
@@ -152,8 +181,12 @@ async def job_weekly_report(utc_offset: int) -> None:
                 prev = await get_period_stats(name, prev_from, prev_to, tenant_id)
                 branches_stats.append((name, cur or {}, prev))
 
+            # Конверсия клиентов за прошлый полный месяц
+            branch_names = [b["name"] for b in tbranches]
+            conversion = await get_repeat_conversion(branch_names, tenant_id)
+
             # 1. Сводка по сети
-            summary_msg = _format_network_summary(label, branches_stats)
+            summary_msg = _format_network_summary(label, branches_stats, conversion=conversion)
 
             # 2. Детальные отчёты по точкам (переиспользуем daily_report форматтер)
             detail_msgs: list[str] = []
@@ -170,6 +203,10 @@ async def job_weekly_report(utc_offset: int) -> None:
                     "exact_time_count": cur.get("exact_time_count") or 0,
                     "payment_changed_count": cur.get("payment_changed_count") or 0,
                     "discount_types_agg": cur.get("discount_types"),
+                    "new_customers": cur.get("new_customers") or 0,
+                    "new_customers_revenue": cur.get("new_customers_revenue") or 0.0,
+                    "repeat_customers": cur.get("repeat_customers") or 0,
+                    "repeat_customers_revenue": cur.get("repeat_customers_revenue") or 0.0,
                     # штат не показываем в недельном (is_period=True в форматтере)
                 }
                 # WoW-строка

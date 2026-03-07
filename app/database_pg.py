@@ -339,8 +339,10 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                        (tenant_id, branch_name, date, orders_count, revenue, avg_check,
                         cogs_pct, sailplay, discount_sum, discount_types,
                         delivery_count, pickup_count, late_count, total_delivered,
-                        late_percent, avg_late_min, cooks_count, couriers_count)
-                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+                        late_percent, avg_late_min, cooks_count, couriers_count,
+                        new_customers, new_customers_revenue,
+                        repeat_customers, repeat_customers_revenue)
+                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
                        ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
                          orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
                          avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
@@ -350,6 +352,10 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                          late_count=EXCLUDED.late_count, total_delivered=EXCLUDED.total_delivered,
                          late_percent=EXCLUDED.late_percent, avg_late_min=EXCLUDED.avg_late_min,
                          cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
+                         new_customers=EXCLUDED.new_customers,
+                         new_customers_revenue=EXCLUDED.new_customers_revenue,
+                         repeat_customers=EXCLUDED.repeat_customers,
+                         repeat_customers_revenue=EXCLUDED.repeat_customers_revenue,
                          updated_at=now()""",
                     tenant_id,
                     r.get("branch_name"), _to_date(r.get("date")),
@@ -360,6 +366,8 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                     r.get("late_count", 0), r.get("total_delivered", 0),
                     r.get("late_percent", 0), r.get("avg_late_min", 0),
                     r.get("cooks_count", 0), r.get("couriers_count", 0),
+                    r.get("new_customers", 0), r.get("new_customers_revenue", 0.0),
+                    r.get("repeat_customers", 0), r.get("repeat_customers_revenue", 0.0),
                 )
 
 
@@ -1170,6 +1178,42 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     result["cooks_today"] = staff.get("cook", 0)
     result["couriers_today"] = staff.get("courier", 0)
 
+    # Статистика новых / повторных клиентов
+    # «Новый» — клиент, у которого самый первый заказ пришёлся именно на date_iso.
+    # Самозаказы (пустой телефон) исключаются.
+    customer_rows = await pool.fetch(
+        """WITH first_orders AS (
+               SELECT client_phone, MIN(date) AS first_date
+               FROM orders_raw
+               WHERE branch_name = $1
+                 AND client_phone IS NOT NULL AND client_phone != ''
+                 AND status != 'Отменена'
+               GROUP BY client_phone
+           )
+           SELECT
+               CASE WHEN fo.first_date::text = $2 THEN 'new' ELSE 'repeat' END AS ctype,
+               COUNT(DISTINCT o.client_phone)                                   AS clients,
+               COALESCE(SUM(o.sum), 0)                                          AS revenue
+           FROM orders_raw o
+           JOIN first_orders fo ON o.client_phone = fo.client_phone
+           WHERE o.branch_name = $1
+             AND o.date::text = $2
+             AND o.status != 'Отменена'
+           GROUP BY ctype""",
+        branch_name, date_iso,
+    )
+    result["new_customers"] = 0
+    result["new_customers_revenue"] = 0.0
+    result["repeat_customers"] = 0
+    result["repeat_customers_revenue"] = 0.0
+    for cr in customer_rows:
+        if cr["ctype"] == "new":
+            result["new_customers"] = cr["clients"]
+            result["new_customers_revenue"] = float(cr["revenue"])
+        else:
+            result["repeat_customers"] = cr["clients"]
+            result["repeat_customers_revenue"] = float(cr["revenue"])
+
     for k in ("avg_cooking_min", "avg_wait_min", "avg_delivery_min", "avg_late_min"):
         v = result.get(k)
         if v is not None:
@@ -1237,7 +1281,11 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
             SUM(avg_delivery_min * COALESCE(total_delivered, 0))
                 / NULLIF(SUM(CASE WHEN avg_delivery_min IS NOT NULL THEN COALESCE(total_delivered, 0) ELSE 0 END), 0)
                 AS avg_delivery_min,
-            SUM(COALESCE(exact_time_count, 0)) AS exact_time_count
+            SUM(COALESCE(exact_time_count, 0)) AS exact_time_count,
+            SUM(COALESCE(new_customers, 0)) AS new_customers,
+            SUM(COALESCE(new_customers_revenue, 0)) AS new_customers_revenue,
+            SUM(COALESCE(repeat_customers, 0)) AS repeat_customers,
+            SUM(COALESCE(repeat_customers_revenue, 0)) AS repeat_customers_revenue
         FROM daily_stats
         WHERE tenant_id = $1 AND branch_name = $2 AND date::text BETWEEN $3 AND $4""",
         tenant_id, branch_name, date_from, date_to,
@@ -1287,6 +1335,77 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
     result["payment_changed_count"] = pc_row["payment_changed_count"] if pc_row else 0
 
     return result
+
+
+async def get_repeat_conversion(
+    branch_names: list[str],
+    tenant_id: int,
+) -> dict:
+    """Конверсия новых клиентов в повторных за прошлый полный календарный месяц.
+
+    Возвращает:
+        new_count    — сколько клиентов сделали ПЕРВЫЙ заказ в прошлом месяце
+        converted    — из них сколько заказали ещё раз позже
+        conversion_pct — процент конверсии (0..100)
+        month_label  — читаемое название периода, напр. «февраль 2026»
+    """
+    from datetime import date as _date
+    import calendar as _cal
+
+    pool = get_pool()
+
+    today = _date.today()
+    first_of_cur = today.replace(day=1)
+    last_of_prev = first_of_cur - timedelta(days=1)
+    first_of_prev = last_of_prev.replace(day=1)
+
+    _MONTHS_RU = (
+        "", "январь", "февраль", "март", "апрель", "май", "июнь",
+        "июль", "август", "сентябрь", "октябрь", "ноябрь", "декабрь",
+    )
+    month_label = f"{_MONTHS_RU[first_of_prev.month]} {first_of_prev.year}"
+
+    row = await pool.fetchrow(
+        """WITH first_orders AS (
+               -- клиенты, чей самый первый заказ был в прошлом месяце
+               SELECT client_phone
+               FROM orders_raw
+               WHERE tenant_id = $1
+                 AND branch_name = ANY($2::text[])
+                 AND client_phone IS NOT NULL AND client_phone != ''
+                 AND status != 'Отменена'
+               GROUP BY client_phone
+               HAVING MIN(date) BETWEEN $3 AND $4
+           ),
+           converted AS (
+               -- из них кто заказал хотя бы раз после прошлого месяца
+               SELECT DISTINCT o.client_phone
+               FROM orders_raw o
+               JOIN first_orders fo ON o.client_phone = fo.client_phone
+               WHERE o.tenant_id = $1
+                 AND o.branch_name = ANY($2::text[])
+                 AND o.date > $4
+                 AND o.status != 'Отменена'
+           )
+           SELECT
+               (SELECT COUNT(*) FROM first_orders) AS new_count,
+               (SELECT COUNT(*) FROM converted)    AS converted_count""",
+        tenant_id,
+        branch_names,
+        first_of_prev.isoformat(),
+        last_of_prev.isoformat(),
+    )
+
+    new_count = int(row["new_count"] or 0)
+    converted = int(row["converted_count"] or 0)
+    conversion_pct = round(converted / new_count * 100) if new_count else 0
+
+    return {
+        "new_count": new_count,
+        "converted": converted,
+        "conversion_pct": conversion_pct,
+        "month_label": month_label,
+    }
 
 
 async def get_exact_time_orders(

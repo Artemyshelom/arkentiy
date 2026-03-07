@@ -135,6 +135,19 @@ def _format_branch_report(
         if staff_parts:
             lines.append(f"👥 На смене за день: {', '.join(staff_parts)}")
 
+    new_c = agg.get("new_customers") or 0
+    new_r = agg.get("new_customers_revenue") or 0.0
+    rep_c = agg.get("repeat_customers") or 0
+    rep_r = agg.get("repeat_customers_revenue") or 0.0
+    if new_c + rep_c > 0:
+        total_r = new_r + rep_r
+        new_pct = round(new_r / total_r * 100) if total_r else 0
+        rep_pct = 100 - new_pct
+        lines.append("")
+        lines.append("👥 Клиенты:")
+        lines.append(f"   Новых: {new_c} · {_fmt_money(new_r)} ({new_pct}%)")
+        lines.append(f"   Повторных: {rep_c} · {_fmt_money(rep_r)} ({rep_pct}%)")
+
     return "\n".join(lines)
 
 
@@ -243,6 +256,10 @@ async def job_send_morning_report(utc_offset: int) -> None:
                 "avg_wait_min":        agg.get("avg_wait_min"),
                 "avg_delivery_min":    agg.get("avg_delivery_min"),
                 "exact_time_count":    agg.get("exact_time_count") or 0,
+                "new_customers":             agg.get("new_customers", 0),
+                "new_customers_revenue":     agg.get("new_customers_revenue", 0.0),
+                "repeat_customers":          agg.get("repeat_customers", 0),
+                "repeat_customers_revenue":  agg.get("repeat_customers_revenue", 0.0),
             }], tenant_id=branch.get("tenant_id", 1))
         except Exception as e:
             logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")

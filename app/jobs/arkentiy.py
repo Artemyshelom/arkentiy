@@ -699,9 +699,21 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
     Одна точка → сразу карточка + кнопка обновить.
     Несколько → сводка + кнопки per-точка + обновить (edit_message навигация).
     """
+    placeholder_id: int | None = None
+
     if not is_events_loaded():
-        await _send(chat_id, "⏳ Данные загружаются после перезапуска, подождите 1\u20132 минуты.")
-        return
+        placeholder_id = await _send_return_id(chat_id, "⏳ Данные загружаются после перезапуска...")
+        # Ждём до 120 секунд, опрашивая каждые 5с
+        for _ in range(24):
+            await asyncio.sleep(5)
+            if is_events_loaded():
+                break
+        else:
+            if placeholder_id:
+                await _edit_message(chat_id, placeholder_id, "⚠️ Данные так и не загрузились. Попробуй /статус ещё раз.")
+            return
+        # Данные готовы — продолжаем, редактируем то же сообщение
+
     all_branches = get_available_branches()
     if not all_branches:
         await _send(chat_id, "⚠️ Нет настроенных точек.")
@@ -715,8 +727,11 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
-    # Немедленный ответ — пользователь видит реакцию сразу, без ожидания OLAP
-    placeholder_id = await _send_return_id(chat_id, "⏳ Собираю данные...")
+    # Если ещё нет плейсхолдера — отправляем сразу (нормальный путь без ожидания)
+    if placeholder_id is None:
+        placeholder_id = await _send_return_id(chat_id, "⏳ Собираю данные...")
+    else:
+        await _edit_message(chat_id, placeholder_id, "⏳ Собираю данные...")
 
     # OLAP один раз на весь запрос — не N раз на каждую ветку
     all_branches_for_olap = get_available_branches()

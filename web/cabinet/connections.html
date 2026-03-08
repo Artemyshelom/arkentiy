@@ -71,17 +71,119 @@
 
       <!-- Telegram -->
       <div class="card">
-        <div class="flex items-center justify-between mb-3">
-          <h2 class="font-semibold">Telegram-чаты</h2>
-          <span id="tg-bot" class="text-sm text-gray-500">—</span>
+        <div class="flex items-center justify-between mb-4">
+          <div>
+            <h2 class="font-semibold">Telegram-чаты</h2>
+            <div class="text-sm text-gray-400 mt-0.5">Бот: <span id="tg-bot-name" class="font-mono text-brand-600">—</span></div>
+          </div>
+          <button onclick="openAddChat()" class="px-3 py-1.5 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700">+ Добавить чат</button>
         </div>
-        <div id="chats-list" class="space-y-3 mb-3"><div class="text-gray-500 text-sm">Загрузка...</div></div>
+        <div id="chats-list" class="space-y-3 mb-4"><div class="text-gray-400 text-sm py-2 text-center">Загрузка...</div></div>
         <div class="text-xs text-gray-400 bg-gray-50 rounded-lg p-3">
-          Чтобы добавить чат: напишите боту <span id="tg-bot-link" class="font-mono text-brand-600"></span> команду <span class="font-mono">/start</span>, затем добавьте бота в нужный Telegram-чат.
+          Добавьте бота <span id="tg-bot-link" class="font-mono text-brand-600"></span> в ваш Telegram-чат, затем нажмите «Добавить чат» и введите ID чата. Узнать ID чата: перешлите любое сообщение из него боту <span class="font-mono">@userinfobot</span>.
         </div>
       </div>
     </div>
   </main>
+
+  <!-- Модалка: Настроить чат -->
+  <div id="modal-chat" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div class="p-6">
+        <h2 class="text-lg font-bold mb-4" id="modal-chat-title">Настройки чата</h2>
+        <input type="hidden" id="modal-chat-id">
+
+        <div class="mb-4">
+          <label class="block text-sm text-gray-600 mb-1">Название чата</label>
+          <input id="modal-chat-name" type="text" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+        </div>
+
+        <div class="mb-4">
+          <div class="text-sm text-gray-600 mb-2">Город</div>
+          <div id="modal-cities" class="space-y-1.5"></div>
+        </div>
+
+        <div class="mb-5">
+          <div class="text-sm text-gray-600 mb-2">Модули уведомлений</div>
+          <div class="space-y-2">
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" value="late_alerts" class="chat-module accent-brand-600 mt-0.5">
+              <div><div class="text-sm font-medium">🚨 Алерты опозданий</div><div class="text-xs text-gray-400">Уведомления при опоздании курьера +15/+30/+45 мин</div></div>
+            </label>
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" value="reports" class="chat-module accent-brand-600 mt-0.5">
+              <div><div class="text-sm font-medium">📊 Ежедневные отчёты</div><div class="text-xs text-gray-400">Утренний отчёт по выручке и заказам</div></div>
+            </label>
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" value="audit" class="chat-module accent-brand-600 mt-0.5">
+              <div><div class="text-sm font-medium">🔍 Аудит операций</div><div class="text-xs text-gray-400">Ежедневный дайджест рисковых операций</div></div>
+            </label>
+            <label class="flex items-start gap-2 cursor-pointer">
+              <input type="checkbox" value="finance" class="chat-module accent-brand-600 mt-0.5">
+              <div><div class="text-sm font-medium">💰 Финансы</div><div class="text-xs text-gray-400">Сверка банковских выписок и эквайринга</div></div>
+            </label>
+          </div>
+        </div>
+
+        <div class="flex gap-2">
+          <button onclick="closeModal('modal-chat')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Отмена</button>
+          <button onclick="saveChat()" id="btn-save-chat" class="flex-1 px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700">Сохранить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка: Добавить чат -->
+  <div id="modal-add-chat" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+      <div class="p-6">
+        <h2 class="text-lg font-bold mb-1">Добавить Telegram-чат</h2>
+        <p class="text-sm text-gray-500 mb-4">Введите ID чата. Узнать его: перешлите сообщение боту <span class="font-mono">@userinfobot</span>.</p>
+
+        <div id="add-chat-step1">
+          <div class="mb-3">
+            <label class="block text-sm text-gray-600 mb-1">Chat ID (обычно начинается с -)</label>
+            <input id="f-new-chat-id" type="text" placeholder="-1001234567890" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <div id="add-chat-verify-result" class="hidden text-sm mb-3"></div>
+          <div class="flex gap-2">
+            <button onclick="closeModal('modal-add-chat')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Отмена</button>
+            <button onclick="verifyChat()" id="btn-verify-chat" class="flex-1 px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700">Проверить</button>
+          </div>
+        </div>
+
+        <div id="add-chat-step2" class="hidden">
+          <div class="bg-green-50 rounded-lg p-3 mb-3 text-sm">
+            ✅ Чат найден: <span id="verified-chat-title" class="font-medium"></span>
+          </div>
+          <div class="mb-3">
+            <label class="block text-sm text-gray-600 mb-1">Название (как будет отображаться в кабинете)</label>
+            <input id="f-new-chat-name" type="text" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <div class="flex gap-2">
+            <button onclick="document.getElementById('add-chat-step1').classList.remove('hidden');document.getElementById('add-chat-step2').classList.add('hidden')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Назад</button>
+            <button onclick="addChat()" id="btn-add-chat" class="flex-1 px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700">Добавить</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка: Подтверждение удаления -->
+  <div id="modal-delete-chat" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-sm">
+      <div class="p-6">
+        <h2 class="text-lg font-bold mb-2">Удалить чат?</h2>
+        <p class="text-sm text-gray-500 mb-1">Чат <strong id="delete-chat-name"></strong> будет отключён от уведомлений.</p>
+        <p class="text-sm text-gray-400 mb-4">Бот останется в группе, но перестанет писать.</p>
+        <input type="hidden" id="delete-chat-id">
+        <div class="flex gap-2">
+          <button onclick="closeModal('modal-delete-chat')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Отмена</button>
+          <button onclick="confirmDeleteChat()" id="btn-delete-chat" class="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700">Удалить</button>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <!-- Toast -->
   <div id="toast" class="fixed bottom-4 right-4 hidden z-50">
@@ -106,6 +208,8 @@
       toastTimer = setTimeout(()=>t.classList.add("hidden"), 3000);
     }
 
+    function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+
     document.addEventListener("DOMContentLoaded", async () => { if (!checkAuth()) return; await loadConnections(); });
 
     async function loadConnections() {
@@ -125,20 +229,48 @@
       document.getElementById("iiko-login").textContent = i.login || "—";
     }
 
+    const MODULE_LABELS = {
+      late_alerts: "🚨 Алерты",
+      reports:     "📊 Отчёты",
+      audit:       "🔍 Аудит",
+      finance:     "💰 Финансы",
+    };
+
     function renderChats() {
       const tg = connectionsData.telegram;
       const bot = "@" + tg.bot_username;
-      document.getElementById("tg-bot").textContent = "Бот: " + bot;
+      document.getElementById("tg-bot-name").textContent = bot;
       document.getElementById("tg-bot-link").textContent = bot;
+
+      const list = document.getElementById("chats-list");
       if (!tg.chats || !tg.chats.length) {
-        document.getElementById("chats-list").innerHTML = '<div class="text-gray-500 text-sm">Нет чатов</div>';
+        list.innerHTML = '<div class="text-gray-400 text-sm py-2 text-center">Чатов пока нет. Добавьте первый.</div>';
         return;
       }
-      document.getElementById("chats-list").innerHTML = tg.chats.map(c =>
-        `<div class="border rounded-lg p-3"><div class="font-medium">${escapeHtml(c.name)}</div><div class="text-sm text-gray-400">ID: ${escapeHtml(String(c.chat_id))}</div></div>`
-      ).join("");
+      list.innerHTML = tg.chats.map(c => {
+        const cities = c.cities && c.cities.length ? c.cities.join(", ") : "Все города";
+        const mods = c.modules && c.modules.length
+          ? c.modules.map(m => MODULE_LABELS[m] || m).join("  ")
+          : '<span class="text-gray-400">Нет модулей</span>';
+        return `
+          <div class="border border-gray-100 rounded-xl p-4">
+            <div class="flex items-start justify-between gap-2 mb-2">
+              <div>
+                <div class="font-medium">${escapeHtml(c.name)}</div>
+                <div class="text-xs text-gray-400 mt-0.5">ID: ${escapeHtml(c.chat_id)} · ${escapeHtml(cities)}</div>
+              </div>
+            </div>
+            <div class="text-sm text-gray-600 mb-3">${mods}</div>
+            <div class="flex flex-wrap gap-2">
+              <button onclick="openConfigChat(${JSON.stringify(c)})" class="px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Настроить</button>
+              <button onclick="testChat('${escapeHtml(c.chat_id)}')" class="px-3 py-1.5 text-xs border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Тест</button>
+              <button onclick="openDeleteChat('${escapeHtml(c.chat_id)}', '${escapeHtml(c.name)}')" class="px-3 py-1.5 text-xs border border-red-200 rounded-lg text-red-600 hover:bg-red-50">Удалить</button>
+            </div>
+          </div>`;
+      }).join("");
     }
 
+    // iiko actions
     async function testIiko() {
       showToast("Проверяю...", "info");
       try {
@@ -176,8 +308,139 @@
       } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
     }
 
+    // Chat: configure
+    function openConfigChat(chat) {
+      document.getElementById("modal-chat-title").textContent = "Настройки чата";
+      document.getElementById("modal-chat-id").value = chat.chat_id;
+      document.getElementById("modal-chat-name").value = chat.name;
+
+      // Cities checkboxes
+      const cities = connectionsData.cities || [];
+      const selectedCity = chat.cities && chat.cities[0] ? chat.cities[0] : "";
+      const citiesEl = document.getElementById("modal-cities");
+      if (cities.length) {
+        citiesEl.innerHTML = cities.map(c =>
+          `<label class="flex items-center gap-2 text-sm cursor-pointer">
+            <input type="radio" name="chat-city" value="${escapeHtml(c)}" class="accent-brand-600" ${c === selectedCity ? "checked" : ""}> ${escapeHtml(c)}
+          </label>`
+        ).join("") + `<label class="flex items-center gap-2 text-sm cursor-pointer"><input type="radio" name="chat-city" value="" class="accent-brand-600" ${!selectedCity ? "checked" : ""}> Все города</label>`;
+      } else {
+        citiesEl.innerHTML = '<div class="text-gray-400 text-sm">Городов нет</div>';
+      }
+
+      // Modules checkboxes
+      const mods = chat.modules || [];
+      document.querySelectorAll(".chat-module").forEach(cb => {
+        cb.checked = mods.includes(cb.value);
+      });
+
+      document.getElementById("modal-chat").classList.remove("hidden");
+    }
+
+    async function saveChat() {
+      const chatId = document.getElementById("modal-chat-id").value;
+      const name = document.getElementById("modal-chat-name").value.trim();
+      if (!name) { showToast("Введите название", "error"); return; }
+
+      const cityInput = document.querySelector("input[name='chat-city']:checked");
+      const cities = cityInput && cityInput.value ? [cityInput.value] : [];
+
+      const modules = Array.from(document.querySelectorAll(".chat-module:checked")).map(cb => cb.value);
+
+      const btn = document.getElementById("btn-save-chat");
+      btn.disabled = true; btn.textContent = "Сохраняю...";
+      try {
+        await apiPut(`/api/cabinet/chats/${chatId}`, {name, cities, modules});
+        closeModal("modal-chat");
+        showToast("Настройки сохранены", "success");
+        await loadConnections();
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
+    }
+
+    // Chat: test
+    async function testChat(chatId) {
+      showToast("Отправляю тест...", "info");
+      try {
+        const res = await apiPost(`/api/cabinet/chats/${chatId}/test`, {});
+        if (res.status === "ok") showToast("Тестовое сообщение отправлено!", "success");
+        else showToast(res.error || "Не удалось отправить", "error");
+      } catch(e) { showToast(e.message || "Ошибка", "error"); }
+    }
+
+    // Chat: delete
+    function openDeleteChat(chatId, name) {
+      document.getElementById("delete-chat-id").value = chatId;
+      document.getElementById("delete-chat-name").textContent = name;
+      document.getElementById("modal-delete-chat").classList.remove("hidden");
+    }
+
+    async function confirmDeleteChat() {
+      const chatId = document.getElementById("delete-chat-id").value;
+      const btn = document.getElementById("btn-delete-chat");
+      btn.disabled = true; btn.textContent = "Удаляю...";
+      try {
+        await apiDelete(`/api/cabinet/chats/${chatId}`);
+        closeModal("modal-delete-chat");
+        showToast("Чат отключён", "success");
+        await loadConnections();
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Удалить"; }
+    }
+
+    // Chat: add
+    function openAddChat() {
+      document.getElementById("f-new-chat-id").value = "";
+      document.getElementById("f-new-chat-name").value = "";
+      document.getElementById("add-chat-verify-result").classList.add("hidden");
+      document.getElementById("add-chat-step1").classList.remove("hidden");
+      document.getElementById("add-chat-step2").classList.add("hidden");
+      document.getElementById("modal-add-chat").classList.remove("hidden");
+    }
+
+    async function verifyChat() {
+      const chatId = document.getElementById("f-new-chat-id").value.trim();
+      if (!chatId) { showToast("Введите ID чата", "error"); return; }
+      const btn = document.getElementById("btn-verify-chat");
+      const resultEl = document.getElementById("add-chat-verify-result");
+      btn.disabled = true; btn.textContent = "Проверяю...";
+      try {
+        const res = await apiPost("/api/cabinet/chats/verify", {chat_id: chatId});
+        if (res.ok) {
+          document.getElementById("verified-chat-title").textContent = res.chat_title || chatId;
+          document.getElementById("f-new-chat-name").value = res.chat_title || "";
+          document.getElementById("add-chat-step1").classList.add("hidden");
+          document.getElementById("add-chat-step2").classList.remove("hidden");
+        } else {
+          resultEl.innerHTML = `<span class="text-red-500">❌ ${escapeHtml(res.error || "Бот не найден в этом чате")}</span>`;
+          resultEl.classList.remove("hidden");
+        }
+      } catch(e) {
+        resultEl.innerHTML = `<span class="text-red-500">❌ ${escapeHtml(e.message || "Ошибка")}</span>`;
+        resultEl.classList.remove("hidden");
+      } finally { btn.disabled = false; btn.textContent = "Проверить"; }
+    }
+
+    async function addChat() {
+      const chatId = document.getElementById("f-new-chat-id").value.trim();
+      const name = document.getElementById("f-new-chat-name").value.trim();
+      if (!name) { showToast("Введите название", "error"); return; }
+      const btn = document.getElementById("btn-add-chat");
+      btn.disabled = true; btn.textContent = "Добавляю...";
+      try {
+        await apiPost("/api/cabinet/chats", {chat_id: chatId, name});
+        closeModal("modal-add-chat");
+        showToast("Чат добавлен", "success");
+        await loadConnections();
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Добавить"; }
+    }
+
     function escapeHtml(s) {
-      return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
     }
   </script>
 </body>

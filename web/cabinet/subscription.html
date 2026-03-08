@@ -72,6 +72,45 @@
             <div id="sub-addons" class="flex flex-wrap gap-2"></div>
           </div>
 
+          <!-- Разбивка цены -->
+          <div id="sub-pricing-wrap" class="hidden mb-4 border border-gray-100 rounded-xl p-4 bg-gray-50">
+            <div class="text-sm font-medium text-gray-700 mb-3">Состав стоимости</div>
+            <div id="sub-pricing-rows" class="space-y-1.5 text-sm"></div>
+          </div>
+
+          <!-- Аддоны -->
+          <div id="sub-addons-toggle" class="hidden mb-4">
+            <div class="text-sm font-medium text-gray-700 mb-2">Дополнительные модули</div>
+            <div class="space-y-2">
+              <div class="border border-gray-100 rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <div class="text-sm font-medium">💰 Финансы</div>
+                  <div class="text-xs text-gray-400">Сверка банковских выписок и эквайринга</div>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span id="addon-finance-price" class="text-xs text-gray-400"></span>
+                  <button id="btn-addon-finance" onclick="toggleAddon('finance')" class="px-3 py-1 text-xs rounded-lg font-medium transition-colors"></button>
+                </div>
+              </div>
+              <div class="border border-gray-100 rounded-xl p-3 flex items-center justify-between">
+                <div>
+                  <div class="text-sm font-medium">🏪 Конкуренты</div>
+                  <div class="text-xs text-gray-400">Мониторинг цен и меню конкурентов</div>
+                </div>
+                <div class="flex items-center gap-3">
+                  <span id="addon-competitors-price" class="text-xs text-gray-400"></span>
+                  <button id="btn-addon-competitors" onclick="toggleAddon('competitors')" class="px-3 py-1 text-xs rounded-lg font-medium transition-colors"></button>
+                </div>
+              </div>
+            </div>
+            <!-- Кнопка сохранить изменения (появляется если что-то поменяли) -->
+            <div id="addons-changed-bar" class="hidden mt-3 flex items-center gap-3 bg-brand-50 rounded-lg p-3">
+              <span class="text-sm text-brand-700 flex-1">Сохранить изменения в модулях?</span>
+              <button onclick="discardAddons()" class="px-3 py-1 text-xs border border-gray-300 rounded-lg text-gray-600 hover:bg-white">Отмена</button>
+              <button onclick="saveAddons()" id="btn-save-addons" class="px-3 py-1 text-xs bg-brand-600 text-white rounded-lg hover:bg-brand-700">Сохранить</button>
+            </div>
+          </div>
+
           <!-- Кнопки -->
           <div class="flex flex-wrap gap-2">
             <button id="btn-change-plan" onclick="openChangePlan()" class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700">Сменить план</button>
@@ -152,6 +191,7 @@
     function toggleMenu(){document.getElementById("sidebar").classList.toggle("-translate-x-full");document.getElementById("menu-overlay").classList.toggle("hidden")}
 
     let subData = null;
+    let pendingAddons = [];
     let toastTimer;
 
     function showToast(msg, type="info") {
@@ -217,6 +257,35 @@
           .join("");
       }
 
+      // Разбивка цены
+      if (p && d.branches_count) {
+        const pricingWrap = document.getElementById("sub-pricing-wrap");
+        pricingWrap.classList.remove("hidden");
+        const rows = [];
+        const base = p.base_per_branch * d.branches_count;
+        rows.push(`<div class="flex justify-between"><span class="text-gray-600">Базовый пакет (${d.branches_count} × ${Number(p.base_per_branch).toLocaleString("ru-RU")} ₽)</span><span>${Number(base).toLocaleString("ru-RU")} ₽</span></div>`);
+        if (d.addons && d.addons.includes("finance") && p.finance_per_branch) {
+          const fin = p.finance_per_branch * d.branches_count;
+          rows.push(`<div class="flex justify-between"><span class="text-gray-600">Финансы (${d.branches_count} × ${Number(p.finance_per_branch).toLocaleString("ru-RU")} ₽)</span><span>${Number(fin).toLocaleString("ru-RU")} ₽</span></div>`);
+        }
+        if (d.addons && d.addons.includes("competitors") && p.competitors_per_city) {
+          const comp = p.competitors_per_city * d.cities_count;
+          rows.push(`<div class="flex justify-between"><span class="text-gray-600">Конкуренты (${d.cities_count} × ${Number(p.competitors_per_city).toLocaleString("ru-RU")} ₽)</span><span>${Number(comp).toLocaleString("ru-RU")} ₽</span></div>`);
+        }
+        if (p.volume_discount_pct > 0) {
+          rows.push(`<div class="flex justify-between text-green-600"><span>Скидка за объём (-${p.volume_discount_pct}%)</span><span>−${Number(Math.round((base) * p.volume_discount_pct / 100)).toLocaleString("ru-RU")} ₽</span></div>`);
+        }
+        if (p.annual_discount_pct > 0) {
+          rows.push(`<div class="flex justify-between text-green-600"><span>Годовая оплата (-${p.annual_discount_pct}%)</span><span>−...₽</span></div>`);
+        }
+        rows.push(`<div class="flex justify-between font-semibold border-t border-gray-200 pt-1.5 mt-1"><span>Итого</span><span>${Number(p.monthly_total).toLocaleString("ru-RU")} ₽/мес</span></div>`);
+        document.getElementById("sub-pricing-rows").innerHTML = rows.join("");
+      }
+
+      // Аддоны toggles
+      pendingAddons = d.addons ? [...d.addons] : [];
+      renderAddonButtons(d);
+
       // Кнопки
       if (d.cancel_scheduled) {
         document.getElementById("btn-cancel").disabled = true;
@@ -258,6 +327,68 @@
 
     function escapeHtml(s) {
       return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // Аддоны
+    function renderAddonButtons(d) {
+      const p = d.pricing;
+      const wrap = document.getElementById("sub-addons-toggle");
+      wrap.classList.remove("hidden");
+
+      const finBtn = document.getElementById("btn-addon-finance");
+      const compBtn = document.getElementById("btn-addon-competitors");
+
+      if (p && p.finance_per_branch) {
+        document.getElementById("addon-finance-price").textContent = `+${Number(p.finance_per_branch * d.branches_count).toLocaleString("ru-RU")} ₽/мес`;
+      }
+      if (p && p.competitors_per_city) {
+        document.getElementById("addon-competitors-price").textContent = `+${Number(p.competitors_per_city * d.cities_count).toLocaleString("ru-RU")} ₽/мес`;
+      }
+
+      const hasFin = pendingAddons.includes("finance");
+      const hasComp = pendingAddons.includes("competitors");
+
+      finBtn.className = "px-3 py-1 text-xs rounded-lg font-medium transition-colors " +
+        (hasFin ? "bg-brand-600 text-white hover:bg-brand-700" : "border border-gray-300 text-gray-600 hover:bg-gray-50");
+      finBtn.textContent = hasFin ? "Подключён" : "Подключить";
+
+      compBtn.className = "px-3 py-1 text-xs rounded-lg font-medium transition-colors " +
+        (hasComp ? "bg-brand-600 text-white hover:bg-brand-700" : "border border-gray-300 text-gray-600 hover:bg-gray-50");
+      compBtn.textContent = hasComp ? "Подключён" : "Подключить";
+
+      // Показываем бар только если изменили относительно исходного
+      const orig = subData?.addons || [];
+      const changed = JSON.stringify([...pendingAddons].sort()) !== JSON.stringify([...orig].sort());
+      document.getElementById("addons-changed-bar").classList.toggle("hidden", !changed);
+    }
+
+    function toggleAddon(name) {
+      if (!subData) return;
+      const idx = pendingAddons.indexOf(name);
+      if (idx >= 0) pendingAddons.splice(idx, 1);
+      else pendingAddons.push(name);
+      renderAddonButtons(subData);
+    }
+
+    function discardAddons() {
+      pendingAddons = subData ? [...subData.addons] : [];
+      renderAddonButtons(subData);
+    }
+
+    async function saveAddons() {
+      const btn = document.getElementById("btn-save-addons");
+      btn.disabled = true; btn.textContent = "Сохраняю...";
+      try {
+        const res = await apiPut("/api/cabinet/subscription", {
+          addons: pendingAddons,
+          cities: subData.cities || [],
+          period: subData.period || "monthly",
+        });
+        showToast("Изменения сохранены", "success");
+        await loadSubscription();
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
     }
 
     // Отмена подписки

@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from pathlib import Path
 from typing import Optional
 
 import httpx
@@ -37,6 +39,58 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 CITIES = access.CITIES
+
+# ---------------------------------------------------------------------------
+# Аватарки чатов
+# ---------------------------------------------------------------------------
+
+_AVATAR_DIR = Path(__file__).parent.parent.parent / "assets" / "avatars"
+
+AVATAR_MAP: list[tuple[str, str]] = [
+    (r"опозд",      "late.jpg"),
+    (r"отч[её]т",  "reports.jpg"),
+    (r"аудит",      "audit.jpg"),
+    (r"поиск",      "search.jpg"),
+    (r"финанс",    "finance.jpg"),
+    (r"маркетинг", "marketing.jpg"),
+]
+
+
+async def set_chat_avatar(chat_id: int, chat_title: str) -> bool:
+    """Установить аватарку бота в чате по названию группы. Возвращает True при успехе."""
+    token = settings.telegram_analytics_bot_token
+    if not token:
+        return False
+
+    for pattern, filename in AVATAR_MAP:
+        if re.search(pattern, chat_title, re.IGNORECASE):
+            avatar_path = _AVATAR_DIR / filename
+            if not avatar_path.exists():
+                logger.warning(f"[avatar] Файл аватарки не найден: {avatar_path}")
+                return False
+            try:
+                async with httpx.AsyncClient(timeout=15) as client:
+                    with open(avatar_path, "rb") as f:
+                        resp = await client.post(
+                            f"https://api.telegram.org/bot{token}/setChatPhoto",
+                            data={"chat_id": str(chat_id)},
+                            files={"photo": (filename, f, "image/jpeg")},
+                        )
+                    data = resp.json()
+                    if data.get("ok"):
+                        logger.info(f"[avatar] Установлена аватарка {filename} для чата {chat_id} ({chat_title!r})")
+                        return True
+                    err = data.get("description", "")
+                    if "not enough rights" in err.lower() or "no rights" in err.lower():
+                        logger.warning(f"[avatar] Нет прав для установки аватарки в чате {chat_id}")
+                    else:
+                        logger.error(f"[avatar] Ошибка setChatPhoto: {data}")
+            except Exception as e:
+                logger.error(f"[avatar] Исключение при установке аватарки: {e}")
+            return False
+
+    return False
+
 
 _MODULE_META: list[tuple[str, str]] = [
     ("late_alerts",  "🔴 Алерты"),
@@ -455,8 +509,10 @@ async def _delete_entry(section: str, key_str: str, tenant_id: int) -> dict:
 
 async def _register_chat(cid_str: str, name: str, tenant_id: int) -> dict:
     cfg = await _get_tenant_cfg(tenant_id)
-    if cid_str not in cfg.get("chats", {}):
+    is_new = cid_str not in cfg.get("chats", {})
+    if is_new:
         await _db.upsert_tenant_chat(int(cid_str), name, [], None, tenant_id=tenant_id)
+        await set_chat_avatar(int(cid_str), name)
     return await _refresh_cache(tenant_id)
 
 

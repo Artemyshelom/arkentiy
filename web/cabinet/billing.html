@@ -33,15 +33,101 @@
   <main class="pt-14 lg:pt-0 lg:ml-64 p-4 lg:p-8">
     <div class="max-w-4xl">
       <h1 class="text-xl lg:text-2xl font-bold mb-4 lg:mb-6">Платежи</h1>
+
+      <!-- Способ оплаты -->
+      <div class="card mb-4">
+        <h2 class="font-semibold mb-3">Способ оплаты</h2>
+        <div id="payment-method" class="text-sm text-gray-500">Загрузка...</div>
+      </div>
+
+      <!-- История платежей -->
       <div class="card">
-        <p class="text-gray-500">История платежей пока пуста</p>
+        <h2 class="font-semibold mb-4">История платежей</h2>
+        <div id="payments-list">
+          <div class="text-gray-400 text-sm py-4 text-center">Загрузка...</div>
+        </div>
       </div>
     </div>
   </main>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-4 right-4 hidden z-50">
+    <div class="bg-gray-800 text-white text-sm px-4 py-2 rounded-lg shadow-lg" id="toast-msg"></div>
+  </div>
+
   <script src="/js/cabinet.js"></script>
   <script>
     function toggleMenu(){document.getElementById("sidebar").classList.toggle("-translate-x-full");document.getElementById("menu-overlay").classList.toggle("hidden")}
-    document.addEventListener("DOMContentLoaded",()=>{if(!checkAuth())return});
+
+    let toastTimer;
+    function showToast(msg, type="info") {
+      const t = document.getElementById("toast");
+      const m = document.getElementById("toast-msg");
+      m.textContent = msg;
+      t.querySelector("div").className = "text-sm px-4 py-2 rounded-lg shadow-lg " +
+        (type==="success"?"bg-green-600 text-white":type==="error"?"bg-red-600 text-white":"bg-gray-800 text-white");
+      t.classList.remove("hidden");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(()=>t.classList.add("hidden"), 3000);
+    }
+
+    const STATUS_LABELS = {succeeded:"Оплачено",pending:"Ожидает",canceled:"Отменён",failed:"Ошибка"};
+    const STATUS_COLORS = {succeeded:"text-green-600",pending:"text-yellow-600",canceled:"text-gray-400",failed:"text-red-500"};
+    const STATUS_ICON = {succeeded:"✅",pending:"⏳",canceled:"✕",failed:"❌"};
+
+    function fmtDate(iso) {
+      if (!iso) return "—";
+      const d = new Date(iso);
+      return d.toLocaleDateString("ru-RU", {day:"numeric",month:"long",year:"numeric"});
+    }
+
+    function fmtAmount(n) {
+      return Number(n).toLocaleString("ru-RU") + " ₽";
+    }
+
+    async function loadBilling() {
+      try {
+        const data = await apiGet("/api/cabinet/billing");
+
+        // Способ оплаты
+        const pm = document.getElementById("payment-method");
+        if (data.payment_method && data.payment_method.last4) {
+          pm.innerHTML = `<span class="font-medium">${data.payment_method.brand || "Карта"} •••• ${data.payment_method.last4}</span>`;
+        } else {
+          pm.textContent = "Карта не привязана";
+        }
+
+        // Список платежей
+        const list = document.getElementById("payments-list");
+        if (!data.payments || !data.payments.length) {
+          list.innerHTML = '<p class="text-gray-400 text-sm py-4 text-center">Платежей пока нет</p>';
+          return;
+        }
+
+        list.innerHTML = data.payments.map(p => `
+          <div class="flex items-start justify-between py-3 border-b last:border-0">
+            <div class="flex-1 min-w-0">
+              <div class="font-medium text-sm">${escapeHtml(p.description || "Платёж")}</div>
+              <div class="text-xs text-gray-400 mt-0.5">${fmtDate(p.date)}</div>
+            </div>
+            <div class="text-right ml-4 flex-shrink-0">
+              <div class="font-semibold">${fmtAmount(p.amount)}</div>
+              <div class="text-xs ${STATUS_COLORS[p.status] || "text-gray-400"}">${STATUS_ICON[p.status] || ""} ${STATUS_LABELS[p.status] || p.status}</div>
+            </div>
+          </div>`).join("");
+      } catch(e) {
+        showToast("Ошибка загрузки платежей", "error");
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      if (!checkAuth()) return;
+      await loadBilling();
+    });
   </script>
 </body>
 </html>

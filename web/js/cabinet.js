@@ -37,7 +37,11 @@ async function apiGet(url) {
     logout();
     throw new Error("Unauthorized");
   }
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const e = await resp.json(); if (e.detail) msg = e.detail; } catch {}
+    throw new Error(msg);
+  }
   return resp.json();
 }
 
@@ -55,7 +59,11 @@ async function apiPost(url, body) {
     logout();
     throw new Error("Unauthorized");
   }
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const e = await resp.json(); if (e.detail) msg = e.detail; } catch {}
+    throw new Error(msg);
+  }
   return resp.json();
 }
 
@@ -73,7 +81,11 @@ async function apiPut(url, body) {
     logout();
     throw new Error("Unauthorized");
   }
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const e = await resp.json(); if (e.detail) msg = e.detail; } catch {}
+    throw new Error(msg);
+  }
   return resp.json();
 }
 
@@ -87,7 +99,11 @@ async function apiDelete(url) {
     logout();
     throw new Error("Unauthorized");
   }
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    let msg = `HTTP ${resp.status}`;
+    try { const e = await resp.json(); if (e.detail) msg = e.detail; } catch {}
+    throw new Error(msg);
+  }
   return resp.json();
 }
 

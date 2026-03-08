@@ -31,17 +31,171 @@
     <div class="p-4 border-t"><button onclick="logout()" class="text-sm text-gray-500">Выйти</button></div>
   </aside>
   <main class="pt-14 lg:pt-0 lg:ml-64 p-4 lg:p-8">
-    <div class="max-w-4xl">
+    <div class="max-w-2xl">
       <h1 class="text-xl lg:text-2xl font-bold mb-4 lg:mb-6">Настройки</h1>
+
+      <!-- Профиль -->
+      <div class="card mb-4">
+        <h2 class="font-semibold mb-4">Профиль</h2>
+        <div id="profile-loading" class="text-gray-400 text-sm py-2 text-center">Загрузка...</div>
+        <form id="profile-form" class="hidden space-y-3" onsubmit="saveProfile(event)">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Название компании</label>
+            <input id="f-name" type="text" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" required>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Контактное лицо</label>
+            <input id="f-contact" type="text" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Email</label>
+            <input id="f-email" type="email" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" required>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Телефон</label>
+            <input id="f-phone" type="tel" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <button type="submit" id="btn-save-profile" class="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700 disabled:opacity-50">Сохранить</button>
+        </form>
+      </div>
+
+      <!-- Реквизиты -->
+      <div class="card mb-4">
+        <h2 class="font-semibold mb-4">Реквизиты</h2>
+        <form id="legal-form" class="hidden space-y-3" onsubmit="saveLegal(event)">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">ИНН</label>
+            <input id="f-inn" type="text" maxlength="12" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Юридическое название</label>
+            <input id="f-legal-name" type="text" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500">
+          </div>
+          <button type="submit" id="btn-save-legal" class="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700 disabled:opacity-50">Сохранить</button>
+        </form>
+        <div id="legal-loading" class="text-gray-400 text-sm py-2 text-center">Загрузка...</div>
+      </div>
+
+      <!-- Смена пароля -->
       <div class="card">
-        <p class="text-gray-500">Настройки профиля</p>
+        <h2 class="font-semibold mb-4">Безопасность</h2>
+        <form onsubmit="changePassword(event)" class="space-y-3">
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Текущий пароль</label>
+            <input id="f-old-pw" type="password" autocomplete="current-password" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" required>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Новый пароль</label>
+            <input id="f-new-pw" type="password" autocomplete="new-password" minlength="8" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" required>
+          </div>
+          <div>
+            <label class="block text-sm text-gray-600 mb-1">Повторите новый пароль</label>
+            <input id="f-confirm-pw" type="password" autocomplete="new-password" minlength="8" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-brand-500" required>
+          </div>
+          <p class="text-xs text-gray-400">После смены пароля потребуется войти заново.</p>
+          <button type="submit" id="btn-change-pw" class="px-5 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700 disabled:opacity-50">Сменить пароль</button>
+        </form>
       </div>
     </div>
   </main>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-4 right-4 hidden z-50">
+    <div class="bg-gray-800 text-white text-sm px-4 py-2 rounded-lg shadow-lg" id="toast-msg"></div>
+  </div>
+
   <script src="/js/cabinet.js"></script>
   <script>
     function toggleMenu(){document.getElementById("sidebar").classList.toggle("-translate-x-full");document.getElementById("menu-overlay").classList.toggle("hidden")}
-    document.addEventListener("DOMContentLoaded",()=>{if(!checkAuth())return});
+
+    let toastTimer;
+    function showToast(msg, type="info") {
+      const t = document.getElementById("toast");
+      const m = document.getElementById("toast-msg");
+      m.textContent = msg;
+      t.querySelector("div").className = "text-sm px-4 py-2 rounded-lg shadow-lg " +
+        (type==="success"?"bg-green-600 text-white":type==="error"?"bg-red-600 text-white":"bg-gray-800 text-white");
+      t.classList.remove("hidden");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(()=>t.classList.add("hidden"), 3000);
+    }
+
+    async function loadSettings() {
+      try {
+        const d = await apiGet("/api/cabinet/settings");
+
+        document.getElementById("f-name").value = d.name || "";
+        document.getElementById("f-contact").value = d.contact || "";
+        document.getElementById("f-email").value = d.email || "";
+        document.getElementById("f-phone").value = d.phone || "";
+        document.getElementById("f-inn").value = d.inn || "";
+        document.getElementById("f-legal-name").value = d.legal_name || "";
+
+        document.getElementById("profile-loading").classList.add("hidden");
+        document.getElementById("profile-form").classList.remove("hidden");
+        document.getElementById("legal-loading").classList.add("hidden");
+        document.getElementById("legal-form").classList.remove("hidden");
+      } catch(e) {
+        document.getElementById("profile-loading").textContent = "Ошибка загрузки";
+        document.getElementById("legal-loading").textContent = "Ошибка загрузки";
+      }
+    }
+
+    async function saveProfile(e) {
+      e.preventDefault();
+      const btn = document.getElementById("btn-save-profile");
+      btn.disabled = true; btn.textContent = "Сохранение...";
+      try {
+        await apiPut("/api/cabinet/settings", {
+          name: document.getElementById("f-name").value.trim(),
+          contact: document.getElementById("f-contact").value.trim(),
+          email: document.getElementById("f-email").value.trim(),
+          phone: document.getElementById("f-phone").value.trim(),
+        });
+        showToast("Профиль сохранён", "success");
+      } catch(e) {
+        showToast(e.message || "Ошибка сохранения", "error");
+      } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
+    }
+
+    async function saveLegal(e) {
+      e.preventDefault();
+      const btn = document.getElementById("btn-save-legal");
+      btn.disabled = true; btn.textContent = "Сохранение...";
+      try {
+        await apiPut("/api/cabinet/settings/legal", {
+          inn: document.getElementById("f-inn").value.trim(),
+          legal_name: document.getElementById("f-legal-name").value.trim(),
+        });
+        showToast("Реквизиты сохранены", "success");
+      } catch(e) {
+        showToast(e.message || "Ошибка сохранения", "error");
+      } finally { btn.disabled = false; btn.textContent = "Сохранить"; }
+    }
+
+    async function changePassword(e) {
+      e.preventDefault();
+      const oldPw = document.getElementById("f-old-pw").value;
+      const newPw = document.getElementById("f-new-pw").value;
+      const confirmPw = document.getElementById("f-confirm-pw").value;
+      if (newPw !== confirmPw) { showToast("Пароли не совпадают", "error"); return; }
+      if (newPw.length < 8) { showToast("Минимум 8 символов", "error"); return; }
+      const btn = document.getElementById("btn-change-pw");
+      btn.disabled = true; btn.textContent = "Меняю...";
+      try {
+        await apiPut("/api/cabinet/settings/password", {old_password: oldPw, new_password: newPw});
+        showToast("Пароль изменён. Войдите заново.", "success");
+        setTimeout(() => logout(), 2000);
+      } catch(e) {
+        showToast(e.message || "Ошибка смены пароля", "error");
+        btn.disabled = false; btn.textContent = "Сменить пароль";
+      }
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      if (!checkAuth()) return;
+      await loadSettings();
+    });
   </script>
 </body>
 </html>

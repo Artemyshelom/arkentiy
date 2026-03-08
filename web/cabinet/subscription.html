@@ -33,15 +33,321 @@
   <main class="pt-14 lg:pt-0 lg:ml-64 p-4 lg:p-8">
     <div class="max-w-4xl">
       <h1 class="text-xl lg:text-2xl font-bold mb-4 lg:mb-6">Подписка</h1>
+
+      <!-- Текущий план -->
+      <div class="card mb-4">
+        <div id="sub-loading" class="text-gray-400 text-sm py-4 text-center">Загрузка...</div>
+        <div id="sub-content" class="hidden">
+          <div class="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 mb-4">
+            <div>
+              <div class="flex items-center gap-2 mb-1">
+                <span id="sub-plan" class="text-lg font-bold capitalize"></span>
+                <span id="sub-status-badge" class="text-xs px-2 py-0.5 rounded-full font-medium"></span>
+              </div>
+              <div id="sub-cancel-notice" class="text-sm text-orange-600 hidden"></div>
+            </div>
+            <div class="text-right flex-shrink-0">
+              <div id="sub-amount" class="text-2xl font-bold text-brand-600"></div>
+              <div id="sub-period" class="text-xs text-gray-400"></div>
+            </div>
+          </div>
+
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 text-sm mb-4">
+            <div class="bg-gray-50 rounded-lg p-3">
+              <div class="text-gray-400 text-xs mb-1">Следующий платёж</div>
+              <div id="sub-next-date" class="font-medium"></div>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-3">
+              <div class="text-gray-400 text-xs mb-1">Точек</div>
+              <div id="sub-branches" class="font-medium"></div>
+            </div>
+            <div class="bg-gray-50 rounded-lg p-3">
+              <div class="text-gray-400 text-xs mb-1">Городов</div>
+              <div id="sub-cities" class="font-medium"></div>
+            </div>
+          </div>
+
+          <div id="sub-addons-wrap" class="mb-4 hidden">
+            <div class="text-xs text-gray-400 mb-1">Подключённые модули</div>
+            <div id="sub-addons" class="flex flex-wrap gap-2"></div>
+          </div>
+
+          <!-- Кнопки -->
+          <div class="flex flex-wrap gap-2">
+            <button id="btn-change-plan" onclick="openChangePlan()" class="px-4 py-2 text-sm bg-brand-600 text-white rounded-lg hover:bg-brand-700">Сменить план</button>
+            <button id="btn-change-card" onclick="changeCard()" class="px-4 py-2 text-sm border border-gray-300 rounded-lg text-gray-700 hover:bg-gray-50">Сменить карту</button>
+            <button id="btn-cancel" onclick="openCancel()" class="px-4 py-2 text-sm text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50 disabled:cursor-not-allowed">Отменить подписку</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- История изменений -->
       <div class="card">
-        <p class="text-gray-500">Информация о подписке загружается...</p>
+        <h2 class="font-semibold mb-3">История изменений</h2>
+        <div id="history-list" class="text-gray-400 text-sm py-2 text-center">Загрузка...</div>
       </div>
     </div>
   </main>
+
+  <!-- Модалка: Отмена подписки -->
+  <div id="modal-cancel" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-md">
+      <div class="p-6">
+        <h2 class="text-lg font-bold mb-1">Отменить подписку?</h2>
+        <p class="text-sm text-gray-500 mb-4">Сервис будет доступен до конца оплаченного периода.</p>
+        <div class="space-y-2 mb-4">
+          <label class="flex items-center gap-2 text-sm"><input type="radio" name="cancel-reason" value="too_expensive" class="accent-brand-600"> Слишком дорого</label>
+          <label class="flex items-center gap-2 text-sm"><input type="radio" name="cancel-reason" value="not_using" class="accent-brand-600"> Не использую</label>
+          <label class="flex items-center gap-2 text-sm"><input type="radio" name="cancel-reason" value="switching" class="accent-brand-600"> Перехожу на другой сервис</label>
+          <label class="flex items-center gap-2 text-sm"><input type="radio" name="cancel-reason" value="other" class="accent-brand-600"> Другое</label>
+        </div>
+        <textarea id="cancel-feedback" placeholder="Комментарий (необязательно)" rows="2"
+          class="w-full border border-gray-200 rounded-lg p-2.5 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-brand-500 mb-4"></textarea>
+        <div class="flex gap-2">
+          <button onclick="closeModal('modal-cancel')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Оставить</button>
+          <button id="btn-cancel-confirm" onclick="confirmCancel()" class="flex-1 px-4 py-2 bg-red-600 text-white rounded-lg text-sm font-medium hover:bg-red-700">Отменить подписку</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Модалка: Сменить план -->
+  <div id="modal-change-plan" class="fixed inset-0 bg-black/50 z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-xl w-full max-w-lg">
+      <div class="p-6">
+        <h2 class="text-lg font-bold mb-4">Сменить план</h2>
+        <div class="space-y-3 mb-6">
+          <label id="plan-basic" class="flex items-center gap-3 border rounded-xl p-3 cursor-pointer hover:border-brand-500 transition-colors">
+            <input type="radio" name="new-plan" value="basic" class="accent-brand-600">
+            <div class="flex-1"><div class="font-medium">Basic</div><div class="text-xs text-gray-400">Базовые отчёты и алерты</div></div>
+            <div class="text-right"><div class="font-bold">1 490 ₽</div><div class="text-xs text-gray-400">/мес</div></div>
+          </label>
+          <label id="plan-pro" class="flex items-center gap-3 border rounded-xl p-3 cursor-pointer hover:border-brand-500 transition-colors">
+            <input type="radio" name="new-plan" value="pro" class="accent-brand-600">
+            <div class="flex-1"><div class="font-medium">Pro</div><div class="text-xs text-gray-400">Full: сверка, аудит, конкуренты</div></div>
+            <div class="text-right"><div class="font-bold">2 990 ₽</div><div class="text-xs text-gray-400">/мес</div></div>
+          </label>
+          <label id="plan-enterprise" class="flex items-center gap-3 border rounded-xl p-3 cursor-pointer hover:border-brand-500 transition-colors">
+            <input type="radio" name="new-plan" value="enterprise" class="accent-brand-600">
+            <div class="flex-1"><div class="font-medium">Enterprise</div><div class="text-xs text-gray-400">Несколько городов, API доступ</div></div>
+            <div class="text-right"><div class="font-bold">5 990 ₽</div><div class="text-xs text-gray-400">/мес</div></div>
+          </label>
+        </div>
+        <div id="plan-notice" class="text-sm text-gray-500 mb-4 hidden"></div>
+        <div class="flex gap-2">
+          <button onclick="closeModal('modal-change-plan')" class="flex-1 px-4 py-2 border border-gray-300 rounded-lg text-sm text-gray-700 hover:bg-gray-50">Отмена</button>
+          <button id="btn-plan-confirm" onclick="confirmChangePlan()" class="flex-1 px-4 py-2 bg-brand-600 text-white rounded-lg text-sm font-medium hover:bg-brand-700">Применить</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="fixed bottom-4 right-4 hidden z-50">
+    <div class="bg-gray-800 text-white text-sm px-4 py-2 rounded-lg shadow-lg" id="toast-msg"></div>
+  </div>
+
   <script src="/js/cabinet.js"></script>
   <script>
     function toggleMenu(){document.getElementById("sidebar").classList.toggle("-translate-x-full");document.getElementById("menu-overlay").classList.toggle("hidden")}
-    document.addEventListener("DOMContentLoaded",()=>{if(!checkAuth())return});
+
+    let subData = null;
+    let toastTimer;
+
+    function showToast(msg, type="info") {
+      const t = document.getElementById("toast");
+      const m = document.getElementById("toast-msg");
+      m.textContent = msg;
+      t.querySelector("div").className = "text-sm px-4 py-2 rounded-lg shadow-lg " +
+        (type==="success"?"bg-green-600 text-white":type==="error"?"bg-red-600 text-white":"bg-gray-800 text-white");
+      t.classList.remove("hidden");
+      clearTimeout(toastTimer);
+      toastTimer = setTimeout(()=>t.classList.add("hidden"), 3500);
+    }
+
+    function closeModal(id) { document.getElementById(id).classList.add("hidden"); }
+
+    const STATUS_MAP = {
+      active: {label:"Активна",cls:"bg-green-100 text-green-700"},
+      trial: {label:"Пробный",cls:"bg-blue-100 text-blue-700"},
+      grace_period: {label:"Льготный период",cls:"bg-yellow-100 text-yellow-700"},
+      suspended: {label:"Приостановлена",cls:"bg-orange-100 text-orange-700"},
+      canceled: {label:"Отменена",cls:"bg-gray-100 text-gray-500"},
+    };
+
+    const ADDONS_MAP = {finance:"💰 Финансы",competitors:"🏪 Конкуренты"};
+    const PERIOD_MAP = {monthly:"в месяц",annual:"в год"};
+
+    function fmtDate(iso) {
+      if (!iso) return "—";
+      return new Date(iso).toLocaleDateString("ru-RU",{day:"numeric",month:"long",year:"numeric"});
+    }
+
+    function renderSub() {
+      const d = subData;
+      document.getElementById("sub-loading").classList.add("hidden");
+      document.getElementById("sub-content").classList.remove("hidden");
+
+      const planNames = {basic:"Basic",pro:"Pro",enterprise:"Enterprise"};
+      document.getElementById("sub-plan").textContent = planNames[d.plan] || d.plan || "—";
+
+      const st = STATUS_MAP[d.status] || {label:d.status,cls:"bg-gray-100 text-gray-500"};
+      const badge = document.getElementById("sub-status-badge");
+      badge.textContent = st.label;
+      badge.className = "text-xs px-2 py-0.5 rounded-full font-medium " + st.cls;
+
+      if (d.cancel_scheduled && d.cancel_at) {
+        const notice = document.getElementById("sub-cancel-notice");
+        notice.textContent = "⚠️ Подписка будет отменена " + fmtDate(d.cancel_at);
+        notice.classList.remove("hidden");
+      }
+
+      const p = d.pricing;
+      document.getElementById("sub-amount").textContent = p.next_payment ? Number(p.next_payment).toLocaleString("ru-RU") + " ₽" : "—";
+      document.getElementById("sub-period").textContent = PERIOD_MAP[d.period] || "";
+      document.getElementById("sub-next-date").textContent = p.next_payment_date ? fmtDate(p.next_payment_date) : "—";
+      document.getElementById("sub-branches").textContent = d.branches_count || "—";
+      document.getElementById("sub-cities").textContent = d.cities_count || "—";
+
+      if (d.addons && d.addons.length) {
+        const wrap = document.getElementById("sub-addons-wrap");
+        wrap.classList.remove("hidden");
+        document.getElementById("sub-addons").innerHTML = d.addons
+          .map(a=>`<span class="text-xs bg-brand-50 text-brand-700 px-2 py-0.5 rounded-full">${ADDONS_MAP[a]||a}</span>`)
+          .join("");
+      }
+
+      // Кнопки
+      if (d.cancel_scheduled) {
+        document.getElementById("btn-cancel").disabled = true;
+        document.getElementById("btn-cancel").title = "Отмена уже запланирована";
+      }
+      if (d.status === "canceled") {
+        document.getElementById("btn-cancel").disabled = true;
+        document.getElementById("btn-change-plan").disabled = true;
+      }
+    }
+
+    async function loadSubscription() {
+      try {
+        subData = await apiGet("/api/cabinet/subscription");
+        renderSub();
+      } catch(e) { showToast("Ошибка загрузки подписки", "error"); }
+    }
+
+    async function loadHistory() {
+      try {
+        const data = await apiGet("/api/cabinet/subscription/history");
+        const el = document.getElementById("history-list");
+        if (!data.changes || !data.changes.length) {
+          el.innerHTML = '<p class="text-gray-400 text-sm py-2 text-center">Изменений нет</p>';
+          return;
+        }
+        el.innerHTML = data.changes.map(c=>`
+          <div class="flex items-center justify-between py-2.5 border-b last:border-0 text-sm">
+            <div>
+              <span class="font-medium">${escapeHtml(c.label)}</span>
+              ${c.from_plan&&c.to_plan?`<span class="text-gray-400 ml-1">${escapeHtml(c.from_plan)} → ${escapeHtml(c.to_plan)}</span>`:""}
+            </div>
+            <div class="text-gray-400 text-xs flex-shrink-0 ml-4">${fmtDate(c.date)}</div>
+          </div>`).join("");
+      } catch(e) {
+        document.getElementById("history-list").innerHTML = '<p class="text-gray-400 text-sm"></p>';
+      }
+    }
+
+    function escapeHtml(s) {
+      return String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    // Отмена подписки
+    function openCancel() { document.getElementById("modal-cancel").classList.remove("hidden"); }
+
+    async function confirmCancel() {
+      const reason = document.querySelector("input[name='cancel-reason']:checked")?.value || "";
+      const feedback = document.getElementById("cancel-feedback").value.trim();
+      const btn = document.getElementById("btn-cancel-confirm");
+      btn.disabled = true; btn.textContent = "Отмена...";
+      try {
+        const res = await apiPost("/api/cabinet/subscription/cancel", {reason, feedback});
+        closeModal("modal-cancel");
+        showToast(res.message || "Подписка будет отменена", "success");
+        await loadSubscription();
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Отменить подписку"; }
+    }
+
+    // Смена плана
+    function openChangePlan() {
+      if (subData?.plan) {
+        const radio = document.querySelector(`input[name='new-plan'][value='${subData.plan}']`);
+        if (radio) radio.checked = true;
+      }
+      document.getElementById("plan-notice").classList.add("hidden");
+      document.getElementById("modal-change-plan").classList.remove("hidden");
+    }
+
+    document.querySelectorAll("input[name='new-plan']").forEach(r => {
+      r.addEventListener("change", () => {
+        const prices = {basic:1490,pro:2990,enterprise:5990};
+        const selected = r.value;
+        const notice = document.getElementById("plan-notice");
+        if (!subData) return;
+        const currentP = prices[subData.plan] || 0;
+        const newP = prices[selected] || 0;
+        if (newP > currentP) {
+          notice.textContent = "Апгрейд — потребуется доплата за оставшиеся дни периода.";
+          notice.classList.remove("hidden");
+        } else if (newP < currentP) {
+          notice.textContent = "Даунгрейд вступит в силу со следующего периода.";
+          notice.classList.remove("hidden");
+        } else { notice.classList.add("hidden"); }
+      });
+    });
+
+    async function confirmChangePlan() {
+      const selected = document.querySelector("input[name='new-plan']:checked")?.value;
+      if (!selected) { showToast("Выберите план", "error"); return; }
+      const btn = document.getElementById("btn-plan-confirm");
+      btn.disabled = true; btn.textContent = "Применяю...";
+      try {
+        const res = await apiPost("/api/cabinet/subscription/change-plan", {new_plan: selected});
+        closeModal("modal-change-plan");
+        if (res.payment_url) {
+          window.location.href = res.payment_url;
+        } else {
+          showToast(res.message || "План изменён", "success");
+          await loadSubscription();
+        }
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Применить"; }
+    }
+
+    // Смена карты
+    async function changeCard() {
+      const btn = document.getElementById("btn-change-card");
+      btn.disabled = true; btn.textContent = "Минуту...";
+      try {
+        const res = await apiPost("/api/cabinet/subscription/change-payment-method", {});
+        if (res.confirmation_url) window.location.href = res.confirmation_url;
+        else showToast("Ошибка платёжной системы", "error");
+      } catch(e) {
+        showToast(e.message || "Ошибка", "error");
+      } finally { btn.disabled = false; btn.textContent = "Сменить карту"; }
+    }
+
+    // Успешный апгрейд/привязка карты
+    const params = new URLSearchParams(location.search);
+    if (params.get("upgraded") === "1" || params.get("card_linked") === "1") {
+      history.replaceState(null,"",location.pathname);
+    }
+
+    document.addEventListener("DOMContentLoaded", async () => {
+      if (!checkAuth()) return;
+      await Promise.all([loadSubscription(), loadHistory()]);
+    });
   </script>
 </body>
 </html>

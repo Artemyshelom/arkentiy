@@ -234,7 +234,8 @@ async def get_subscription(tenant_id: int = Depends(get_tenant_id)):
     async with pool.acquire() as conn:
         sub = await conn.fetchrow(
             """SELECT status, plan, modules_json, branches_count, amount_monthly,
-                      period, next_billing_at, started_at
+                      period, next_billing_at, started_at,
+                      cancel_scheduled, cancel_at
                FROM subscriptions WHERE tenant_id = $1""",
             tenant_id,
         )
@@ -305,6 +306,8 @@ async def get_subscription(tenant_id: int = Depends(get_tenant_id)):
         },
         "trial_ends_at": trial_ends.isoformat() if trial_ends else None,
         "created_at": sub["started_at"].isoformat() if sub["started_at"] else None,
+        "cancel_scheduled": bool(sub["cancel_scheduled"]),
+        "cancel_at": sub["cancel_at"].isoformat() if sub["cancel_at"] else None,
     }
 
 

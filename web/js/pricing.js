@@ -212,36 +212,35 @@ function validatePromo() {
     return;
   }
 
-  // MVP: client-side promo codes; will be replaced with POST /api/promo/validate
-  const PROMO_DB = {
-    "EARLY": {
-      code: "EARLY",
-      bonuses: [
-        { type: "free_connection", value: 10000 },
-        { type: "fixed_discount", value: 2000 },
-      ],
-      description: "Бесплатное подключение + скидка 2 000 ₽/мес на 3 мес",
-    },
-    "FRIEND": {
-      code: "FRIEND",
-      bonuses: [
-        { type: "free_connection", value: 10000 },
-      ],
-      description: "Бесплатное подключение",
-    },
-  };
+  result.innerHTML = '<span class="text-gray-400">Проверяю...</span>';
+  result.classList.remove("hidden");
 
-  const promo = PROMO_DB[code];
-  if (promo) {
-    state.promo = promo;
-    result.innerHTML = `<span class="text-green-600">&#10003; ${promo.description}</span>`;
-    result.classList.remove("hidden");
-  } else {
-    state.promo = null;
-    result.innerHTML = `<span class="text-red-500">Промокод не найден</span>`;
-    result.classList.remove("hidden");
-  }
-  calculate();
+  fetch("/api/promo/validate", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({code}),
+  })
+    .then(r => r.json())
+    .then(data => {
+      if (data.valid) {
+        state.promo = {code: data.code, bonuses: data.bonuses || []};
+        const desc = (data.bonuses || []).map(b => {
+          if (b.type === "free_connection") return "бесплатное подключение";
+          if (b.type === "fixed_discount") return `скидка ${Number(b.value).toLocaleString("ru-RU")} ₽/мес`;
+          return b.type;
+        }).join(" + ");
+        result.innerHTML = `<span class="text-green-600">&#10003; ${escapeHtml(desc || data.description || code)}</span>`;
+      } else {
+        state.promo = null;
+        result.innerHTML = `<span class="text-red-500">${escapeHtml(data.message || "Промокод не найден")}</span>`;
+      }
+      calculate();
+    })
+    .catch(() => {
+      state.promo = null;
+      result.innerHTML = '<span class="text-red-500">Ошибка проверки промокода</span>';
+      calculate();
+    });
 }
 
 function buildRegisterUrl(trial) {
@@ -266,3 +265,7 @@ function updateCTALinks() {
 }
 
 document.addEventListener("DOMContentLoaded", () => { calculate(); updateCTALinks(); });
+
+function escapeHtml(s) {
+  return String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}

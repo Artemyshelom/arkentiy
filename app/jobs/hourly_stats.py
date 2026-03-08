@@ -23,6 +23,10 @@ _FINAL_STATUSES = ("Доставлена", "Закрыта")
 async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime) -> None:
     """Агрегирует данные за один час для одной точки и сохраняет в hourly_stats."""
     hour_end = hour_start + timedelta(hours=1)
+    # TEXT::timestamp в SQL даёт naive timestamp, поэтому параметры должны быть naive.
+    # Timezone сохраняется только при записи в hourly_stats.hour (TIMESTAMPTZ).
+    hs = hour_start.replace(tzinfo=None)
+    he = hour_end.replace(tzinfo=None)
     pool = get_pool()
 
     async with pool.acquire() as conn:
@@ -85,7 +89,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
               AND status = ANY($5)
             """,
             tenant_id, branch_name,
-            hour_start, hour_end,
+            hs, he,
             list(_FINAL_STATUSES),
         )
 
@@ -103,7 +107,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
                       OR clock_out::timestamp > $3)
             """,
             tenant_id, branch_name,
-            hour_start, hour_end,
+            hs, he,
         )
 
         cooks = sum(1 for r in shift_rows if r["role_class"] == "cook")
@@ -125,7 +129,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
                  )
                  AND status NOT IN ('Отменена')
             """,
-            tenant_id, branch_name, hour_start,
+            tenant_id, branch_name, hs,
         )
 
     orders_count = int(order_row["orders_count"] or 0)

@@ -49,7 +49,7 @@ async def send_email(to: str, subject: str, html: str) -> bool:
 async def send_verification_email(email: str, token: str) -> bool:
     """Письмо подтверждения email при регистрации."""
     settings = get_settings()
-    url = f"{settings.base_url}/verify?token={token}"
+    url = f"{settings.base_url}/verify.html?token={token}"
     html = f"""<!DOCTYPE html>
 <html lang="ru">
 <body style="font-family:Arial,sans-serif;max-width:520px;margin:0 auto;padding:24px;color:#1a1a1a">

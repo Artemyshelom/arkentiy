@@ -68,6 +68,9 @@ class Settings(BaseSettings):
     webhook_secret: str = ""
     jwt_secret: str = ""
     admin_api_key: str = ""  # ключ для /run, /jobs, /backfill
+
+    # Stats API (внешние AI-агенты: Борис и др.)
+    stats_api_keys_file: str = "/app/secrets/api_keys.json"
     debug: bool = False
 
     # Email (Resend)

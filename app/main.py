@@ -34,6 +34,7 @@ from app.routers.cabinet import router as cabinet_router
 from app.routers.onboarding import router as onboarding_router
 from app.routers.payments import router as payments_router
 from app.routers.auth import router as auth_router
+from app.routers.stats import router as stats_router
 
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
@@ -381,6 +382,7 @@ app.include_router(auth_router)
 app.include_router(cabinet_router)
 app.include_router(onboarding_router)
 app.include_router(payments_router)
+app.include_router(stats_router)
 
 
 # --- Ручные триггеры (для отладки и тестирования) ---

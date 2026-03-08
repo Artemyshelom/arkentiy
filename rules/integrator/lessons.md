@@ -1022,3 +1022,58 @@ git status | grep "\.env"
 **Урок:** Один утёкший токен = пересоздание всех ключей + инцидент. Проверка занимает 10 секунд, восстановление — часы.
 
 ---
+
+## 🔴 [ИНФРАСТРУКТУРА] OpenClaw агент перестал отвечать после создания sub-agent
+
+**Симптом (8 марта 2026):** После создания второго агента (`ops-consultant`) перестал работать основной агент `@murphsmartbot` (`accounts.default`). Сообщения в OpenClaw не получают ответа. Сервис `morf.service` запущен, порт 3000 отвечает.
+
+**Диагностика:**
+```bash
+ssh morf 'journalctl -u morf.service -n 50 --no-pager'
+# или
+ssh morf 'PATH=/root/.nvm/versions/node/v22.22.0/bin:$PATH openclaw doctor'
+```
+Доктор покажет предупреждения о `channels.telegram` или сессиях. В логах при старте видны строки вида:
+```
+[telegram] [ops-consultant] starting provider (@borissmartbot)  ✅
+# НО:
+[telegram] [default] starting provider (@murphsmartbot)       ❌  — строки нет!
+```
+
+**Корневая причина:** При создании нового агента OpenClaw мигрировал структуру `channels.telegram` и сгенерировал новый `sessions.json` с legacy-ключами. Аккаунт `accounts.default` потерял рабочую сессию и не стартовал.
+
+**Исправление:**
+```bash
+ssh morf
+PATH=/root/.nvm/versions/node/v22.22.0/bin:$PATH openclaw doctor --fix
+# Доктор пересоздаёт sessions.json и выводит: "Fixed N issues"
+
+# Перезапустить сервис:
+systemctl restart morf.service
+
+# Проверить что оба провайдера стартовали:
+journalctl -u morf.service -n 30 --no-pager | grep 'starting provider'
+# Ожидаемый результат:
+# [telegram] [ops-consultant] starting provider (@borissmartbot)
+# [telegram] [default] starting provider (@murphsmartbot)
+```
+
+**Если `openclaw doctor --fix` не помогло:**
+```bash
+# Сбросить сессии вручную
+rm /root/.openclaw/sessions.json
+PATH=/root/.nvm/versions/node/v22.22.0/bin:$PATH openclaw doctor
+systemctl restart morf.service
+# При первом подключении OpenClaw попросит повторную авторизацию Telegram
+```
+
+**SSH-доступ к серверу:**
+- Хост: `72.56.107.85`, алиас `morf`, пользователь `root`
+- Ключ: `/Users/artemii/.ssh/id_ed25519` (с паролем) или `cursor_arkentiy_vps` (без пароля)
+- Конфиг OpenClaw: `/root/.openclaw/`
+- Сервис: `morf.service` (systemd)
+- Node: `/root/.nvm/versions/node/v22.22.0/bin/`
+
+**Урок:** После добавления/удаления агентов в OpenClaw **всегда** запускать `openclaw doctor --fix` и проверять что все провайдеры стартуют. Один агент может сломать другой через shared `sessions.json`.
+
+---

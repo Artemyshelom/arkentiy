@@ -947,3 +947,327 @@ async def delete_account(data: AccountDeleteRequest, tenant_id: int = Depends(ge
         pass
 
     return {"status": "ok", "message": "Аккаунт деактивирован"}
+
+
+# =====================================================================
+# 20. POST /api/cabinet/subscription/cancel
+# =====================================================================
+
+class SubscriptionCancelRequest(BaseModel):
+    reason: str = ""
+    feedback: str = ""
+
+
+@router.post("/subscription/cancel")
+async def cancel_subscription(req: SubscriptionCancelRequest, tenant_id: int = Depends(get_tenant_id)):
+    """Отмена подписки — активна до конца оплаченного периода."""
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        sub = await conn.fetchrow(
+            """SELECT status, plan, next_billing_at, cancel_scheduled
+               FROM subscriptions WHERE tenant_id = $1""",
+            tenant_id,
+        )
+        if not sub:
+            raise HTTPException(404, "Подписка не найдена")
+        if sub["status"] not in ("active", "trial", "grace_period"):
+            raise HTTPException(400, "Подписка не активна")
+        if sub["cancel_scheduled"]:
+            raise HTTPException(400, "Отмена уже запланирована")
+
+        active_until = sub["next_billing_at"]
+
+        await conn.execute(
+            """UPDATE subscriptions SET
+               cancel_scheduled = true,
+               cancel_at = $1,
+               cancel_reason = $2,
+               cancel_feedback = $3,
+               updated_at = now()
+               WHERE tenant_id = $4""",
+            active_until, req.reason, req.feedback, tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO subscription_changes (tenant_id, from_status, to_status, action)
+               VALUES ($1, $2, 'canceled', 'cancel')""",
+            tenant_id, sub["status"],
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'subscription', $2, 'warning')""",
+            tenant_id,
+            f"Подписка будет отменена {active_until.strftime('%d.%m.%Y') if active_until else 'в конце периода'}",
+        )
+
+        tenant = await conn.fetchrow("SELECT name, email FROM tenants WHERE id = $1", tenant_id)
+
+    try:
+        from app.clients.telegram import monitor
+        reasons_map = {
+            "too_expensive": "Слишком дорого",
+            "not_using": "Не пользуюсь",
+            "switching": "Перехожу на другой сервис",
+            "other": "Другое",
+        }
+        reason_text = reasons_map.get(req.reason, req.reason or "не указана")
+        await monitor(
+            f"🔴 <b>Клиент отменяет подписку</b>\n"
+            f"Компания: {tenant['name']}\n"
+            f"Email: {tenant['email']}\n"
+            f"Причина: {reason_text}\n"
+            f"Активна до: {active_until.strftime('%d.%m.%Y') if active_until else 'неизвестно'}"
+            + (f"\nКомментарий: {req.feedback}" if req.feedback else "")
+        )
+    except Exception:
+        pass
+
+    return {
+        "status": "cancellation_scheduled",
+        "active_until": active_until.isoformat() if active_until else None,
+        "message": f"Подписка будет отменена {active_until.strftime('%d %B %Y') if active_until else 'в конце периода'}",
+    }
+
+
+# =====================================================================
+# 21. POST /api/cabinet/subscription/change-plan
+# =====================================================================
+
+class ChangePlanRequest(BaseModel):
+    new_plan: str
+
+
+PLAN_PRICES = {
+    "basic": 1490,
+    "pro": 2990,
+    "enterprise": 5990,
+}
+
+
+@router.post("/subscription/change-plan")
+async def change_plan(req: ChangePlanRequest, tenant_id: int = Depends(get_tenant_id)):
+    """Смена плана: upgrade (с проратой) или downgrade (с следующего периода)."""
+    if req.new_plan not in PLAN_PRICES:
+        raise HTTPException(400, f"Неизвестный план. Доступны: {', '.join(PLAN_PRICES)}")
+
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        sub = await conn.fetchrow(
+            """SELECT status, plan, amount_monthly, next_billing_at, period
+               FROM subscriptions WHERE tenant_id = $1""",
+            tenant_id,
+        )
+        if not sub:
+            raise HTTPException(404, "Подписка не найдена")
+        if sub["status"] not in ("active", "trial"):
+            raise HTTPException(400, "Смена плана доступна только для активной подписки")
+        if sub["plan"] == req.new_plan:
+            raise HTTPException(400, "Вы уже на этом плане")
+
+        current_price = PLAN_PRICES.get(sub["plan"], sub["amount_monthly"] or 0)
+        new_price = PLAN_PRICES[req.new_plan]
+
+        # Upgrade
+        if new_price > current_price:
+            days_left = 0
+            if sub["next_billing_at"]:
+                from datetime import timezone
+                now = datetime.utcnow().replace(tzinfo=timezone.utc)
+                delta = sub["next_billing_at"] - now
+                days_left = max(0, delta.days)
+
+            prorata = int((new_price - current_price) * days_left / 30)
+
+            await conn.execute(
+                """INSERT INTO subscription_changes (tenant_id, from_plan, to_plan, action, prorata_amount)
+                   VALUES ($1, $2, $3, 'upgrade', $4)""",
+                tenant_id, sub["plan"], req.new_plan, prorata,
+            )
+
+            if prorata > 0:
+                # Создаём платёж на доплату
+                import uuid as _uuid
+                payment_id = str(_uuid.uuid4())
+                description = f"Апгрейд плана {sub['plan']} → {req.new_plan}"
+                await conn.execute(
+                    """INSERT INTO payments (id, tenant_id, amount, status, payment_method, description)
+                       VALUES ($1, $2, $3, 'pending', 'card', $4)""",
+                    payment_id, tenant_id, prorata, description,
+                )
+
+                settings = get_settings()
+                try:
+                    from app.clients.yukassa import create_payment as yk_create
+                    yk = await yk_create(
+                        amount=prorata,
+                        description=description,
+                        return_url=f"{settings.base_url}/cabinet/subscription?upgraded=1",
+                        metadata={"payment_id": payment_id, "tenant_id": str(tenant_id), "new_plan": req.new_plan, "type": "upgrade"},
+                    )
+                    await conn.execute(
+                        "UPDATE payments SET yukassa_id = $1, updated_at = now() WHERE id = $2",
+                        yk["id"], payment_id,
+                    )
+                    payment_url = yk.get("confirmation", {}).get("confirmation_url")
+                except Exception as e:
+                    logger.error(f"ЮKassa upgrade error: {e}")
+                    raise HTTPException(502, "Ошибка платёжной системы")
+
+                return {
+                    "action": "upgrade",
+                    "prorata_amount": prorata,
+                    "payment_url": payment_url,
+                    "message": f"Доплата за апгрейд: {prorata:,} ₽",
+                }
+            else:
+                # Мгновенный апгрейд без доплаты
+                await conn.execute(
+                    """UPDATE subscriptions SET plan = $1, amount_monthly = $2, updated_at = now()
+                       WHERE tenant_id = $3""",
+                    req.new_plan, new_price, tenant_id,
+                )
+                return {"action": "upgrade", "prorata_amount": 0, "message": "План изменён"}
+
+        # Downgrade — со следующего периода
+        else:
+            await conn.execute(
+                """UPDATE subscriptions SET pending_plan = $1, pending_plan_from = next_billing_at,
+                   updated_at = now() WHERE tenant_id = $2""",
+                req.new_plan, tenant_id,
+            )
+            await conn.execute(
+                """INSERT INTO subscription_changes (tenant_id, from_plan, to_plan, action)
+                   VALUES ($1, $2, $3, 'downgrade')""",
+                tenant_id, sub["plan"], req.new_plan,
+            )
+            await conn.execute(
+                """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+                   VALUES ($1, 'subscription', $2, 'info')""",
+                tenant_id,
+                f"Смена плана {sub['plan']} → {req.new_plan} запланирована",
+            )
+
+            return {
+                "action": "downgrade",
+                "effective_from": sub["next_billing_at"].isoformat() if sub["next_billing_at"] else None,
+                "message": f"План изменится на {req.new_plan} с следующего периода",
+            }
+
+
+# =====================================================================
+# 22. POST /api/cabinet/subscription/change-payment-method
+# =====================================================================
+
+@router.post("/subscription/change-payment-method")
+async def change_payment_method(tenant_id: int = Depends(get_tenant_id)):
+    """Создаёт привязку новой карты через ЮKassa."""
+    settings = get_settings()
+    if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
+        raise HTTPException(503, "Платёжная система временно недоступна")
+
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        tenant = await conn.fetchrow("SELECT name FROM tenants WHERE id = $1", tenant_id)
+        if not tenant:
+            raise HTTPException(404, "Тенант не найден")
+
+    try:
+        from app.clients.yukassa import create_payment as yk_create
+        import uuid as _uuid
+        payment_id = str(_uuid.uuid4())
+
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO payments (id, tenant_id, amount, status, payment_method, description)
+                   VALUES ($1, $2, 1, 'pending', 'card', 'Привязка карты')""",
+                payment_id, tenant_id,
+            )
+
+        yk = await yk_create(
+            amount=1,
+            description="Привязка карты Аркентий",
+            return_url=f"{settings.base_url}/cabinet/subscription?card_linked=1",
+            metadata={"payment_id": payment_id, "tenant_id": str(tenant_id), "type": "card_link"},
+            save_payment_method=True,
+        )
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE payments SET yukassa_id = $1, updated_at = now() WHERE id = $2",
+                yk["id"], payment_id,
+            )
+        confirmation_url = yk.get("confirmation", {}).get("confirmation_url")
+        return {
+            "confirmation_url": confirmation_url,
+            "message": "Перейдите для привязки карты",
+        }
+    except Exception as e:
+        logger.error(f"change-payment-method error: {e}")
+        raise HTTPException(502, "Ошибка платёжной системы")
+
+
+# =====================================================================
+# 23. GET /api/cabinet/subscription/history
+# =====================================================================
+
+@router.get("/subscription/history")
+async def subscription_history(tenant_id: int = Depends(get_tenant_id)):
+    """История изменений подписки."""
+    pool = await _pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        events = await conn.fetch(
+            """SELECT action, from_plan, to_plan, from_status, to_status,
+                      prorata_amount, created_at
+               FROM subscription_changes WHERE tenant_id = $1
+               ORDER BY created_at DESC LIMIT 50""",
+            tenant_id,
+        )
+        payments = await conn.fetch(
+            """SELECT amount, status, description, created_at, card_last4
+               FROM payments WHERE tenant_id = $1 AND status = 'succeeded'
+               ORDER BY created_at DESC LIMIT 20""",
+            tenant_id,
+        )
+
+    action_labels = {
+        "cancel": "Отмена подписки",
+        "reactivate": "Восстановление подписки",
+        "upgrade": "Апгрейд плана",
+        "downgrade": "Даунгрейд плана",
+        "created": "Создание подписки",
+    }
+
+    return {
+        "changes": [
+            {
+                "date": e["created_at"].isoformat(),
+                "action": e["action"],
+                "label": action_labels.get(e["action"], e["action"]),
+                "from_plan": e["from_plan"],
+                "to_plan": e["to_plan"],
+                "from_status": e["from_status"],
+                "to_status": e["to_status"],
+                "prorata_amount": float(e["prorata_amount"]) if e["prorata_amount"] else None,
+            }
+            for e in events
+        ],
+        "payments": [
+            {
+                "date": p["created_at"].isoformat(),
+                "amount": p["amount"],
+                "description": p["description"],
+                "card_last4": p["card_last4"],
+            }
+            for p in payments
+        ],
+    }

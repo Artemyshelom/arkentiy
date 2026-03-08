@@ -9,6 +9,56 @@
 
 ---
 
+## Сессия 69 — 8 марта 2026 (fix: OpenClaw + feat: Stats API for Борис) ✅
+
+**Фокус:** Починка агента Мёрф + новый HTTP-эндпоинт `/api/stats` для AI-агента Борис.
+
+### 1. Починка OpenClaw (@murphsmartbot)
+
+**Проблема:** После создания sub-agent `ops-consultant` перестал запускаться провайдер `accounts.default`. Бот `@murphsmartbot` не отвечал.
+
+**Диагностика:** `openclaw doctor` показал предупреждение о миграции `channels.telegram` и legacy `sessions.json`.
+
+**Фикс:**
+```bash
+ssh morf
+PATH=/root/.nvm/versions/node/v22.22.0/bin:$PATH openclaw doctor --fix
+systemctl restart morf.service
+```
+**Результат:** Оба провайдера (`@murphsmartbot`, `@borissmartbot`) стартуют корректно.
+Подробный runbook — `rules/integrator/lessons.md` → раздел «OpenClaw агент перестал отвечать».
+
+### 2. Stats API (`/api/stats`) для агента Борис
+
+**Новый файл:** `app/routers/stats.py` — HTTP API для внешних AI-агентов.
+
+**Три endpoint (один роут, параметр `metric=`):**
+
+| metric | Данные | Источник |
+|--------|--------|----------|
+| `realtime` | Текущие заказы, выручка, опоздания | `_states` (iiko Events in-memory) |
+| `daily` | Итоги за день (выручка, чеки, опоздания, t-метрики) | `daily_stats` (PostgreSQL) |
+| `period` | Агрегат за произвольный период | `daily_stats` (PostgreSQL) |
+
+**Авторизация:** Bearer-токен из `secrets/api_keys.json`. Токен Бориса: `brs_2d3161e74b115bf004b914cf930dc4f9`.
+
+**Rate limit:** 60 req/min на токен (in-memory, сбрасывается при рестарте).
+
+**Фильтры:** `?branch=Б1&city=Барнаул&date=YYYY-MM-DD&from=...&to=...`
+
+**Деплой:**
+- `app/routers/stats.py` зарегистрирован в `app/main.py` (`include_router`)
+- `secrets/api_keys.json` создан на сервере
+- Контейнер перезапущен, startup complete ✅
+
+**Использование (пример):**
+```
+GET https://arkenty.ru/api/stats?metric=realtime
+Authorization: Bearer brs_2d3161e74b115bf004b914cf930dc4f9
+```
+
+---
+
 ## Сессия 68 — 8 марта 2026 (feat: customer_stats в отчётах) ✅
 
 **Фокус:** Статистика новых и повторных клиентов в ежедневном и еженедельном отчётах (коммит `3bcd01d`).

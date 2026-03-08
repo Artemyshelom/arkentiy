@@ -33,13 +33,67 @@ async def job_recurring_billing() -> None:
         return
 
     async with _pool.acquire() as conn:
-        # Находим подписки, которые пора продлить
+        # 1. Обрабатываем истекшие cancel_scheduled
+        cancelled = await conn.fetch(
+            """SELECT tenant_id, plan FROM subscriptions
+               WHERE cancel_scheduled = true AND cancel_at <= now()"""
+        )
+        for row in cancelled:
+            await conn.execute(
+                """UPDATE subscriptions SET status = 'canceled',
+                   cancel_scheduled = false, updated_at = now()
+                   WHERE tenant_id = $1""",
+                row["tenant_id"],
+            )
+            await conn.execute(
+                "UPDATE tenants SET status = 'canceled', updated_at = now() WHERE id = $1",
+                row["tenant_id"],
+            )
+            await conn.execute(
+                """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+                   VALUES ($1, 'subscription', 'Подписка отменена', 'error')""",
+                row["tenant_id"],
+            )
+            logger.info(f"[billing] Тенант {row['tenant_id']}: подписка отменена по расписанию")
+            try:
+                from app.jobs.subscription_lifecycle import _notify_tenant
+                await _notify_tenant(
+                    row["tenant_id"],
+                    "🔴 <b>Подписка отменена.</b>\n\nДоступ к данным закрыт.\n"
+                    "Для возобновления — оплатите подписку по ссылке: https://arkenty.ru/cabinet/",
+                )
+            except Exception as e:
+                logger.warning(f"[billing] Не удалось уведомить тенанта {row['tenant_id']}: {e}")
+
+        # 2. Применяем pending_plan (downgrade со следующего периода)
+        pending = await conn.fetch(
+            """SELECT tenant_id, plan, pending_plan FROM subscriptions
+               WHERE pending_plan IS NOT NULL AND pending_plan_from <= now()"""
+        )
+        for row in pending:
+            from app.routers.cabinet import PLAN_PRICES
+            new_price = PLAN_PRICES.get(row["pending_plan"], 0)
+            await conn.execute(
+                """UPDATE subscriptions SET plan = $1, amount_monthly = $2,
+                   pending_plan = NULL, pending_plan_from = NULL, updated_at = now()
+                   WHERE tenant_id = $3""",
+                row["pending_plan"], new_price, row["tenant_id"],
+            )
+            await conn.execute(
+                """INSERT INTO subscription_changes (tenant_id, from_plan, to_plan, action)
+                   VALUES ($1, $2, $3, 'downgrade')""",
+                row["tenant_id"], row["plan"], row["pending_plan"],
+            )
+            logger.info(f"[billing] Тенант {row['tenant_id']}: план изменён {row['plan']} → {row['pending_plan']}")
+
+        # 3. Находим подписки, которые пора продлить
         rows = await conn.fetch(
             """SELECT s.tenant_id, s.amount_monthly, s.yukassa_payment_method_id,
                       s.period, t.name as tenant_name, t.email
                FROM subscriptions s
                JOIN tenants t ON t.id = s.tenant_id
                WHERE s.status = 'active'
+                 AND s.cancel_scheduled IS NOT TRUE
                  AND s.next_billing_at <= now()
                  AND s.yukassa_payment_method_id IS NOT NULL"""
         )

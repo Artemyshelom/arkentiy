@@ -55,24 +55,69 @@ async def _get_pool():
         return None
 
 
-async def _activate_tenant(conn, tenant_id: int) -> None:
-    """Активирует тенанта после успешной оплаты."""
+async def _activate_tenant(conn, tenant_id: int, payment_id: str | None = None) -> None:
+    """Активирует тенанта после успешной оплаты. Обрабатывает все статусы подписки."""
     await conn.execute(
         "UPDATE tenants SET status = 'active', updated_at = now() WHERE id = $1",
         tenant_id,
     )
-    await conn.execute(
-        """UPDATE subscriptions SET status = 'active',
-           next_billing_at = now() + interval '1 month',
-           updated_at = now()
-           WHERE tenant_id = $1 AND status IN ('pending', 'trial')""",
-        tenant_id,
+
+    sub = await conn.fetchrow(
+        "SELECT status, plan FROM subscriptions WHERE tenant_id = $1", tenant_id,
     )
-    await conn.execute(
-        """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
-           VALUES ($1, 'payment', 'Оплата подтверждена, аккаунт активирован', 'success')""",
-        tenant_id,
-    )
+    if not sub:
+        return
+
+    prev_status = sub["status"]
+
+    if prev_status in ("pending", "trial"):
+        await conn.execute(
+            """UPDATE subscriptions SET status = 'active',
+               next_billing_at = now() + interval '1 month',
+               updated_at = now()
+               WHERE tenant_id = $1""",
+            tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'payment', 'Оплата подтверждена, аккаунт активирован', 'success')""",
+            tenant_id,
+        )
+    elif prev_status in ("suspended", "expired", "grace_period"):
+        # Восстановление после приостановки — сбрасываем cancel и продлеваем
+        await conn.execute(
+            """UPDATE subscriptions SET status = 'active',
+               next_billing_at = now() + interval '1 month',
+               cancel_scheduled = false,
+               cancel_at = NULL,
+               cancel_reason = NULL,
+               updated_at = now()
+               WHERE tenant_id = $1""",
+            tenant_id,
+        )
+        await conn.execute(
+            """INSERT INTO subscription_changes (tenant_id, from_status, to_status, action, payment_id)
+               VALUES ($1, $2, 'active', 'reactivate', $3)""",
+            tenant_id, prev_status, payment_id,
+        )
+        await conn.execute(
+            """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
+               VALUES ($1, 'payment', 'Подписка восстановлена после оплаты', 'success')""",
+            tenant_id,
+        )
+        # Уведомление тенанту
+        try:
+            from app.jobs.subscription_lifecycle import _notify_tenant
+            await _notify_tenant(tenant_id, "✅ <b>Подписка восстановлена!</b>\n\nСпасибо за оплату. Все функции снова доступны.")
+        except Exception as e:
+            logger.warning(f"Не удалось отправить уведомление о восстановлении: {e}")
+    else:
+        # active — просто продлеваем
+        await conn.execute(
+            """UPDATE subscriptions SET next_billing_at = next_billing_at + interval '1 month',
+               updated_at = now() WHERE tenant_id = $1""",
+            tenant_id,
+        )
 
 
 def _next_invoice_number(year: int, seq: int) -> str:
@@ -244,7 +289,7 @@ async def payment_webhook(request: Request):
                 )
 
             # Активируем тенанта
-            await _activate_tenant(conn, tenant_id)
+            await _activate_tenant(conn, tenant_id, payment_id)
 
             logger.info(f"Платёж {payment_id} succeeded, тенант {tenant_id} активирован")
 
@@ -403,6 +448,7 @@ async def confirm_invoice(invoice_id: str, request: Request):
             "UPDATE invoices SET status = 'pending_verification', updated_at = now() WHERE id = $1",
             invoice_id,
         )
+
         await conn.execute(
             """INSERT INTO tenant_events (tenant_id, event_type, text, icon)
                VALUES ($1, 'payment', $2, 'info')""",

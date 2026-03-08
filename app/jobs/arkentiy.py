@@ -49,7 +49,8 @@ from app.jobs.iiko_status_report import (
     get_available_branches,
     get_branch_status,
 )
-from app.utils.timezone import branch_tz as _branch_tz
+from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats as _get_olap_stats
+from app.utils.timezone import branch_tz as _branch_tz, now_local as _now_local
 from app.jobs.late_alerts import (
     ACTIVE_DELIVERY_STATUSES,
     LATE_MAX_MIN,
@@ -697,10 +698,21 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
-    # Параллельный сбор данных
+    # OLAP один раз на весь запрос — не N раз на каждую ветку
+    all_branches_for_olap = get_available_branches()
+    tz_first = _branch_tz(filtered[0]) if filtered else None
+    today_for_olap = _now_local(tz_first) if tz_first else None
+    prefetched_olap: dict = {}
+    if today_for_olap:
+        try:
+            prefetched_olap = await _get_olap_stats(today_for_olap, branches=all_branches_for_olap)
+        except Exception as e:
+            logger.error(f"[статус] OLAP prefetch: {e}")
+
+    # Параллельный сбор данных (OLAP уже готов)
     async def _safe_get(branch: dict) -> dict:
         try:
-            return await get_branch_status(branch)
+            return await get_branch_status(branch, prefetched_olap=prefetched_olap)
         except Exception as e:
             logger.error(f"[статус] [{branch['name']}]: {e}")
             return {"name": branch["name"], "revenue": None, "check_count": None,

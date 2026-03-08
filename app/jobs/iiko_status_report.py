@@ -7,6 +7,7 @@ Real-time данные (заказы, смены): app/clients/iiko_bo_events.py
 Точки и dept IDs — из /app/secrets/branches.json.
 """
 
+import asyncio
 import html
 import logging
 from datetime import datetime
@@ -63,10 +64,12 @@ async def get_cash_shift_open(branch: dict, date_iso: str) -> bool | None:
         return None
 
 
-async def get_branch_status(branch: dict) -> dict:
+async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -> dict:
     """
     Собирает метрики точки за сегодня.
     OLAP v2 (2 JSON-запроса) + orders_raw агрегат (скидки, времена).
+    prefetched_olap — словарь {branch_name: {...}} уже полученных OLAP-данных;
+    если передан, HTTP-запрос к iiko BO не делается (оптимизация для пакетных вызовов).
     """
     tz = branch_tz(branch)
     today = now_local(tz)
@@ -81,10 +84,13 @@ async def get_branch_status(branch: dict) -> dict:
     branch_olap = {}
 
     try:
-        # Передаём все ветки тенанта чтобы OLAP запросился к правильному серверу
-        all_branches = get_available_branches()
-        olap = await get_branch_olap_stats(today, branches=all_branches)
-        branch_olap = olap.get(branch["name"], {})
+        if prefetched_olap is not None:
+            branch_olap = prefetched_olap.get(branch["name"], {})
+        else:
+            # Fallback: одиночный вызов (например при refresh одной точки)
+            all_branches = get_available_branches()
+            olap = await get_branch_olap_stats(today, branches=all_branches)
+            branch_olap = olap.get(branch["name"], {})
         revenue = branch_olap.get("revenue_net")
         if revenue is not None:
             revenue = round(revenue)
@@ -99,13 +105,18 @@ async def get_branch_status(branch: dict) -> dict:
 
     rt_data = get_branch_rt(branch["name"])
 
-    orders_agg = {}
-    try:
-        orders_agg = await aggregate_orders_today(branch["name"], date_iso)
-    except Exception as e:
-        logger.warning(f"Ошибка aggregate_orders_today [{branch['name']}]: {e}")
+    # Параллельный сбор DB + cash shift вместо двух последовательных await
+    async def _get_orders_agg() -> dict:
+        try:
+            return await aggregate_orders_today(branch["name"], date_iso)
+        except Exception as e:
+            logger.warning(f"Ошибка aggregate_orders_today [{branch['name']}]: {e}")
+            return {}
 
-    cash_shift_open = await get_cash_shift_open(branch, date_iso)
+    orders_agg, cash_shift_open = await asyncio.gather(
+        _get_orders_agg(),
+        get_cash_shift_open(branch, date_iso),
+    )
 
     # Если Events API ещё не загружен (revision=0 после рестарта) — подставляем
     # счётчики из orders_raw как fallback. Они менее оперативны, но лучше пустого экрана.

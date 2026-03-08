@@ -23,20 +23,34 @@ TG_MAX_LEN = 4096
 
 
 def _split_text(text: str, max_len: int = TG_MAX_LEN) -> list[str]:
-    """Разбивает длинный текст на части по границам строк."""
+    """Разбивает длинный текст на части ≤ max_len по границам строк."""
     if len(text) <= max_len:
         return [text]
-    parts: list[str] = []
-    while text:
-        if len(text) <= max_len:
-            parts.append(text)
-            break
-        cut = text.rfind("\n", 0, max_len)
-        if cut <= 0:
-            cut = max_len
-        parts.append(text[:cut])
-        text = text[cut:].lstrip("\n")
-    return parts
+
+    chunks: list[str] = []
+    current = ""
+
+    for line in text.split("\n"):
+        # Одна строка длиннее лимита — режем по символам
+        if len(line) > max_len:
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            for i in range(0, len(line), max_len - 10):
+                chunks.append(line[i:i + max_len - 10])
+            continue
+
+        candidate = current + line + "\n"
+        if len(candidate) > max_len:
+            chunks.append(current.rstrip())
+            current = line + "\n"
+        else:
+            current = candidate
+
+    if current.strip():
+        chunks.append(current.rstrip())
+
+    return chunks
 
 
 async def send_message(
@@ -123,35 +137,44 @@ async def meeting(text: str) -> bool:
 
 
 async def _send_via_arkentiy(chat_id: str, text: str, disable_notification: bool = False) -> bool:
-    """Отправить сообщение через Аркентий (analytics bot)."""
+    """Отправить сообщение через Аркентий (analytics bot). Автоматически разбивает > 4096."""
     token = settings.telegram_analytics_bot_token
     if not token:
         return await send_message(chat_id, text, disable_notification=disable_notification)
-    for attempt in range(3):
-        try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-                response = await client.post(
-                    f"https://api.telegram.org/bot{token}/sendMessage",
-                    json={
-                        "chat_id": chat_id,
-                        "text": text,
-                        "parse_mode": "HTML",
-                        "disable_notification": disable_notification,
-                    },
-                )
-                data = response.json()
-                if data.get("ok"):
-                    return True
-                if response.status_code == 429:
-                    retry_after = data.get("parameters", {}).get("retry_after", 5)
-                    await asyncio.sleep(retry_after)
-                    continue
-                logger.error(f"Аркентий мониторинг ошибка: {data}")
+
+    chunks = _split_text(text)
+    for i, chunk in enumerate(chunks):
+        success = False
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                    response = await client.post(
+                        f"https://api.telegram.org/bot{token}/sendMessage",
+                        json={
+                            "chat_id": chat_id,
+                            "text": chunk,
+                            "parse_mode": "HTML",
+                            "disable_notification": disable_notification,
+                        },
+                    )
+                    data = response.json()
+                    if data.get("ok"):
+                        success = True
+                        break
+                    if response.status_code == 429:
+                        retry_after = data.get("parameters", {}).get("retry_after", 5)
+                        await asyncio.sleep(retry_after)
+                        continue
+                    logger.error(f"Аркентий мониторинг ошибка: {data}")
+                    return False
+            except Exception as e:
+                logger.error(f"Аркентий мониторинг неожиданная ошибка: {e}")
                 return False
-        except Exception as e:
-            logger.error(f"Аркентий мониторинг неожиданная ошибка: {e}")
+        if not success:
             return False
-    return False
+        if i < len(chunks) - 1:
+            await asyncio.sleep(0.3)
+    return True
 
 
 async def monitor(text: str) -> bool:
@@ -178,31 +201,44 @@ async def send_message_with_keyboard(
     keyboard: list[list[dict]],
     parse_mode: str = "HTML",
 ) -> int | None:
-    """Отправляет сообщение с InlineKeyboard. Возвращает message_id или None."""
+    """Отправляет сообщение с InlineKeyboard. Возвращает message_id или None.
+    Если текст длиннее 4096 — промежуточные части отправляются без кнопок,
+    кнопки прикрепляются только к последнему чанку."""
     token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
     if not token:
         await send_message(chat_id, text, parse_mode=parse_mode)
         return None
-    payload: dict = {
-        "chat_id": chat_id,
-        "text": text[:4096],
-        "parse_mode": parse_mode,
-    }
-    if keyboard:
-        payload["reply_markup"] = {"inline_keyboard": keyboard}
+
+    chunks = _split_text(text)
+    last_message_id: int | None = None
+
     try:
         async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
-            resp = await client.post(
-                f"https://api.telegram.org/bot{token}/sendMessage",
-                json=payload,
-            )
-            data = resp.json()
-            if data.get("ok"):
-                return data["result"]["message_id"]
-            logger.error(f"send_message_with_keyboard error: {data}")
+            for i, chunk in enumerate(chunks):
+                is_last = i == len(chunks) - 1
+                payload: dict = {
+                    "chat_id": chat_id,
+                    "text": chunk,
+                    "parse_mode": parse_mode,
+                }
+                if is_last and keyboard:
+                    payload["reply_markup"] = {"inline_keyboard": keyboard}
+                resp = await client.post(
+                    f"https://api.telegram.org/bot{token}/sendMessage",
+                    json=payload,
+                )
+                data = resp.json()
+                if data.get("ok"):
+                    last_message_id = data["result"]["message_id"]
+                else:
+                    logger.error(f"send_message_with_keyboard error: {data}")
+                    return last_message_id
+                if not is_last:
+                    await asyncio.sleep(0.3)
     except Exception as e:
         logger.error(f"send_message_with_keyboard exception: {e}")
-    return None
+
+    return last_message_id
 
 
 async def edit_message_with_keyboard(
@@ -212,14 +248,17 @@ async def edit_message_with_keyboard(
     keyboard: list[list[dict]],
     parse_mode: str = "HTML",
 ) -> None:
-    """Редактирует сообщение с InlineKeyboard."""
+    """Редактирует сообщение с InlineKeyboard.
+    Edit не поддерживает разбиение — текст усекается до 4096 символов с маркером."""
     token = settings.telegram_analytics_bot_token or settings.telegram_bot_token
     if not token:
         return
+    if len(text) > TG_MAX_LEN:
+        text = text[:TG_MAX_LEN - 5] + "\n…"
     payload: dict = {
         "chat_id": chat_id,
         "message_id": message_id,
-        "text": text[:4096],
+        "text": text,
         "parse_mode": parse_mode,
     }
     if keyboard:

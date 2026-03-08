@@ -5,29 +5,27 @@
 
 ---
 
-## 📍 Где остановились — Сессия 72 (8 марта 2026)
+## 📍 Где остановились — Сессия 73 (8 марта 2026)
 
-**Последнее действие:** задеплоены 4 фикса + журнал/ченджлог обновлены.
+**Последнее действие:** фикс timezone в hourly_stats задеплоен, бэкфил завершён — 27 936 строк, 0 ошибок.
 
 **Всё задеплоено, контейнер работает стабильно (RestartCount=0).**
 
 ---
 
-## ✅ Что сделано в сессии 72
+## ✅ Что сделано в сессии 73
 
 | # | Что | Статус |
 |---|-----|--------|
-| 1 | fix: `allowed_updates: ["channel_post"]` — бот игнорил все команды | ✅ деплой `a8f9789` |
-| 2 | perf: OLAP prefetch в `/статус` — 63 HTTP → 7 HTTP, параллельный aggregate+cash_shift | ✅ деплой `b203a91` |
-| 3 | ux: `/статус` мгновенный плейсхолдер `⏳ Собираю данные...` | ✅ деплой `741d4c2` |
-| 4 | ux: `/статус` сам ждёт загрузки Events API и обновляет сообщение | ✅ деплой `37fa696` |
-| 5 | backlog: добавлен `boris_api_regression_audit` (P1) | ✅ |
+| 1 | fix: timezone-naive datetime для TEXT::timestamp в hourly_stats (jobs + backfill) | ✅ коммит `b9e1c69` |
+| 2 | деплой фикса на `/opt/ebidoebi/` | ✅ |
+| 3 | бэкфил hourly_stats: 27 936 строк, 0 ошибок, tenant=1+3, дек 2025 → 8 мар 2026 | ✅ завершён |
 
 ---
 
 ## 🔴 Активные проблемы / риски
 
-- **Бэкфил `hourly_stats` запущен** на сервере (`/tmp/backfill_hourly.log`) — идёт по декабрю 2025, ~35 сек/день. Фоновый, не мешает, но потребляет DB ресурсы. Ожидаемое завершение: несколько часов.
+- **Бэкфил `hourly_stats` завершён** — 27 936 строк, 0 ошибок. ~~В процессе~~
 - **`boris_api_regression_audit`** — не проверена изоляция `_states` по tenant_id в `/api/stats?metric=realtime`. Данные Шабурова потенциально видны в ответах Бориса.
 
 ---
@@ -48,7 +46,7 @@
 | iiko Events polling | ✅ каждые 30с, 9 точек (Артемий + Шабуров) |
 | Telegram бот | ✅ getUpdates с `allowed_updates` — команды приходят |
 | APScheduler | ✅ 14 jobs зарегистрировано |
-| Бэкфил hourly_stats | 🔄 в процессе (декабрь 2025 → сегодня) |
+| Бэкфил hourly_stats | ✅ завершён (27 936 строк, 0 ошибок) |
 | API для Бориса | ✅ `/api/stats` realtime/daily/period/hourly |
 
 ---
@@ -57,7 +55,9 @@
 
 - [app/jobs/arkentiy.py](app/jobs/arkentiy.py) — `_get_updates`, `_handle_status`, `_send_return_id`
 - [app/jobs/iiko_status_report.py](app/jobs/iiko_status_report.py) — `get_branch_status(prefetched_olap=...)`
-- [docs/journal.md](docs/journal.md) — сессия 72
+- [docs/journal.md](docs/journal.md) — сессия 73
+- [app/jobs/hourly_stats.py](app/jobs/hourly_stats.py) — timezone fix
+- [app/onboarding/backfill_hourly_stats.py](app/onboarding/backfill_hourly_stats.py) — timezone fix
 - [docs/CHANGELOG.md](docs/CHANGELOG.md) — запись про /статус
 
 ---

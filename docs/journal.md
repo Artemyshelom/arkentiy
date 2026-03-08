@@ -18,6 +18,35 @@
 
 ---
 
+## Сессия 73 — 8 марта 2026 (fix: timezone hourly_stats + бэкфил завершён) ✅
+
+**Контекст:** Бэкфил `hourly_stats`, запущенный в сессии 71, падал с ошибкой timezone. Починили, задеплоили, запустили — завершён успешно.
+
+### Что сделано
+
+**fix: timezone-naive datetime для TEXT::timestamp сравнений (`b9e1c69`)**
+- `app/jobs/hourly_stats.py` и `app/onboarding/backfill_hourly_stats.py` — в SQL WHERE-условиях против `TEXT::timestamp` используем `.replace(tzinfo=None)` (`hs`/`he`), в UPSERT в `TIMESTAMPTZ`-колонку оставляем tz-aware `hour_start`
+- Причина: asyncpg отказывается передавать tz-aware `datetime` когда PostgreSQL инферит `TIMESTAMP` (без tz) из `TEXT::timestamp` каста
+
+**Деплой и бэкфил**
+- Правильный путь проекта на сервере: `/opt/ebidoebi/` (не `/root/arkentiy`)
+- Бэкфил запущен в `screen`-сессии (`screen -dmS backfill`) — не умирает при закрытии SSH
+- Первый прогон (без screen) дошёл до `2025-12-29` и упал при разрыве SSH
+- Второй прогон завершился полностью — 0 ошибок, UPSERT
+
+### Итог бэкфила
+
+| tenant_id | строк | период |
+|-----------|-------|--------|
+| 1 (Ёбидоёби) | 20 970 | 2025-12-01 → 2026-03-08 |
+| 3 (Шабуров) | 6 990 | 2025-12-01 → 2026-03-08 |
+| **Итого** | **27 936** | **0 ошибок** |
+
+### Коммиты
+- `b9e1c69` — fix: timezone-naive datetime для TEXT::timestamp в hourly_stats
+
+---
+
 ## Сессия 72 — 8 марта 2026 (fix: allowed_updates + perf: /статус) ✅
 
 **Фокус:** Бот опять не отвечал на команды (третий раз) → нашли `allowed_updates: ["channel_post"]`. Плюс деградация производительности `/статус` после подключения Шабурова.

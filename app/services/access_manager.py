@@ -44,7 +44,7 @@ CITIES = access.CITIES
 # Аватарки чатов
 # ---------------------------------------------------------------------------
 
-_AVATAR_DIR = Path(__file__).parent.parent.parent / "assets" / "avatars"
+_AVATAR_DIR = Path("/app/assets/avatars")
 
 AVATAR_MAP: list[tuple[str, str]] = [
     (r"опозд",      "late.jpg"),

@@ -41,6 +41,7 @@ RUN playwright install chromium
 
 # Код приложения
 COPY app/ ./app/
+COPY assets/ ./assets/
 
 # Папки для данных и секретов
 RUN mkdir -p /app/data /app/secrets /app/logs

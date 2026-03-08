@@ -115,7 +115,7 @@ class BranchState:
         if not s:
             return None
         try:
-            return datetime.fromisoformat(s.replace("T", " ").split(".")[0])
+            return datetime.fromisoformat(s.replace("T", " ").split(".")[0]).replace(tzinfo=None)
         except Exception:
             return None
 

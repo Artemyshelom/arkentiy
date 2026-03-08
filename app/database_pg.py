@@ -1517,6 +1517,9 @@ async def get_hourly_stats(
     hour_from / hour_to — ISO-строки: '2026-03-07' или '2026-03-07T09:00:00'.
     """
     pool = get_pool()
+    from datetime import datetime as _dt
+    dt_from = _dt.fromisoformat(hour_from) if isinstance(hour_from, str) else hour_from
+    dt_to   = _dt.fromisoformat(hour_to)   if isinstance(hour_to,   str) else hour_to
     rows = await pool.fetch(
         """SELECT hour, orders_count, revenue, avg_check,
                   avg_cook_time, avg_courier_wait, avg_delivery_time,
@@ -1525,10 +1528,10 @@ async def get_hourly_stats(
            FROM hourly_stats
            WHERE tenant_id = $1
              AND branch_name = $2
-             AND hour >= $3::timestamptz
-             AND hour <  $4::timestamptz
+             AND hour >= $3
+             AND hour <  $4
            ORDER BY hour""",
-        tenant_id, branch_name, hour_from, hour_to,
+        tenant_id, branch_name, dt_from, dt_to,
     )
     return [dict(r) for r in rows]
 

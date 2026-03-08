@@ -24,7 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.clients.iiko_bo_events import _states
 from app.config import get_settings
 from app.ctx import ctx_tenant_id
-from app.database_pg import get_daily_stats, get_period_stats, get_shifts_by_date
+from app.database_pg import get_daily_stats, get_hourly_stats, get_period_stats, get_shifts_by_date
 from app.jobs.iiko_status_report import get_available_branches
 from app.jobs.late_alerts import ACTIVE_DELIVERY_STATUSES, LATE_MAX_MIN, LOCAL_UTC_OFFSET
 
@@ -328,6 +328,71 @@ async def _build_period(
 
 
 # ---------------------------------------------------------------------------
+# Hourly
+# ---------------------------------------------------------------------------
+
+async def _build_hourly(
+    tenant_id: int,
+    date_iso: str,
+    branch_filter: str | None,
+    city_filter: str | None,
+) -> dict:
+    tok = _set_tenant(tenant_id)
+    try:
+        branches_cfg = get_available_branches(branch_filter or city_filter or None)
+    finally:
+        ctx_tenant_id.reset(tok)
+
+    hour_from = date_iso
+    hour_to = (datetime.strptime(date_iso, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    branches_out = []
+    for b in branches_cfg:
+        name = b["name"]
+        city = b.get("city", "")
+        if city_filter and city_filter.lower() not in city.lower():
+            continue
+
+        rows = await get_hourly_stats(name, hour_from, hour_to, tenant_id)
+        if not rows:
+            continue
+
+        hours_out = []
+        for r in rows:
+            h = r["hour"]
+            # Normalize to ISO string regardless of how asyncpg returns it
+            hour_str = h.isoformat() if hasattr(h, "isoformat") else str(h)
+            cnt = int(r["orders_count"] or 0)
+            rev = float(r["revenue"] or 0)
+            late = int(r["late_count"] or 0)
+            hours_out.append({
+                "hour": hour_str,
+                "orders_count": cnt,
+                "revenue": round(rev),
+                "avg_check": round(rev / cnt) if cnt else 0,
+                "avg_cook_time": _maybe_float(r.get("avg_cook_time")),
+                "avg_courier_wait": _maybe_float(r.get("avg_courier_wait")),
+                "avg_delivery_time": _maybe_float(r.get("avg_delivery_time")),
+                "late_count": late,
+                "late_percent": _maybe_float(r.get("late_percent")),
+                "cooks_on_shift": int(r["cooks_on_shift"] or 0),
+                "couriers_on_shift": int(r["couriers_on_shift"] or 0),
+                "orders_in_progress": int(r["orders_in_progress"] or 0),
+            })
+
+        branches_out.append({
+            "name": name,
+            "city": city,
+            "hours": hours_out,
+        })
+
+    return {
+        "date": date_iso,
+        "branches": branches_out,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Shifts
 # ---------------------------------------------------------------------------
 
@@ -394,7 +459,7 @@ async def _build_shifts(
 
 @router.get("", summary="Операционная статистика для AI-агентов")
 async def get_stats(
-    metric: str = Query(..., description="realtime | daily | period | shifts"),
+    metric: str = Query(..., description="realtime | daily | period | shifts | hourly"),
     branch: str | None = Query(None, description="Фильтр по названию точки или подстроке"),
     city: str | None = Query(None, description="Фильтр по городу: Барнаул, Томск, Абакан и т.д."),
     date: str | None = Query(None, description="YYYY-MM-DD (для daily/shifts, по умолчанию — вчера)"),
@@ -408,6 +473,7 @@ async def get_stats(
     - **daily** — итоги дня из daily_stats (параметр `date`, по умолчанию вчера)
     - **period** — агрегация за период (`from` / `to`)
     - **shifts** — смены сотрудников за дату (по умолчанию сегодня)
+    - **hourly** — почасовая аналитика из hourly_stats (параметр `date`, по умолчанию вчера)
     """
     if "stats" not in token_meta.get("modules", []):
         raise HTTPException(status_code=403, detail="Модуль stats не разрешён для этого токена")
@@ -436,8 +502,13 @@ async def get_stats(
             raise HTTPException(status_code=400, detail="from должен быть <= to")
         return await _build_period(tenant_id, date_from, date_to, branch, city)
 
+    elif metric == "hourly":
+        yesterday = (datetime.today() - timedelta(days=1)).date().isoformat()
+        date_iso = _parse_date(date, yesterday)
+        return await _build_hourly(tenant_id, date_iso, branch, city)
+
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Неизвестный metric: {metric!r}. Допустимые: realtime, daily, period, shifts",
+            detail=f"Неизвестный metric: {metric!r}. Допустимые: realtime, daily, period, shifts, hourly",
         )

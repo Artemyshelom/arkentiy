@@ -18,6 +18,98 @@
 
 ---
 
+## Сессия 71 — 8 марта 2026 (feat: hourly_stats — почасовая аналитика для Бориса) ✅
+
+**Фокус:** Новая таблица `hourly_stats` + job + API + бэкфил. Агрегирует данные из `orders_raw` и `shifts_raw` по часам для AI-агента Бориса.
+
+### 1. Миграция 009_hourly_stats.sql
+
+Создана таблица `hourly_stats` с полями:
+- `orders_count`, `revenue`, `avg_check` — заказы и выручка за час
+- `avg_cook_time`, `avg_courier_wait`, `avg_delivery_time` — тайминги (NULL если OLAP ещё не пришёл)
+- `late_count`, `late_percent` — опоздания
+- `cooks_on_shift`, `couriers_on_shift` — персонал на смене В ЭТОТ ЧАС (пересечение смены с часом)
+- `orders_in_progress` — заказов в работе на начало часа (накопленная очередь)
+
+UNIQUE на `(tenant_id, branch_name, hour)`, INDEX на те же поля.
+
+**Файл:** `app/migrations/009_hourly_stats.sql`
+
+### 2. DB-функции в database_pg.py
+
+- `upsert_hourly_stats(row, tenant_id)` — UPSERT по UNIQUE ключу
+- `get_hourly_stats(branch_name, hour_from, hour_to, tenant_id)` — SELECT за диапазон для API
+
+**Файл:** `app/database_pg.py`
+
+### 3. Job app/jobs/hourly_stats.py
+
+- `aggregate_hour(tenant_id, branch_name, hour_start)` — агрегация одного часа:
+  - SQL без фильтров на самовывоз/предзаказы/payment_changed (цель: нагрузка, а не KPI)
+  - Тайминги в диапазоне 1-120 мин (защита от мусора)
+  - `role_class = 'cook'` / `'courier'` (англ., как хранится в shifts_raw)
+  - Правильные статусы: `'Доставлена'`, `'Закрыта'` (все временные поля — TEXT, касты через `::timestamp`)
+- `job_hourly_stats()` — `@track_job`, каждый час, все тенанты/точки
+- `job_recalc_yesterday_hourly()` — пересчёт 24 часов вчера после прихода OLAP enrichment
+
+**Файл:** `app/jobs/hourly_stats.py`
+
+### 4. Регистрация jobs в main.py
+
+- `CronTrigger(minute=5)` — hourly_stats каждый час в :05
+- `CronTrigger(hour=3, minute=35)` — recalc_yesterday в 06:35 МСК (после OLAP enrichment в 05:26)
+
+**Файл:** `app/main.py`
+
+### 5. API metric=hourly в stats router
+
+Новый endpoint: `GET /api/stats?metric=hourly&date=YYYY-MM-DD[&branch=...][&city=...]`
+
+Возвращает массив часовых строк для каждой точки за указанный день. По умолчанию — вчера.
+
+Формат ответа:
+```json
+{
+  "date": "2026-03-07",
+  "branches": [
+    {
+      "name": "Барнаул",
+      "city": "Барнаул",
+      "hours": [
+        {"hour": "2026-03-07T03:00:00+00:00", "orders_count": 5, "revenue": 4200, ...}
+      ]
+    }
+  ]
+}
+```
+
+**Файл:** `app/routers/stats.py`
+
+### 6. Бэкфил app/onboarding/backfill_hourly_stats.py
+
+Класс `HourlyStatsBackfiller`, прогоняет `orders_raw` + `shifts_raw` за каждый час каждого дня.
+Progress tracking в `/tmp/backfill_hourly_progress/tenant_N.json` — безопасно перезапускать.
+
+**Запустить после деплоя:**
+```bash
+# На сервере (в контейнере):
+docker compose exec app python -m app.onboarding.backfill_hourly_stats --date-from 2025-12-01
+
+# Или для конкретного тенанта:
+docker compose exec app python -m app.onboarding.backfill_hourly_stats --tenant-id 1 --date-from 2025-12-01
+```
+
+**Файл:** `app/onboarding/backfill_hourly_stats.py`
+
+### Решения
+
+- Фильтры самовывоза/предзаказов/payment_changed НЕ применяются — цель: анализ нагрузки
+- Пустые часы получают строку с нулями (Борис различает «0 заказов» и «нет данных»)
+- `orders_in_progress` включён — полезно для анализа очереди и причин опозданий
+- v2 (содержимое заказов, горячие/холодные роллы) — отдельная задача
+
+---
+
 ## Сессия 70 — 8 марта 2026 (fix: братишка игнорит + feat: карточка опозданий) ✅
 
 **Фокус:** Бот переставал отвечать на команды + редизайн карточки `/опоздания`.

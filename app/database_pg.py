@@ -1460,6 +1460,80 @@ async def get_exact_time_orders(
 
 
 # =====================================================================
+# hourly_stats
+# =====================================================================
+
+async def upsert_hourly_stats(row: dict, tenant_id: int = 1) -> None:
+    """UPSERT одной строки в hourly_stats."""
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO hourly_stats
+               (tenant_id, branch_name, hour,
+                orders_count, revenue, avg_check,
+                avg_cook_time, avg_courier_wait, avg_delivery_time,
+                late_count, late_percent,
+                cooks_on_shift, couriers_on_shift, orders_in_progress,
+                updated_at)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+               ON CONFLICT (tenant_id, branch_name, hour) DO UPDATE SET
+                 orders_count=EXCLUDED.orders_count,
+                 revenue=EXCLUDED.revenue,
+                 avg_check=EXCLUDED.avg_check,
+                 avg_cook_time=EXCLUDED.avg_cook_time,
+                 avg_courier_wait=EXCLUDED.avg_courier_wait,
+                 avg_delivery_time=EXCLUDED.avg_delivery_time,
+                 late_count=EXCLUDED.late_count,
+                 late_percent=EXCLUDED.late_percent,
+                 cooks_on_shift=EXCLUDED.cooks_on_shift,
+                 couriers_on_shift=EXCLUDED.couriers_on_shift,
+                 orders_in_progress=EXCLUDED.orders_in_progress,
+                 updated_at=now()""",
+            tenant_id,
+            row["branch_name"],
+            row["hour"],
+            row.get("orders_count", 0),
+            row.get("revenue", 0.0),
+            row.get("avg_check", 0.0),
+            row.get("avg_cook_time"),
+            row.get("avg_courier_wait"),
+            row.get("avg_delivery_time"),
+            row.get("late_count", 0),
+            row.get("late_percent", 0.0),
+            row.get("cooks_on_shift", 0),
+            row.get("couriers_on_shift", 0),
+            row.get("orders_in_progress", 0),
+        )
+
+
+async def get_hourly_stats(
+    branch_name: str,
+    hour_from: str,
+    hour_to: str,
+    tenant_id: int = 1,
+) -> list[dict]:
+    """Возвращает строки hourly_stats за период [hour_from, hour_to) для одной точки.
+
+    hour_from / hour_to — ISO-строки: '2026-03-07' или '2026-03-07T09:00:00'.
+    """
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT hour, orders_count, revenue, avg_check,
+                  avg_cook_time, avg_courier_wait, avg_delivery_time,
+                  late_count, late_percent,
+                  cooks_on_shift, couriers_on_shift, orders_in_progress
+           FROM hourly_stats
+           WHERE tenant_id = $1
+             AND branch_name = $2
+             AND hour >= $3::timestamptz
+             AND hour <  $4::timestamptz
+           ORDER BY hour""",
+        tenant_id, branch_name, hour_from, hour_to,
+    )
+    return [dict(r) for r in rows]
+
+
+# =====================================================================
 # TBank — online_payments + tbank_registry_logs
 # =====================================================================
 

@@ -37,6 +37,7 @@ from app.routers.auth import router as auth_router
 from app.routers.stats import router as stats_router
 
 # Импорт задач
+from app.jobs.hourly_stats import job_hourly_stats, job_recalc_yesterday_hourly
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
 from app.jobs.olap_enrichment import job_olap_enrichment
 from app.clients.iiko_bo_events import job_poll_iiko_events
@@ -243,6 +244,26 @@ def register_jobs() -> None:
         name="Grace period неоплаты",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # Почасовая агрегация для AI-агента Бориса: каждый час в :05
+    scheduler.add_job(
+        job_hourly_stats,
+        trigger=CronTrigger(minute=5),
+        id="hourly_stats",
+        name="Почасовая аналитика → hourly_stats",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Пересчёт таймингов за вчера после OLAP enrichment: 06:35 МСК
+    scheduler.add_job(
+        job_recalc_yesterday_hourly,
+        trigger=CronTrigger(hour=3, minute=35),
+        id="hourly_stats_recalc_yesterday",
+        name="Пересчёт hourly_stats за вчера (после OLAP enrichment)",
+        replace_existing=True,
+        misfire_grace_time=600,
     )
 
 

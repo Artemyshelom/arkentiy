@@ -497,7 +497,7 @@ async def _answer_callback(callback_id: str, text: str = "") -> None:
 
 
 async def _get_updates(offset: Optional[int] = None) -> list[dict]:
-    params = {"timeout": 2, "limit": 10}
+    params = {"timeout": 2, "limit": 10, "allowed_updates": ["message", "callback_query", "my_chat_member"]}
     if offset is not None:
         params["offset"] = offset
     try:

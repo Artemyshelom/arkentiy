@@ -136,6 +136,10 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
     revenue = float(order_row["revenue"] or 0)
     late_count = int(order_row["late_count"] or 0)
 
+    # Пропускаем пустые часы (ночь/перерыв в работе)
+    if orders_count == 0 and cooks == 0 and couriers == 0:
+        return
+
     await upsert_hourly_stats(
         {
             "branch_name": branch_name,

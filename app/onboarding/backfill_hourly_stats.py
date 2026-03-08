@@ -192,6 +192,10 @@ class HourlyStatsBackfiller:
         revenue = float(order_row["revenue"] or 0)
         late_count = int(order_row["late_count"] or 0)
 
+        # Пропускаем пустые часы (ночь/перерыв в работе)
+        if orders_count == 0 and cooks == 0 and couriers == 0:
+            return
+
         def _f(v: object) -> float | None:
             return round(float(v), 1) if v is not None else None
 

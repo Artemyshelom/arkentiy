@@ -380,6 +380,9 @@ async def _build_hourly(
                 "orders_in_progress": int(r["orders_in_progress"] or 0),
             })
 
+        # Не отдавать ветки где нет ни заказов, ни персонала
+        hours_out = [h for h in hours_out if h["orders_count"] > 0 or h["cooks_on_shift"] > 0 or h["couriers_on_shift"] > 0]
+
         branches_out.append({
             "name": name,
             "city": city,

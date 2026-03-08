@@ -314,6 +314,18 @@ async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int = 1) 
     return [dict(r) for r in rows]
 
 
+async def get_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
+    """Смены всех точек за дату. Для Stats API (Борис)."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT branch_name, employee_name, role_class, clock_in, clock_out
+           FROM shifts_raw WHERE tenant_id = $1 AND date = $2
+           ORDER BY branch_name, clock_in""",
+        tenant_id, _to_date(date_iso),
+    )
+    return [dict(r) for r in rows]
+
+
 async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
     pool = get_pool()
     result = await pool.execute(

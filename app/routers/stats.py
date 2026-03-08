@@ -24,7 +24,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from app.clients.iiko_bo_events import _states
 from app.config import get_settings
 from app.ctx import ctx_tenant_id
-from app.database_pg import get_daily_stats, get_period_stats
+from app.database_pg import get_daily_stats, get_period_stats, get_shifts_by_date
 from app.jobs.iiko_status_report import get_available_branches
 from app.jobs.late_alerts import ACTIVE_DELIVERY_STATUSES, LATE_MAX_MIN, LOCAL_UTC_OFFSET
 
@@ -328,15 +328,76 @@ async def _build_period(
 
 
 # ---------------------------------------------------------------------------
+# Shifts
+# ---------------------------------------------------------------------------
+
+async def _build_shifts(
+    tenant_id: int,
+    date_iso: str,
+    branch_filter: str | None,
+    city_filter: str | None,
+) -> dict:
+    tok = _set_tenant(tenant_id)
+    try:
+        branches_cfg = get_available_branches()
+    finally:
+        ctx_tenant_id.reset(tok)
+
+    branch_city = {b["name"]: b.get("city", "") for b in branches_cfg}
+    all_shifts = await get_shifts_by_date(date_iso, tenant_id)
+
+    # Фильтруем по branch/city
+    branches_out = {}
+    for row in all_shifts:
+        name = row["branch_name"]
+        city = branch_city.get(name, "")
+
+        if branch_filter and branch_filter.lower() not in name.lower() and branch_filter.lower() not in city.lower():
+            continue
+        if city_filter and city_filter.lower() not in city.lower():
+            continue
+
+        if name not in branches_out:
+            branches_out[name] = {
+                "name": name,
+                "city": city,
+                "total": 0,
+                "on_shift": 0,  # clock_out is NULL — ещё работают
+                "roles": {},
+            }
+
+        entry = branches_out[name]
+        entry["total"] += 1
+        if row["clock_out"] is None:
+            entry["on_shift"] += 1
+
+        role = row["role_class"] or "—"
+        if role not in entry["roles"]:
+            entry["roles"][role] = {"total": 0, "on_shift": 0}
+        entry["roles"][role]["total"] += 1
+        if row["clock_out"] is None:
+            entry["roles"][role]["on_shift"] += 1
+
+    return {
+        "date": date_iso,
+        "branches": list(branches_out.values()),
+        "totals": {
+            "total": sum(b["total"] for b in branches_out.values()),
+            "on_shift": sum(b["on_shift"] for b in branches_out.values()),
+        },
+    }
+
+
+# ---------------------------------------------------------------------------
 # Endpoint
 # ---------------------------------------------------------------------------
 
 @router.get("", summary="Операционная статистика для AI-агентов")
 async def get_stats(
-    metric: str = Query(..., description="realtime | daily | period"),
+    metric: str = Query(..., description="realtime | daily | period | shifts"),
     branch: str | None = Query(None, description="Фильтр по названию точки или подстроке"),
     city: str | None = Query(None, description="Фильтр по городу: Барнаул, Томск, Абакан и т.д."),
-    date: str | None = Query(None, description="YYYY-MM-DD (для daily, по умолчанию — вчера)"),
+    date: str | None = Query(None, description="YYYY-MM-DD (для daily/shifts, по умолчанию — вчера)"),
     from_: str | None = Query(None, alias="from", description="YYYY-MM-DD (для period)"),
     to: str | None = Query(None, description="YYYY-MM-DD (для period)"),
     token_meta: dict = Depends(_verify_token),
@@ -346,6 +407,7 @@ async def get_stats(
     - **realtime** — активные заказы и опоздания из in-memory состояния
     - **daily** — итоги дня из daily_stats (параметр `date`, по умолчанию вчера)
     - **period** — агрегация за период (`from` / `to`)
+    - **shifts** — смены сотрудников за дату (по умолчанию сегодня)
     """
     if "stats" not in token_meta.get("modules", []):
         raise HTTPException(status_code=403, detail="Модуль stats не разрешён для этого токена")
@@ -360,6 +422,11 @@ async def get_stats(
         date_iso = _parse_date(date, yesterday)
         return await _build_daily(tenant_id, date_iso, branch, city)
 
+    elif metric == "shifts":
+        today = _today_iso()
+        date_iso = _parse_date(date, today)
+        return await _build_shifts(tenant_id, date_iso, branch, city)
+
     elif metric == "period":
         today = _today_iso()
         week_ago = (datetime.today() - timedelta(days=7)).date().isoformat()
@@ -372,5 +439,5 @@ async def get_stats(
     else:
         raise HTTPException(
             status_code=400,
-            detail=f"Неизвестный metric: {metric!r}. Допустимые: realtime, daily, period",
+            detail=f"Неизвестный metric: {metric!r}. Допустимые: realtime, daily, period, shifts",
         )

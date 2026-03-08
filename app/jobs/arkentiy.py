@@ -1817,6 +1817,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
                 "cooking": state._cooking_status(str(num)),
                 "courier": (d.get("courier") or "").strip(),
                 "customer_raw": d.get("customer_raw"),
+                "address": (d.get("delivery_address") or "").strip(),
             })
 
     results.sort(key=lambda x: -x["overdue_min"])
@@ -1834,14 +1835,18 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         name = html.escape(_parse_customer_name(r["customer_raw"]) or "—")
         phone = html.escape(_parse_customer_phone(r["customer_raw"]) or "—")
         status_str = _human_status_rt(r["status"], r["cooking"])
+        address_part = ""
+        if r.get("address"):
+            address_part = f"\n  📍 {html.escape(r['address'])}"
         courier_part = ""
         if r["status"] == "В пути к клиенту" and r["courier"]:
             courier_part = f"\n  🛵 {html.escape(r['courier'])}"
         lines.append(
             f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
             f" | {html.escape(r['branch'])}\n"
-            f"  👤 {name} | 📞 <code>{phone}</code>\n"
-            f"  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"
+            f"  👤 {name} | 📞 <code>{phone}</code>"
+            + address_part
+            + f"\n  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"
             + courier_part
         )
 

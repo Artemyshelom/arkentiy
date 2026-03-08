@@ -33,6 +33,7 @@ from app.jobs import tbank_reconciliation
 from app.services import access
 from app.clients.iiko_bo_events import (
     get_all_branches_staff,
+    is_events_loaded,
     _states,
     _parse_customer_name,
     _parse_customer_phone,
@@ -680,6 +681,9 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
     Одна точка → сразу карточка + кнопка обновить.
     Несколько → сводка + кнопки per-точка + обновить (edit_message навигация).
     """
+    if not is_events_loaded():
+        await _send(chat_id, "⏳ Данные загружаются после перезапуска, подождите 1\u20132 минуты.")
+        return
     all_branches = get_available_branches()
     if not all_branches:
         await _send(chat_id, "⚠️ Нет настроенных точек.")
@@ -1768,6 +1772,10 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         await _handle_day_delays(chat_id, arg, city_filter=city_filter)
         return
 
+    if not is_events_loaded():
+        await _send(chat_id, "⏳ Данные загружаются после перезапуска, подождите 1\u20132 минуты.")
+        return
+
     now_local = (
         datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
     ).replace(tzinfo=None)
@@ -1842,6 +1850,9 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
 
 async def _handle_pickup(chat_id: int, arg: str, city_filter=None) -> None:
     """/самовывоз [фильтр] — активные опоздавшие самовывозы прямо сейчас."""
+    if not is_events_loaded():
+        await _send(chat_id, "⏳ Данные загружаются после перезапуска, подождите 1\u20132 минуты.")
+        return
     now_local = (
         datetime.now(tz=timezone.utc) + timedelta(hours=_LATE_UTC_OFFSET)
     ).replace(tzinfo=None)

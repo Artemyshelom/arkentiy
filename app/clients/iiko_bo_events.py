@@ -60,6 +60,7 @@ FULL_RELOAD_INTERVAL = 6  # часов
 
 # Глобальный реестр состояний точек: {branch_name: BranchState}
 _states: dict[str, "BranchState"] = {}
+_first_poll_done: bool = False
 
 # Кеш сотрудников: {bo_url: {user_id: {name, role, role_class}}}
 _employees_global: dict[str, dict] = {}
@@ -960,6 +961,14 @@ async def poll_all_branches() -> None:
                 await _safe_incremental(state, client)
 
     await asyncio.gather(*[_poll_branch(b) for b in branches], return_exceptions=True)
+
+    global _first_poll_done
+    _first_poll_done = True
+
+
+def is_events_loaded() -> bool:
+    """True если хотя бы один полный polling-цикл завершён после старта."""
+    return _first_poll_done
 
 
 async def job_poll_iiko_events() -> None:

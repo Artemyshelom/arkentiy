@@ -40,7 +40,7 @@ systemctl restart morf.service
 | `daily` | Итоги за день (выручка, чеки, опоздания, t-метрики) | `daily_stats` (PostgreSQL) |
 | `period` | Агрегат за произвольный период | `daily_stats` (PostgreSQL) |
 
-**Авторизация:** Bearer-токен из `secrets/api_keys.json`. Токен Бориса: `brs_2d3161e74b115bf004b914cf930dc4f9`.
+**Авторизация:** Bearer-токен из `secrets/api_keys.json`. Токен Бориса: `brs_6f6797a679fddddda251318c4c9cb3a13b385e1ce2674ae1`.
 
 **Rate limit:** 60 req/min на токен (in-memory, сбрасывается при рестарте).
 
@@ -54,7 +54,7 @@ systemctl restart morf.service
 **Использование (пример):**
 ```
 GET https://arkenty.ru/api/stats?metric=realtime
-Authorization: Bearer brs_2d3161e74b115bf004b914cf930dc4f9
+Authorization: Bearer brs_6f6797a679fddddda251318c4c9cb3a13b385e1ce2674ae1
 ```
 
 ---

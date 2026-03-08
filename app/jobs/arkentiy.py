@@ -125,15 +125,43 @@ def _bot_url() -> str:
     return f"https://api.telegram.org/bot{token}"
 
 
+_TG_MAX_LEN = 4096
+
+
 async def _send(chat_id: int, text: str, parse_mode: str = "HTML") -> None:
+    """Отправляет сообщение, автоматически разбивая на части если > 4096 символов."""
+    if len(text) <= _TG_MAX_LEN:
+        chunks = [text]
+    else:
+        # Разбиваем по двойным переносам (между блоками), чтобы не резать mid-слово
+        chunks = []
+        current = ""
+        for part in text.split("\n\n"):
+            block = (("\n\n" + part) if current else part)
+            if len(current) + len(block) <= _TG_MAX_LEN:
+                current += block
+            else:
+                if current:
+                    chunks.append(current)
+                # Если один блок > 4096 — режем жёстко
+                if len(part) > _TG_MAX_LEN:
+                    for i in range(0, len(part), _TG_MAX_LEN):
+                        chunks.append(part[i:i + _TG_MAX_LEN])
+                    current = ""
+                else:
+                    current = part
+        if current:
+            chunks.append(current)
+
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            r = await client.post(
-                f"{_bot_url()}/sendMessage",
-                json={"chat_id": chat_id, "text": text, "parse_mode": parse_mode},
-            )
-            if not r.json().get("ok"):
-                logger.error(f"analytics_bot send error: {r.text[:200]}")
+            for chunk in chunks:
+                r = await client.post(
+                    f"{_bot_url()}/sendMessage",
+                    json={"chat_id": chat_id, "text": chunk, "parse_mode": parse_mode},
+                )
+                if not r.json().get("ok"):
+                    logger.error(f"analytics_bot send error: {r.text[:200]}")
     except Exception as e:
         logger.error(f"analytics_bot _send: {e}")
 

@@ -66,6 +66,14 @@
           localStorage.setItem("arkentiy_token", data.token);
           const redirect = new URLSearchParams(window.location.search).get("redirect") || "/cabinet/";
           window.location.href = redirect;
+        } else if (resp.status === 403) {
+          const data = await resp.json().catch(() => ({}));
+          if (data.error === "email_not_verified") {
+            errorEl.innerHTML = 'Подтвердите email. <a href="/verify.html" class="underline text-brand-600">Отправить письмо повторно</a>';
+          } else {
+            errorEl.textContent = "Доступ запрещён";
+          }
+          errorEl.classList.remove("hidden");
         } else {
           errorEl.textContent = "Неверный email или пароль";
           errorEl.classList.remove("hidden");

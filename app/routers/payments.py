@@ -14,13 +14,14 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Request, Depends
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
 
 from app.config import get_settings
 from app.clients.yukassa import create_payment, get_payment, YukassaError
+from app.services.auth import get_tenant_id
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,6 @@ limiter = Limiter(key_func=get_remote_address)
 # =====================================================================
 
 class PaymentCreateRequest(BaseModel):
-    tenant_id: int
     amount: int
     description: str | None = None
     save_payment_method: bool = True
@@ -86,7 +86,11 @@ def _next_invoice_number(year: int, seq: int) -> str:
 
 @router.post("/payments/create")
 @limiter.limit("10/minute")
-async def api_create_payment(req: PaymentCreateRequest, request: Request):
+async def api_create_payment(
+    req: PaymentCreateRequest,
+    request: Request,
+    tenant_id: int = Depends(get_tenant_id),
+):
     """Создаёт платёж в ЮKassa и возвращает URL для редиректа."""
     settings = get_settings()
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
@@ -100,7 +104,7 @@ async def api_create_payment(req: PaymentCreateRequest, request: Request):
     async with pool.acquire() as conn:
         tenant = await conn.fetchrow(
             "SELECT id, name, email, status FROM tenants WHERE id = $1",
-            req.tenant_id,
+            tenant_id,
         )
         if not tenant:
             raise HTTPException(404, "Тенант не найден")
@@ -112,7 +116,7 @@ async def api_create_payment(req: PaymentCreateRequest, request: Request):
         await conn.execute(
             """INSERT INTO payments (id, tenant_id, amount, status, payment_method, description)
                VALUES ($1, $2, $3, 'pending', 'card', $4)""",
-            payment_id, req.tenant_id, req.amount, description,
+            payment_id, tenant_id, req.amount, description,
         )
 
     # Создаём платёж в ЮKassa
@@ -122,7 +126,7 @@ async def api_create_payment(req: PaymentCreateRequest, request: Request):
             amount=req.amount,
             description=description,
             return_url=return_url,
-            metadata={"payment_id": payment_id, "tenant_id": str(req.tenant_id)},
+            metadata={"payment_id": payment_id, "tenant_id": str(tenant_id)},
             save_payment_method=req.save_payment_method,
         )
     except YukassaError as e:
@@ -430,17 +434,19 @@ async def confirm_invoice(invoice_id: str, request: Request):
 
 @router.post("/invoices/create")
 @limiter.limit("5/minute")
-async def create_invoice(request: Request):
+async def create_invoice(
+    request: Request,
+    tenant_id: int = Depends(get_tenant_id),
+):
     """Создаёт счёт для юрлица."""
     body = await request.json()
-    tenant_id = body.get("tenant_id")
     amount = body.get("amount")
     inn = body.get("inn", "")
     legal_name = body.get("legal_name", "")
     items = body.get("items", [])
 
-    if not tenant_id or not amount:
-        raise HTTPException(400, "tenant_id и amount обязательны")
+    if not amount:
+        raise HTTPException(400, "amount обязателен")
 
     pool = await _get_pool()
     if not pool:

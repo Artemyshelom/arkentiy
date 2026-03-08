@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Подтверждение email — Аркентий</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { theme: { extend: { colors: { brand: { 50:"#eef2ff",100:"#e0e7ff",500:"#6366f1",600:"#4f46e5",700:"#4338ca" } } } } }
+  </script>
+</head>
+<body class="bg-gray-50 text-gray-900 antialiased min-h-screen flex flex-col">
+  <header class="fixed top-0 w-full z-50 bg-white/80 backdrop-blur-md border-b border-gray-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 h-16 flex items-center">
+      <a href="/" class="text-xl font-bold text-brand-600">Аркентий</a>
+    </div>
+  </header>
+
+  <main class="flex-1 flex items-center justify-center px-4 pt-16">
+    <div class="w-full max-w-sm">
+      <div class="bg-white rounded-2xl border border-gray-100 p-8 shadow-sm">
+
+        <!-- Загрузка -->
+        <div id="loading-view" class="text-center">
+          <div class="w-14 h-14 bg-gray-100 rounded-full flex items-center justify-center mx-auto mb-4 animate-pulse">
+            <svg class="w-7 h-7 text-gray-400" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z"/>
+            </svg>
+          </div>
+          <p class="text-gray-500 text-sm">Подтверждаем email...</p>
+        </div>
+
+        <!-- Успех -->
+        <div id="success-view" class="hidden text-center">
+          <div class="w-14 h-14 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-green-600" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-gray-900 mb-2">Email подтверждён</h2>
+          <p class="text-sm text-gray-500 mb-6">Можно входить в личный кабинет</p>
+          <a href="/login.html" class="inline-block py-2.5 px-6 bg-brand-600 text-white font-medium rounded-lg hover:bg-brand-700 transition text-sm">
+            Войти в кабинет
+          </a>
+        </div>
+
+        <!-- Ошибка (истёк / уже использован) -->
+        <div id="error-view" class="hidden text-center">
+          <div class="w-14 h-14 bg-orange-100 rounded-full flex items-center justify-center mx-auto mb-4">
+            <svg class="w-7 h-7 text-orange-500" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+          </div>
+          <h2 class="text-xl font-bold text-gray-900 mb-2">Ссылка устарела</h2>
+          <p class="text-sm text-gray-500 mb-4">Ссылка для подтверждения истекла или уже использовалась</p>
+
+          <!-- Повторная отправка -->
+          <div id="resend-form">
+            <div class="mb-3">
+              <input type="email" id="resend-email"
+                class="w-full px-4 py-2.5 border border-gray-200 rounded-lg focus:ring-2 focus:ring-brand-500 focus:border-brand-500 text-sm"
+                placeholder="Введите ваш email">
+            </div>
+            <div id="resend-error" class="text-red-600 text-xs mb-2 hidden"></div>
+            <button id="resend-btn"
+              class="w-full py-2.5 bg-brand-600 text-white font-medium rounded-lg hover:bg-brand-700 transition text-sm disabled:opacity-50">
+              Отправить повторно
+            </button>
+          </div>
+          <div id="resend-success" class="hidden text-sm text-green-600 font-medium mt-2">
+            Письмо отправлено — проверьте почту
+          </div>
+
+          <div class="mt-4">
+            <a href="/login.html" class="text-brand-600 text-sm hover:text-brand-700">← Вернуться ко входу</a>
+          </div>
+        </div>
+
+        <!-- Нет токена -->
+        <div id="notoken-view" class="hidden text-center">
+          <h2 class="text-xl font-bold text-gray-900 mb-2">Неверная ссылка</h2>
+          <p class="text-sm text-gray-500 mb-4">Пожалуйста, используйте ссылку из письма</p>
+          <a href="/login.html" class="text-brand-600 text-sm hover:text-brand-700">← Ко входу</a>
+        </div>
+
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const params = new URLSearchParams(window.location.search);
+    const token = params.get("token");
+
+    async function verify() {
+      if (!token) {
+        show("notoken-view");
+        return;
+      }
+
+      try {
+        const resp = await fetch(`/api/auth/verify-email?token=${encodeURIComponent(token)}`);
+        if (resp.ok) {
+          show("success-view");
+        } else {
+          show("error-view");
+        }
+      } catch (err) {
+        show("error-view");
+      }
+    }
+
+    function show(id) {
+      ["loading-view", "success-view", "error-view", "notoken-view"].forEach(v => {
+        document.getElementById(v).classList.add("hidden");
+      });
+      document.getElementById(id).classList.remove("hidden");
+    }
+
+    document.getElementById("resend-btn").addEventListener("click", async () => {
+      const email = document.getElementById("resend-email").value.trim();
+      const resendError = document.getElementById("resend-error");
+      const resendBtn = document.getElementById("resend-btn");
+      resendError.classList.add("hidden");
+
+      if (!email) {
+        resendError.textContent = "Введите email";
+        resendError.classList.remove("hidden");
+        return;
+      }
+
+      resendBtn.disabled = true;
+      resendBtn.textContent = "Отправляем...";
+
+      try {
+        await fetch("/api/auth/resend-verification", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email })
+        });
+        // Всегда показываем успех (не раскрываем существование аккаунта)
+        document.getElementById("resend-form").classList.add("hidden");
+        document.getElementById("resend-success").classList.remove("hidden");
+      } catch (err) {
+        resendError.textContent = "Ошибка соединения. Попробуйте позже.";
+        resendError.classList.remove("hidden");
+        resendBtn.disabled = false;
+        resendBtn.textContent = "Отправить повторно";
+      }
+    });
+
+    verify();
+  </script>
+</body>
+</html>

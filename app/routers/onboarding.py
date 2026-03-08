@@ -4,10 +4,13 @@
 """
 
 import hashlib
+import ipaddress
 import json
 import logging
+import secrets
 import uuid
 from datetime import datetime, timedelta
+from urllib.parse import urlparse
 
 import httpx
 import jwt
@@ -18,6 +21,7 @@ from slowapi.util import get_remote_address
 
 from app.config import get_settings
 from app.services.auth import hash_password, JWT_ALGO
+from app.clients.email import send_verification_email
 
 logger = logging.getLogger(__name__)
 
@@ -81,6 +85,34 @@ async def _get_pool():
         return _pool
     except Exception:
         return None
+
+
+def _validate_iiko_url(url: str) -> bool:
+    """
+    Проверяет, что URL безопасен для запроса (защита от SSRF).
+    Разрешены только http/https, блокируются приватные и loopback адреса.
+    """
+    try:
+        parsed = urlparse(url)
+    except Exception:
+        return False
+
+    if parsed.scheme not in ("http", "https"):
+        return False
+
+    host = parsed.hostname
+    if not host:
+        return False
+
+    # Блокируем приватные / loopback / link-local IP (AWS metadata и др.)
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            return False
+    except ValueError:
+        pass  # Это домен, а не IP — ок
+
+    return True
 
 
 def _calculate_pricing(branches_count: int, cities_count: int, modules: list[str], period: str) -> dict:
@@ -147,6 +179,9 @@ async def check_email(req: CheckEmailRequest, request: Request):
 async def test_iiko_connection(req: IikoTestRequest, request: Request):
     """Тест подключения к iiko BO (публичный, без JWT)."""
     bo_url = req.bo_url.rstrip("/")
+
+    if not _validate_iiko_url(bo_url):
+        raise HTTPException(400, "Недопустимый URL iiko. Используйте корректный адрес сервера")
 
     # SHA1 хеш пароля для API — iiko использует логин как пароль при первом подключении
     # Но для теста нам нужен только логин — iiko BO auth: GET /api/auth?login=LOGIN&pass=SHA1(password)
@@ -387,12 +422,17 @@ async def create_tenant(req: TenantCreateRequest, request: Request):
                 trial_ends = None
 
             # 1. Создаём tenant
+            email_token = secrets.token_urlsafe(32)
+            email_token_expires = now + timedelta(hours=24)
+
             tenant_id = await conn.fetchval(
-                """INSERT INTO tenants (name, slug, email, contact, phone, password_hash, plan, status, trial_ends_at, created_at, updated_at)
-                   VALUES ($1, $2, $3, $4, $5, $6, 'base', $7, $8, now(), now())
+                """INSERT INTO tenants (name, slug, email, contact, phone, password_hash, plan, status,
+                       trial_ends_at, email_verified, email_token, email_token_expires, created_at, updated_at)
+                   VALUES ($1, $2, $3, $4, $5, $6, 'base', $7, $8, false, $9, $10, now(), now())
                    RETURNING id""",
                 req.company_name, slug, req.email, req.contact_name, req.phone,
                 hash_password(req.password), status, trial_ends,
+                email_token, email_token_expires,
             )
 
             # 2. Создаём subscription
@@ -468,11 +508,18 @@ async def create_tenant(req: TenantCreateRequest, request: Request):
         {
             "tenant_id": tenant_id,
             "email": req.email,
+            "token_version": 1,
             "exp": datetime.utcnow() + timedelta(days=30),
         },
         settings.jwt_secret,
         algorithm=JWT_ALGO,
     )
+
+    # Отправляем письмо подтверждения email
+    try:
+        await send_verification_email(req.email, email_token)
+    except Exception as e:
+        logger.warning(f"Failed to send verification email to {req.email}: {e}")
 
     # Уведомляем Артемия
     first_payment_fmt = f"{pricing['first_payment']:,} ₽"

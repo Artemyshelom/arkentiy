@@ -1,7 +1,9 @@
 import json
+import sys
 from datetime import timezone, timedelta
 from pathlib import Path
 from functools import lru_cache
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -60,13 +62,18 @@ class Settings(BaseSettings):
     # ЮKassa
     yukassa_shop_id: str = ""
     yukassa_secret_key: str = ""
-    yukassa_return_url: str = "https://arkentiy.ru"
+    yukassa_return_url: str = "https://arkenty.ru"
 
     # Безопасность
     webhook_secret: str = ""
     jwt_secret: str = ""
     admin_api_key: str = ""  # ключ для /run, /jobs, /backfill
     debug: bool = False
+
+    # Email (Resend)
+    resend_api_key: str = ""
+    email_from: str = "Аркентий <noreply@arkenty.ru>"
+    base_url: str = "https://arkenty.ru"
 
     # OpenClaw AI (@ mention обработчик)
     openclaw_enabled: bool = False
@@ -85,6 +92,22 @@ class Settings(BaseSettings):
     # Приложение
     log_level: str = "INFO"
     database_url: str = ""  # DATABASE_URL env var (postgresql://...)
+
+    @model_validator(mode="after")
+    def validate_critical_secrets(self) -> "Settings":
+        """Блокируем старт если JWT_SECRET не задан или слишком слабый."""
+        _weak = {"changeme", "secret", "password", "12345678901234567890123456789012", "test"}
+        if not self.jwt_secret or len(self.jwt_secret) < 32:
+            print(
+                "FATAL: JWT_SECRET не задан или слишком короткий (минимум 32 символа).\n"
+                "Сгенерируйте: openssl rand -hex 32",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if self.jwt_secret.lower() in _weak:
+            print("FATAL: JWT_SECRET — известное слабое значение. Смените на случайную строку.", file=sys.stderr)
+            sys.exit(1)
+        return self
 
     @property
     def competitor_sheets(self) -> dict[str, str]:

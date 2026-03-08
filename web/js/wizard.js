@@ -797,9 +797,11 @@ async function submitPayment() {
 
       const resp = await fetch("/api/invoices/create", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${localStorage.getItem("arkentiy_token")}`,
+        },
         body: JSON.stringify({
-          tenant_id: data.tenant_id,
           amount,
           inn: d.inn || "",
           legal_name: d.legalName || "",
@@ -822,9 +824,11 @@ async function submitPayment() {
   try {
     const resp = await fetch("/api/payments/create", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${localStorage.getItem("arkentiy_token")}`,
+      },
       body: JSON.stringify({
-        tenant_id: data.tenant_id,
         amount,
         description: `Подписка Аркентий — ${wizardData.company}`,
       }),

@@ -12,29 +12,18 @@ from typing import Optional
 
 import httpx
 import jwt
-from fastapi import APIRouter, HTTPException, Depends, Header
+from fastapi import APIRouter, HTTPException, Depends, Header, Request
 from pydantic import BaseModel
+from slowapi import Limiter
+from slowapi.util import get_remote_address
 
 from app.config import get_settings
-from app.services.auth import JWT_ALGO, _jwt_secret, hash_password, verify_password
+from app.services.auth import JWT_ALGO, _jwt_secret, hash_password, verify_password, get_tenant_id
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/cabinet", tags=["Cabinet"])
-
-
-def get_tenant_id(authorization: str = Header(None)) -> int:
-    if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid token")
-    token = authorization[7:]
-    try:
-        payload = jwt.decode(token, _jwt_secret(), algorithms=[JWT_ALGO])
-        tenant_id = payload.get("tenant_id")
-        if tenant_id is None:
-            raise HTTPException(401, "Invalid token: tenant_id missing")
-        return int(tenant_id)
-    except jwt.InvalidTokenError:
-        raise HTTPException(401, "Invalid token")
+limiter = Limiter(key_func=get_remote_address)
 
 
 # =====================================================================
@@ -110,24 +99,37 @@ async def _pool():
 # =====================================================================
 
 @router.post("/auth/login")
-async def login(req: LoginRequest):
+@limiter.limit("5/15minutes")
+async def login(req: LoginRequest, request: Request):
     pool = await _pool()
     if pool:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id, name, password_hash, status FROM tenants WHERE email = $1",
+                "SELECT id, name, password_hash, status, email_verified, token_version FROM tenants WHERE email = $1",
                 req.email,
             )
             if row and row["password_hash"]:
                 if row["status"] not in ("active", "trial", "pending_payment"):
                     raise HTTPException(403, "Аккаунт неактивен")
+                # email_verified может быть NULL для старых записей — пропускаем
+                if row["email_verified"] is False:
+                    raise HTTPException(403, detail={
+                        "error": "email_not_verified",
+                        "message": "Подтвердите email для входа. Проверьте почту.",
+                    })
                 if verify_password(req.password, row["password_hash"]):
                     token = jwt.encode(
-                        {"tenant_id": row["id"], "email": req.email,
-                         "exp": datetime.utcnow() + timedelta(days=30)},
+                        {
+                            "tenant_id": row["id"],
+                            "email": req.email,
+                            "token_version": row["token_version"] or 1,
+                            "exp": datetime.utcnow() + timedelta(days=30),
+                        },
                         _jwt_secret(), algorithm=JWT_ALGO,
                     )
                     return {"token": token, "tenant": row["name"]}
+            # Логируем неудачную попытку
+            logger.warning(f"Failed login attempt for email={req.email} ip={request.client.host}")
 
     raise HTTPException(401, "Неверный email или пароль")
 
@@ -867,7 +869,9 @@ async def update_password(data: PasswordUpdate, tenant_id: int = Depends(get_ten
 
         new_hash = hash_password(data.new_password)
         await conn.execute(
-            "UPDATE tenants SET password_hash = $1, updated_at = now() WHERE id = $2",
+            """UPDATE tenants
+               SET password_hash = $1, token_version = token_version + 1, updated_at = now()
+               WHERE id = $2""",
             new_hash, tenant_id,
         )
         await conn.execute(
@@ -876,7 +880,7 @@ async def update_password(data: PasswordUpdate, tenant_id: int = Depends(get_ten
             tenant_id,
         )
 
-    return {"status": "ok"}
+    return {"status": "ok", "message": "Пароль изменён. Войдите заново на других устройствах"}
 
 
 # =====================================================================

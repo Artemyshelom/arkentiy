@@ -33,6 +33,7 @@ from app.webhooks.bitrix import router as bitrix_router
 from app.routers.cabinet import router as cabinet_router
 from app.routers.onboarding import router as onboarding_router
 from app.routers.payments import router as payments_router
+from app.routers.auth import router as auth_router
 
 # Импорт задач
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
@@ -360,8 +361,13 @@ async def rate_limit_handler(request: Request, exc: RateLimitExceeded):
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "https://arkentiy.ru",
-        "https://www.arkentiy.ru",
+        "https://arkenty.ru",
+        "https://www.arkenty.ru",
+        # Аркентий.рф (браузер шлёт Origin в punycode для IDN доменов)
+        "https://аркентий.рф",
+        "https://www.аркентий.рф",
+        "https://xn--e1afkbrcdl.xn--p1ai",
+        "https://www.xn--e1afkbrcdl.xn--p1ai",
         "http://localhost:8000",
     ],
     allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
@@ -371,6 +377,7 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(bitrix_router, prefix="/webhook")
+app.include_router(auth_router)
 app.include_router(cabinet_router)
 app.include_router(onboarding_router)
 app.include_router(payments_router)

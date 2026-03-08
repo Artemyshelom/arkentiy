@@ -11,8 +11,9 @@ set_chat_avatars.py — установить аватарки бота во вс
 import argparse
 import asyncio
 import logging
+import os
 
-from app.database_pg import init_pool, get_all_tenant_chats
+from app.database_pg import init_db, get_all_tenant_chats
 from app.services.access_manager import set_chat_avatar, AVATAR_MAP
 
 logging.basicConfig(
@@ -24,7 +25,10 @@ logger = logging.getLogger("set_chat_avatars")
 
 
 async def run(tenant_id: int) -> None:
-    await init_pool()
+    db_url = os.environ.get("DATABASE_URL", "")
+    if not db_url:
+        raise RuntimeError("DATABASE_URL не задан")
+    await init_db(db_url)
     chats = await get_all_tenant_chats(tenant_id)
 
     if not chats:

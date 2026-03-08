@@ -187,6 +187,23 @@ async def _send_with_keyboard(chat_id: int, text: str, keyboard: list) -> None:
         logger.error(f"analytics_bot _send_with_keyboard: {e}")
 
 
+async def _send_return_id(chat_id: int, text: str) -> int | None:
+    """Отправляет простое сообщение, возвращает message_id."""
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{_bot_url()}/sendMessage",
+                json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            )
+            data = r.json()
+            if data.get("ok"):
+                return data["result"]["message_id"]
+            logger.error(f"analytics_bot _send_return_id: {r.text[:200]}")
+    except Exception as e:
+        logger.error(f"analytics_bot _send_return_id: {e}")
+    return None
+
+
 async def _send_with_keyboard_return_id(chat_id: int, text: str, keyboard: list) -> int | None:
     """Отправляет сообщение с inline-клавиатурой, возвращает message_id."""
     try:
@@ -698,6 +715,9 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         await _send(chat_id, f"❌ «{display}» не найдено.\n\nДоступные точки:\n{names}")
         return
 
+    # Немедленный ответ — пользователь видит реакцию сразу, без ожидания OLAP
+    placeholder_id = await _send_return_id(chat_id, "⏳ Собираю данные...")
+
     # OLAP один раз на весь запрос — не N раз на каждую ветку
     all_branches_for_olap = get_available_branches()
     tz_first = _branch_tz(filtered[0]) if filtered else None
@@ -732,7 +752,11 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
         data = results[0]
         card_text = format_branch_status(data)
         refresh_kb = [[{"text": "🔄 Обновить", "callback_data": f"stat:refresh:{data['name']}"}]]
-        msg_id = await _send_with_keyboard_return_id(chat_id, card_text, refresh_kb)
+        if placeholder_id:
+            await _edit_message(chat_id, placeholder_id, card_text, refresh_kb)
+            msg_id = placeholder_id
+        else:
+            msg_id = await _send_with_keyboard_return_id(chat_id, card_text, refresh_kb)
         if msg_id:
             if len(_status_cache) >= _STATUS_CACHE_MAX:
                 del _status_cache[next(iter(_status_cache))]
@@ -747,7 +771,11 @@ async def _handle_status(chat_id: int, arg: str, city_filter: str | None = None)
     # Несколько точек — сводка
     branches_data = {d["name"]: d for d in results}
     summary_text, summary_kb = _build_status_summary(list(results))
-    msg_id = await _send_with_keyboard_return_id(chat_id, summary_text, summary_kb)
+    if placeholder_id:
+        await _edit_message(chat_id, placeholder_id, summary_text, summary_kb)
+        msg_id = placeholder_id
+    else:
+        msg_id = await _send_with_keyboard_return_id(chat_id, summary_text, summary_kb)
     if msg_id:
         if len(_status_cache) >= _STATUS_CACHE_MAX:
             del _status_cache[next(iter(_status_cache))]

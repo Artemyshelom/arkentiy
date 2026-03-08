@@ -2468,101 +2468,106 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
         # Проверяем модуль для команды
         required_module = _CMD_MODULE.get(cmd)
         if required_module and not perms.has(required_module):
+            await _send(chat_id, "🚫 Нет доступа к этой команде.")
             continue
 
         city = perms.city  # None = все города, иначе фильтруем
 
-        if cmd in ("статус", "status"):
-            await _handle_status(chat_id, arg, city_filter=city)
-        elif cmd in ("повара", "cooks"):
-            await _handle_staff(chat_id, arg, "cook", city_filter=city)
-        elif cmd in ("курьеры", "couriers"):
-            await _handle_staff(chat_id, arg, "courier", city_filter=city)
-        elif cmd in ("поиск", "search"):
-            await _handle_search(chat_id, arg, city_filter=city)
-        elif cmd in ("отчёт", "отчет", "report"):
-            await _handle_day(chat_id, arg, city_filter=city)
-        elif cmd in ("точные", "exact"):
-            await _handle_exact_orders(chat_id, arg, city_filter=city)
-        elif cmd in ("опоздания", "late"):
-            await _handle_late(chat_id, arg, city_filter=city)
-        elif cmd in ("самовывоз", "pickup"):
-            await _handle_pickup(chat_id, arg, city_filter=city)
-        elif cmd in ("смены", "payment_changes"):
-            await _handle_payment_changes(chat_id, arg, city_filter=city)
-        elif cmd in ("тишина", "mute"):
-            await _handle_mute(chat_id, arg, user_id=user_id)
-        elif cmd in ("аудит", "audit"):
-            from app.jobs.audit import handle_audit_command
-            await handle_audit_command(chat_id, arg, city_filter=city)
-        elif cmd in ("выгрузка", "export"):
-            from app.jobs.marketing_export import run_export
-            await run_export(chat_id, arg, _bot_url())
-        elif cmd in ("доступ", "access"):
-            await access_manager.handle_command(chat_id, user_id)
-        elif cmd == "ai" and perms.is_admin:
-            if arg.lower() == "on":
-                _openclaw_enabled = True
-                await _send(chat_id, "✅ AI включён (@ mention активен).")
-            elif arg.lower() == "off":
-                _openclaw_enabled = False
-                await _send(chat_id, "🔕 AI выключен до рестарта или <code>/ai on</code>.")
-            else:
-                status = "включён ✅" if _openclaw_enabled else "выключен 🔕"
-                await _send(chat_id, f"🤖 AI сейчас: {status}\n\n/ai on — включить\n/ai off — выключить")
-        elif cmd in ("конкуренты", "competitors"):
-            await _send(chat_id, "⏳ Обновляю таблицы конкурентов...")
-            try:
-                from app.jobs.competitor_sheets import export_all_competitors_to_sheets
-                await export_all_competitors_to_sheets()
-                await _send(chat_id, "✅ Таблицы конкурентов обновлены.")
-            except Exception as e:
-                logger.error(f"[/конкуренты] Ошибка: {e}", exc_info=True)
-                await _send(chat_id, f"❌ Ошибка при обновлении: {e}")
-        elif cmd == "jobs" and perms.is_admin:
-            from app.utils.job_tracker import get_jobs_status
-            from datetime import timezone as _tz
-            try:
-                jobs = await get_jobs_status()
-                msk = datetime.now(timezone.utc).astimezone(
-                    __import__("datetime").timezone(__import__("datetime").timedelta(hours=3))
-                )
-                lines = ["📊 <b>Scheduled Jobs</b>\n"]
-                for j in jobs:
-                    status = j["status"]
-                    if status == "running":
-                        emoji = "⏳"
-                    elif status == "ok":
-                        emoji = "✅"
-                    elif status == "error":
-                        emoji = "❌"
-                    elif status == "never":
-                        emoji = "🔘"
-                    else:
-                        emoji = "❓"
-                    lines.append(f"{emoji} <b>{j['name']}</b>")
-                    if status == "never":
-                        lines.append("   никогда не запускался")
-                    elif j["started_at"]:
-                        import datetime as _dt_mod
-                        msk_offset = _dt_mod.timezone(_dt_mod.timedelta(hours=3))
-                        started_msk = j["started_at"].astimezone(msk_offset)
-                        time_str = started_msk.strftime("%d.%m %H:%M")
-                        if j["duration_sec"] is not None:
-                            dur = j["duration_sec"]
-                            dur_str = f"{dur} сек" if dur < 60 else f"{dur // 60} мин {dur % 60} сек"
-                            lines.append(f"   {time_str} · {dur_str}")
+        try:
+            if cmd in ("статус", "status"):
+                await _handle_status(chat_id, arg, city_filter=city)
+            elif cmd in ("повара", "cooks"):
+                await _handle_staff(chat_id, arg, "cook", city_filter=city)
+            elif cmd in ("курьеры", "couriers"):
+                await _handle_staff(chat_id, arg, "courier", city_filter=city)
+            elif cmd in ("поиск", "search"):
+                await _handle_search(chat_id, arg, city_filter=city)
+            elif cmd in ("отчёт", "отчет", "report"):
+                await _handle_day(chat_id, arg, city_filter=city)
+            elif cmd in ("точные", "exact"):
+                await _handle_exact_orders(chat_id, arg, city_filter=city)
+            elif cmd in ("опоздания", "late"):
+                await _handle_late(chat_id, arg, city_filter=city)
+            elif cmd in ("самовывоз", "pickup"):
+                await _handle_pickup(chat_id, arg, city_filter=city)
+            elif cmd in ("смены", "payment_changes"):
+                await _handle_payment_changes(chat_id, arg, city_filter=city)
+            elif cmd in ("тишина", "mute"):
+                await _handle_mute(chat_id, arg, user_id=user_id)
+            elif cmd in ("аудит", "audit"):
+                from app.jobs.audit import handle_audit_command
+                await handle_audit_command(chat_id, arg, city_filter=city)
+            elif cmd in ("выгрузка", "export"):
+                from app.jobs.marketing_export import run_export
+                await run_export(chat_id, arg, _bot_url())
+            elif cmd in ("доступ", "access"):
+                await access_manager.handle_command(chat_id, user_id)
+            elif cmd == "ai" and perms.is_admin:
+                if arg.lower() == "on":
+                    _openclaw_enabled = True
+                    await _send(chat_id, "✅ AI включён (@ mention активен).")
+                elif arg.lower() == "off":
+                    _openclaw_enabled = False
+                    await _send(chat_id, "🔕 AI выключен до рестарта или <code>/ai on</code>.")
+                else:
+                    status = "включён ✅" if _openclaw_enabled else "выключен 🔕"
+                    await _send(chat_id, f"🤖 AI сейчас: {status}\n\n/ai on — включить\n/ai off — выключить")
+            elif cmd in ("конкуренты", "competitors"):
+                await _send(chat_id, "⏳ Обновляю таблицы конкурентов...")
+                try:
+                    from app.jobs.competitor_sheets import export_all_competitors_to_sheets
+                    await export_all_competitors_to_sheets()
+                    await _send(chat_id, "✅ Таблицы конкурентов обновлены.")
+                except Exception as e:
+                    logger.error(f"[/конкуренты] Ошибка: {e}", exc_info=True)
+                    await _send(chat_id, f"❌ Ошибка при обновлении: {e}")
+            elif cmd == "jobs" and perms.is_admin:
+                from app.utils.job_tracker import get_jobs_status
+                from datetime import timezone as _tz
+                try:
+                    jobs = await get_jobs_status()
+                    msk = datetime.now(timezone.utc).astimezone(
+                        __import__("datetime").timezone(__import__("datetime").timedelta(hours=3))
+                    )
+                    lines = ["📊 <b>Scheduled Jobs</b>\n"]
+                    for j in jobs:
+                        status = j["status"]
+                        if status == "running":
+                            emoji = "⏳"
+                        elif status == "ok":
+                            emoji = "✅"
+                        elif status == "error":
+                            emoji = "❌"
+                        elif status == "never":
+                            emoji = "🔘"
                         else:
-                            lines.append(f"   {time_str} · выполняется…")
-                        if status == "error" and j["error"]:
-                            lines.append(f"   💥 {j['error'][:80]}")
-                    lines.append("")
-                await _send(chat_id, "\n".join(lines))
-            except Exception as e:
-                logger.error(f"[/jobs] Ошибка: {e}", exc_info=True)
-                await _send(chat_id, f"❌ Ошибка: {e}")
-        elif required_module is None:
-            await _send(chat_id, f"❓ Неизвестная команда: /{cmd}\n\nНапиши /помощь")
+                            emoji = "❓"
+                        lines.append(f"{emoji} <b>{j['name']}</b>")
+                        if status == "never":
+                            lines.append("   никогда не запускался")
+                        elif j["started_at"]:
+                            import datetime as _dt_mod
+                            msk_offset = _dt_mod.timezone(_dt_mod.timedelta(hours=3))
+                            started_msk = j["started_at"].astimezone(msk_offset)
+                            time_str = started_msk.strftime("%d.%m %H:%M")
+                            if j["duration_sec"] is not None:
+                                dur = j["duration_sec"]
+                                dur_str = f"{dur} сек" if dur < 60 else f"{dur // 60} мин {dur % 60} сек"
+                                lines.append(f"   {time_str} · {dur_str}")
+                            else:
+                                lines.append(f"   {time_str} · выполняется…")
+                            if status == "error" and j["error"]:
+                                lines.append(f"   💥 {j['error'][:80]}")
+                        lines.append("")
+                    await _send(chat_id, "\n".join(lines))
+                except Exception as e:
+                    logger.error(f"[/jobs] Ошибка: {e}", exc_info=True)
+                    await _send(chat_id, f"❌ Ошибка: {e}")
+            elif required_module is None:
+                await _send(chat_id, f"❓ Неизвестная команда: /{cmd}\n\nНапиши /помощь")
+        except Exception as _cmd_exc:
+            logger.error(f"[/{cmd}] unhandled error: {_cmd_exc}", exc_info=True)
+            await _send(chat_id, f"❌ Ошибка при выполнении /{cmd}. Подробности в логах.")
 
 
 async def run_polling_loop(bot_token: str = "", tenant_id: int = 1) -> None:

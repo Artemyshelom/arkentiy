@@ -1835,6 +1835,8 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         name = html.escape(_parse_customer_name(r["customer_raw"]) or "—")
         phone = html.escape(_parse_customer_phone(r["customer_raw"]) or "—")
         status_str = _human_status_rt(r["status"], r["cooking"])
+        m = int(r["overdue_min"])
+        ico = "🟡" if m < 30 else ("🔴" if m < 60 else "🆘")
         address_part = ""
         if r.get("address"):
             address_part = f"\n  📍 {html.escape(r['address'])}"
@@ -1842,7 +1844,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         if r["status"] == "В пути к клиенту" and r["courier"]:
             courier_part = f"\n  🛵 {html.escape(r['courier'])}"
         lines.append(
-            f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
+            f"{ico} <b>+{m} мин</b> | #{r['num']}"
             f" | {html.escape(r['branch'])}\n"
             f"  👤 {name} | 📞 <code>{phone}</code>"
             + address_part
@@ -1921,8 +1923,10 @@ async def _handle_pickup(chat_id: int, arg: str, city_filter=None) -> None:
         name = html.escape(_parse_customer_name(r["customer_raw"]) or "—")
         phone = html.escape(_parse_customer_phone(r["customer_raw"]) or "—")
         status_str = _human_status_rt(r["status"], r["cooking"])
+        m = int(r["overdue_min"])
+        ico = "🟡" if m < 30 else ("🔴" if m < 60 else "🆘")
         lines.append(
-            f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
+            f"{ico} <b>+{m} мин</b> | #{r['num']}"
             f" | {html.escape(r['branch'])}\n"
             f"  👤 {name} | 📞 <code>{phone}</code>\n"
             f"  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"

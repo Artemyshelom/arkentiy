@@ -55,14 +55,14 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
                 END)                                               AS avg_cook_time,
 
                 AVG(CASE
-                    WHEN ready_time  IS NOT NULL AND ready_time  != ''
+                    WHEN send_time   IS NOT NULL AND send_time   != ''
                          AND cooked_time IS NOT NULL AND cooked_time != ''
                          AND EXTRACT(EPOCH FROM (
-                                 REPLACE(SUBSTR(ready_time, 1, 19), 'T', ' ')::timestamp
+                                 REPLACE(SUBSTR(send_time, 1, 19), 'T', ' ')::timestamp
                                  - cooked_time::timestamp
                              )) / 60 BETWEEN 0 AND 120
                     THEN EXTRACT(EPOCH FROM (
-                                 REPLACE(SUBSTR(ready_time, 1, 19), 'T', ' ')::timestamp
+                                 REPLACE(SUBSTR(send_time, 1, 19), 'T', ' ')::timestamp
                                  - cooked_time::timestamp
                              )) / 60
                 END)                                               AS avg_courier_wait,

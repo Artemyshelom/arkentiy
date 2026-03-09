@@ -212,151 +212,53 @@ docker compose logs app --tail=15
 
 ## 4. Бэкфилл исторических данных
 
-**Три бэкфилла (делаются в порядке 1→2→3):**
-1. `daily_stats` — выручка, скидки, COGS (из OLAP v2)
-2. `orders_raw` — заказы, блюда, курьеры, время (5 фаз из OLAP v2)
-3. Вычисление времён (avg_cooking_min, avg_wait_min, avg_delivery_min) — из orders_raw в daily_stats
+Скрипты: `app/onboarding/` — подробнее см. [app/onboarding/README.md](../../app/onboarding/README.md).
 
----
-
-### 4A. Бэкфилл `daily_stats` (выручка + скидки из OLAP)
-
-Заполняет таблицу `daily_stats` — используется в `/отчёт`, `/статус`, утренних отчётах.
-
-**Скрипт:** `app/onboarding/backfill_daily_stats_generic.py` — **generic для любого tenant'а**.
-
-**Что заполняется:**
-- Выручка (DishDiscountSumInt.withoutVAT)
-- COGS % (ProductCostBase.Percent)
-- Кол-во чеков (UniqOrderId.OrdersCount)
-- Сумма скидок (DiscountSum)
-- Самовывоз (по Delivery.ServiceType)
-
-**Запуск:**
+### Полный бэкфилл (новый клиент)
 
 ```bash
-# На VPS
-ssh arkentiy "cd /opt/ebidoebi && docker compose exec app \
-  python -m app.onboarding.backfill_daily_stats_generic \
-    --tenant-id 3 \
-    --date-from 2025-02-01 \
-    --date-to 2026-03-01 \
-  2>&1 | tee /opt/ebidoebi/logs/backfill_daily_stats_tenant3.log"
+ssh arkentiy
+screen -S bf_tenantN   # Ctrl+A,D — выйти; screen -r bf_tenantN — вернуться
+
+docker compose exec app python -m app.onboarding.backfill_new_client \
+    --tenant-id N \
+    --date-from YYYY-MM-DD \
+    --date-to YYYY-MM-DD \
+    [--skip-cities "НазваниеГорода"]
 ```
 
-**ETA:** ~10 минут за месяц (2 OLAP запроса в день × 30 дней).
+Порядок шагов внутри автоматический: orders_raw → daily OLAP → daily timing → shifts → hourly.
 
-**Возобновляемо:** UPSERT по (tenant_id, branch_name, date), безопасно перезапустить.
+### Дозаполнить часть таблиц
 
----
-
-### 4B. Бэкфилл `orders_raw` (индивидуальные заказы)
-
-Заполняет таблицу `orders_raw` — используется в `/поиск` (по телефону клиента).
-
-**Скрипт:** `app/onboarding/backfill_orders_generic.py` — **generic для любого tenant'а**.
-
-**5 фаз:** Phase 1 (по дням) → затем Phases 2-5 параллельно
-
-| Фаза | Поле OLAP | Результат | Статус |
-|------|----------|----------|--------|
-| 1 | `Delivery.Number`, `Department`, `Delivery.CustomerPhone`, `Delivery.CancelCause`, `Delivery.ActualTime`, `Delivery.Address`, `Delivery.ServiceType` | core fields: `delivery_num`, `branch_name`, `client_phone`, `sum`, `date`, `actual_time`, `delivery_address`, `is_self_service`, `status`, `cancel_reason` | ✅ |
-| 2 | `Delivery.Number`, `Department`, `DishName` | `items` (JSON с составом) | ✅ |
-| 3 | `Delivery.Number`, `Department`, `WaiterName` | `courier` (имя курьера) | ✅ |
-| 4 | `Delivery.Number`, `Department`, `Delivery.ExpectedTime` | `planned_time` (плановое время доставки) | ✅ |
-| 5 | `Delivery.Number`, `Department`, `Delivery.CustomerName` | `client_name` (имя клиента, пропускаем GUEST*) | ✅ |
-
-**Для нового клиента — меняем только параметры:**
 ```bash
-python -m app.onboarding.backfill_orders_generic \
-  --tenant-id 3 \
-  --date-from 2025-02-01 \
-  --date-to 2026-03-01 \
-  --skip-cities "Ижевск"
+# только shifts + hourly (orders и daily уже есть)
+docker compose exec app python -m app.onboarding.backfill_new_client \
+    --tenant-id N --date-from YYYY-MM-DD --date-to YYYY-MM-DD --steps 4,5
 ```
 
-**⚠️ После бэкфилла — проверить `tenant_id` и заполнение полей:**
+### Диагностика — что уже залито
+
 ```sql
--- Заказы НЕ должны быть с tenant_id=1
-SELECT tenant_id, branch_name, COUNT(*)
-FROM orders_raw
-WHERE branch_name IN ('Ветка_1', 'Ветка_2')
-GROUP BY tenant_id, branch_name;
-
--- Целевые метрики (для успешного бэкфилла):
--- - Все заказы должны иметь tenant_id = N
--- - 100% заказов с составом (items)
--- - ~95-98% с курьером (пропускаются отдельные serve)
--- - 100% с planned_time
--- - ~95-98% с именем (пропускаются анонимные GUEST*)
+SELECT
+  (SELECT MIN(date)||' - '||MAX(date) FROM orders_raw   WHERE tenant_id=N) as orders,
+  (SELECT MIN(date)||' - '||MAX(date) FROM daily_stats  WHERE tenant_id=N) as daily,
+  (SELECT MIN(date)||' - '||MAX(date) FROM shifts_raw   WHERE tenant_id=N) as shifts,
+  (SELECT MIN(hour::date)||' - '||MAX(hour::date) FROM hourly_stats WHERE tenant_id=N) as hourly;
 ```
 
 ---
 
-### 4C. Вычисление времён (avg_cooking_min, avg_wait_min, avg_delivery_min)
-
-После заполнения `orders_raw` → вычисляем времена и обновляем `daily_stats`.
-
-Через Python (безопаснее, вычисляет правильный avg_wait_min):
-```bash
-ssh arkentiy "cd /opt/ebidoebi && docker compose exec app python -c '
-import asyncio
-from datetime import date, timedelta
-from app.database_pg import get_pool, aggregate_orders_for_daily_stats
-
-async def main():
-    pool = get_pool()
-    tenant_id, branch, date_from = 3, \"Канск\", date(2025, 2, 1)
-    
-    for i in range(30):  # 30 дней
-        d = date_from + timedelta(days=i)
-        agg = await aggregate_orders_for_daily_stats(branch, d.isoformat(), tenant_id)
-        await pool.execute(\"UPDATE daily_stats SET avg_cooking_min=\$1, avg_wait_min=\$2, avg_delivery_min=\$3 WHERE tenant_id=\$4 AND branch_name=\$5 AND date=\$6\",
-            agg.get(\"avg_cooking_min\"), agg.get(\"avg_wait_min\"), agg.get(\"avg_delivery_min\"), tenant_id, branch, d)
-
-asyncio.run(main())
-'"
-```
-
-Или через SQL напрямую (если нужны все даты сразу):
-```sql
-UPDATE daily_stats d SET avg_cooking_min = t.avg_cooking_min, avg_wait_min = t.avg_wait_min, avg_delivery_min = t.avg_delivery_min
-FROM (SELECT branch_name, date::text,
-  AVG(CASE WHEN cooked_time != '' AND opened_at != '' AND sum >= 200
-        AND EXTRACT(EPOCH FROM (cooked_time::timestamp - REPLACE(SUBSTR(opened_at,1,19),'T',' ')::timestamp))/60 BETWEEN 1 AND 120
-      THEN EXTRACT(EPOCH FROM ...) END) as avg_cooking_min,
-  -- аналогично для avg_wait_min и avg_delivery_min
-  ...
-FROM orders_raw WHERE tenant_id = 3 AND status != 'Отменена' GROUP BY branch_name, date::text) t
-WHERE d.tenant_id = 3 AND d.branch_name = t.branch_name AND d.date::text = t.date_str;
-```
-
-| Поле | Тип | reportType | Где | Примечание |
-|------|-----|-----------|-----|-----------|
-| `Delivery.CustomerPhone` | measure | SALES | aggregateFields | Работает |
-| `Delivery.CancelCause` | dimension | SALES | groupByRowFields | Null = не отменён |
-| `Delivery.ActualTime` | dimension | SALES | groupByRowFields | Фактическое время |
-| `DishName` | dimension | SALES | groupByRowFields | Для состава (Phase 2) |
-| `WaiterName` | dimension | SALES | groupByRowFields | Курьер доставки (Phase 3) |
-| `Delivery.ExpectedTime` | dimension | **DELIVERIES** | groupByRowFields | Плановое время (Phase 4) |
-| `Delivery.CustomerName` | dimension | **DELIVERIES** | groupByRowFields | Имя клиента, GUEST* = анонимные (Phase 5) |
-
-**⚠️ КРИТИЧЕСКИЕ НЮАНСЫ:**
-- `OpenDate` в `groupByRowFields` → `Delivery.Number` становится NULL на Канске → **НЕ добавлять**
-- `Delivery.ExpectedDeliveryTime` НЕ существует (confusion)
-- `WaiterName` в Phase 1 обнуляет `DishDiscountSumInt` → Phase 3 отдельно
-- `Delivery.CustomerName` может быть "GUEST12345" для анонимов → фильтруем
-
----
-
-### Известные грабли OLAP
+### Известные грабли OLAP (шаги 1-2)
 
 | Ошибка | Причина | Решение |
 |--------|---------|---------|
 | `Delivery.Number` = null | `OpenDate` добавлен в `groupByRowFields` | Убрать `OpenDate` из group fields |
-| `DishDiscountSumInt` = 0 | `WaiterName` добавлен в `OLAP_ORDER_FIELDS` Phase 1 | `WaiterName` → отдельный Phase 3 |
-| Timeout 60s на OLAP v2 | Медленный сервер iiko (Ижевск) | Добавить в `SKIP_CITIES` |
-| `tenant_id=1` в orders_raw | Events API пишет до настройки маппинга | `UPDATE ... SET tenant_id=N` вручную |
+| `DishDiscountSumInt` = 0 | `WaiterName` добавлен в Phase 1 | `WaiterName` живёт в отдельном Phase 3 |
+| Timeout 60s на OLAP v2 | Медленный iiko-сервер (напр. Ижевск) | `--skip-cities "Ижевск"` |
+| `tenant_id=1` в orders_raw | Events API писал до настройки маппинга | `UPDATE orders_raw SET tenant_id=N WHERE ...` |
+
+Подробнее об OLAP-полях → `rules/integrator/iiko_api.md`.
 
 ---
 

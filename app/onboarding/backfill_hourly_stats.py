@@ -131,14 +131,14 @@ class HourlyStatsBackfiller:
 
                 AVG(CASE
                     WHEN actual_time IS NOT NULL AND actual_time != ''
-                         AND opened_at  IS NOT NULL AND opened_at  != ''
+                         AND send_time   IS NOT NULL AND send_time   != ''
                          AND EXTRACT(EPOCH FROM (
                                  REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                                 - REPLACE(SUBSTR(opened_at,  1, 19), 'T', ' ')::timestamp
+                                 - REPLACE(SUBSTR(send_time,  1, 19), 'T', ' ')::timestamp
                              )) / 60 BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                                  REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp
-                                 - REPLACE(SUBSTR(opened_at,  1, 19), 'T', ' ')::timestamp
+                                 - REPLACE(SUBSTR(send_time,  1, 19), 'T', ' ')::timestamp
                              )) / 60
                 END)                                               AS avg_delivery_time
 

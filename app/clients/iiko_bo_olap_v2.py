@@ -417,3 +417,64 @@ async def get_branch_olap_stats(date: datetime, branches: list[dict] | None = No
             merged.update(result)
 
     return merged
+
+
+async def get_discount_breakdown(
+    date_from: str,
+    date_to: str,
+    branches: list[dict] | None = None,
+) -> dict[str, list[dict]]:
+    """
+    Разбивка скидок по типу для каждой точки за период.
+    Использует reportType=DELIVERIES — DiscountSum корректен на уровне заказа (не блюда).
+
+    date_from/date_to в ISO: "2026-03-08" / "2026-03-09" (to exclusive).
+    Возвращает: {"Барнаул_1 Ана": [{"type": "Промокод", "sum": 1200.0}, ...]}
+    """
+    if branches is None:
+        branches = settings.branches
+
+    by_server: dict[tuple, dict] = {}
+    for branch in branches:
+        url = branch.get("bo_url", "")
+        if not url:
+            continue
+        login = branch.get("bo_login") or ""
+        password = branch.get("bo_password") or ""
+        key = (url, login, password)
+        if key not in by_server:
+            by_server[key] = {"names": set(), "login": login or None, "password": password or None}
+        by_server[key]["names"].add(branch["name"])
+
+    result: dict[str, list[dict]] = {}
+
+    async def _fetch(bo_url: str, target_names: set[str], bo_login=None, bo_password=None):
+        try:
+            token = await get_bo_token(bo_url, bo_login=bo_login, bo_password=bo_password)
+            async with httpx.AsyncClient(verify=False) as client:
+                rows = await _query_olap_v2(
+                    bo_url, token,
+                    ["Department", "OrderDiscount.Type"],
+                    ["DiscountSum"],
+                    date_from, date_to, client,
+                    report_type="DELIVERIES",
+                )
+            by_dept: dict[str, list[dict]] = {}
+            for row in rows:
+                dept = row.get("Department", "").strip()
+                if not dept or dept not in target_names:
+                    continue
+                disc_type = (row.get("OrderDiscount.Type") or "").strip()
+                disc_sum = float(row.get("DiscountSum", 0))
+                if disc_type and disc_sum > 0:
+                    by_dept.setdefault(dept, []).append({"type": disc_type, "sum": disc_sum})
+            for dept, items in by_dept.items():
+                result[dept] = sorted(items, key=lambda x: x["sum"], reverse=True)
+        except Exception as e:
+            logger.error(f"get_discount_breakdown [{bo_url}]: {e}")
+
+    await asyncio.gather(*[
+        _fetch(url, srv["names"], srv["login"], srv["password"])
+        for (url, _, __), srv in by_server.items()
+    ])
+    return result

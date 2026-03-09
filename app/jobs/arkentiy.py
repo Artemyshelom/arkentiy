@@ -49,7 +49,7 @@ from app.jobs.iiko_status_report import (
     get_available_branches,
     get_branch_status,
 )
-from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats as _get_olap_stats
+from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats as _get_olap_stats, get_discount_breakdown as _get_discount_breakdown
 from app.utils.timezone import branch_tz as _branch_tz, now_local as _now_local
 from app.jobs.late_alerts import (
     ACTIVE_DELIVERY_STATUSES,
@@ -1353,6 +1353,29 @@ async def _build_branch_report(
             "exact_time_count": ds.get("exact_time_count") or 0,
             "payment_changed_count": ds.get("payment_changed_count") or 0,
         }
+
+    # Обогащаем разбивку скидок через DELIVERIES OLAP (корректный DiscountSum).
+    # agg.discount_types_agg из orders_raw содержит суммы заказов, а не скидок.
+    try:
+        _br_cfg = next((b for b in get_available_branches() if b["name"] == name), None)
+        if _br_cfg:
+            _next_day = (datetime.strptime(date_to, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+            _disc_map = await _get_discount_breakdown(date_from, _next_day, branches=[_br_cfg])
+            _olap_disc = _disc_map.get(name)
+            if _olap_disc:
+                # Счётчик заказов из orders_raw (count корректен, sum — нет)
+                _cnt_by_type = {
+                    d["type"]: d["count"]
+                    for d in agg.get("discount_types_agg", [])
+                    if isinstance(d, dict)
+                }
+                for dt in _olap_disc:
+                    dt["count"] = _cnt_by_type.get(dt["type"], "")
+                agg["discount_types_agg"] = _olap_disc
+                # Пересчитываем discount_sum из корректных OLAP-данных
+                ds["discount_sum"] = round(sum(dt["sum"] for dt in _olap_disc), 2)
+    except Exception as _e:
+        logger.warning(f"[/отчёт] ОЛАП разбивка скидок [{name}]: {_e}")
 
     result = _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
     if is_live:

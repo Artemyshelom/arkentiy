@@ -6,7 +6,7 @@ backfill_orders_generic.py — универсальный бэкфилл orders_
         --tenant-id 3 \
         --date-from 2025-01-01 \
         --date-to 2026-03-03 \
-        --skip-cities "Ижевск,Зеленогорск"
+        --skip-cities "Город1,Город2"
 
 Phase 1 — DELIVERIES per-order (weekly, resumable):
   Заполняет: все поля заказа (мобильник, тайминги, оплата, скидка, planned_time, client_name).

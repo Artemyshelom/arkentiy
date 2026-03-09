@@ -60,6 +60,16 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+async def init_pool_only(database_url: str) -> None:
+    """Инициализирует пул соединений без применения миграций.
+
+    Используется в backfill-скриптах, где БД уже содержит актуальную схему.
+    """
+    global _pool
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
+    logger.info("PostgreSQL pool создан (без миграций)")
+
+
 # =====================================================================
 # iiko_tokens
 # =====================================================================

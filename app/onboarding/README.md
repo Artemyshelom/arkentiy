@@ -6,28 +6,62 @@
 
 | Скрипт | Что делает | Когда запускать |
 |--------|-----------|----------------|
-| `backfill_orders_generic.py` | Заполняет `orders_raw` — 2 фазы (DELIVERIES + SALES dishes) | При онбординге нового клиента |
-| `backfill_daily_stats_generic.py` | Заполняет `daily_stats` — daily через Query C | При онбординге или пересчёте cash/noncash |
-| `backfill_hourly_stats.py` | Заполняет `hourly_stats` — почасовая аналитика | При онбординге нового клиента |
+| `backfill_new_client.py` | **Мастер-скрипт**: 4 шага последовательно (orders_raw + daily_stats + timing + hourly_stats) | Основной инструмент при онбординге |
+| `backfill_orders_generic.py` | Заполняет `orders_raw` — 2 фазы (DELIVERIES + SALES dishes) | Если нужно только orders_raw |
+| `backfill_daily_stats_generic.py` | Заполняет `daily_stats` — daily через Query C (только OLAP-поля) | Если нужно только пересчитать revenue/cash/noncash |
+| `backfill_hourly_stats.py` | Заполняет `hourly_stats` — почасовая аналитика | Если нужно только hourly_stats |
 | `set_chat_avatars.py` | Устанавливает аватарки чатам из iiko | Разово при подключении |
 
-## Как запускать
+## Как запускать (новый клиент — быстрый старт)
 
 ```bash
-# backfill orders_raw (Phase 1: DELIVERIES + Phase 2: SALES dishes)
+# Полный бэкфилл нового клиента (все 4 шага)
+python -m app.onboarding.backfill_new_client \
+    --tenant-id 5 \
+    --date-from 2026-01-01 \
+    --date-to 2026-03-10
+
+# Если iiko-сервер одного из городов недоступен — исключить его
+python -m app.onboarding.backfill_new_client \
+    --tenant-id 5 \
+    --date-from 2026-01-01 \
+    --date-to 2026-03-10 \
+    --skip-cities "Город1,Город2"
+
+# Запустить только отдельные шаги
+python -m app.onboarding.backfill_new_client \
+    --tenant-id 1 \
+    --date-from 2026-01-01 \
+    --date-to 2026-03-10 \
+    --steps 3,4
+```
+
+### Шаги backfill_new_client
+
+| Шаг | Источник | Таблица | Поля |
+|-----|---------|---------|------|
+| 1 | iiko OLAP | `orders_raw` | все поля заказов + блюда |
+| 2 | iiko OLAP | `daily_stats` | revenue, cogs_pct, cash, noncash, pickup_count, discount_sum |
+| 3 | orders_raw (БД) | `daily_stats` | avg_cooking_min, avg_delivery_min, late_*, exact_time_count, new/repeat customers |
+| 4 | orders_raw + shifts_raw (БД) | `hourly_stats` | почасовая аналитика |
+
+Прогресс шагов 1 и 4 сохраняется в `/app/data/` — скрипты возобновляемы после падения.
+
+## Индивидуальный запуск скриптов
+
+```bash
+# Только orders_raw (Фаза 1: DELIVERIES + Фаза 2: SALES dishes)
 python -m app.onboarding.backfill_orders_generic \
     --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
 
-# backfill daily_stats (выручка, COGS, cash/noncash, самовывоз)
+# Только daily_stats (выручка, COGS, cash/noncash, самовывоз)
 python -m app.onboarding.backfill_daily_stats_generic \
     --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
 
-# backfill hourly_stats
+# Только hourly_stats
 python -m app.onboarding.backfill_hourly_stats \
     --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
 ```
-
-Прогресс сохраняется в `/tmp/<hash>.json` — скрипт возобновляем после падения.
 
 ## Архив
 

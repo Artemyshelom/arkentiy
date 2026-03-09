@@ -18,7 +18,73 @@
 
 ---
 
+## Сессия 75 — 9 марта 2026 (fix: Ижевск offboarding + аудит данных + порядок в docs) ✅
+
+**Контекст:** После деплоя 9 марта обнаружено что Ижевск (is_active=false в БД) продолжает опрашиваться Events API и копить мусорные строки в orders_raw / shifts_raw. Также накопились выполненные ТЗ в specs/, устаревшие упоминания Ижевска в коде.
+
+### 1. fix: Ижевск offboarding (root cause найден и устранён)
+
+**Корневая причина:** Migration 004 при каждом рестарте контейнера выполнял INSERT с `ON CONFLICT DO NOTHING` для `iiko_credentials` и `DO UPDATE SET is_active = true` для `tenant_chats` Ижевска. Контейнер работал с кешем где Ижевск есть — рестарт убирал его из кеша, но migration снова мог его вернуть (через tenant_chats).
+
+**Исправления:**
+- `app/migrations/004_shaburov_onboarding.sql`:
+  - `iiko_credentials` Ижевск: `is_active=false` + `ON CONFLICT DO UPDATE SET is_active=false`
+  - `tenant_chats` Ижевск: `is_active=false` + `ON CONFLICT DO UPDATE SET is_active=false`
+
+**Очистка БД** (в транзакции):
+- `orders_raw`: удалено 149 строк Ижевска
+- `shifts_raw`: удалено 5 строк Ижевска
+- `hourly_stats`: удалена 1 строка Ижевска
+- `shifts_raw`: удалено 29 cross-tenant строк (Зеленогорск/Канск в tenant_id=1, от старого olap_enrichment)
+
+**Деплой:** `git 75f7aed` — контейнер стартовал чисто, первый тик 20:56 UTC+3 без Ижевска.
+
+### 2. fix: Ижевск в коде (примеры CLI)
+
+- `app/onboarding/backfill_new_client.py` — `--skip-cities "Ижевск,Красноярск"` → `"Город1,Город2"`
+- `app/onboarding/backfill_orders_generic.py` — аналогично
+
+### 3. Порядок в docs
+
+Выполненные ТЗ перемещены в `docs/archive/specs_done/`:
+- `specs/fix_late_queries.md` → архив (реализовано сессия ~65)
+- `specs/tg/search_v2.md`, `status_v2.md`, `tbank_reconciliation.md` → архив (status: done)
+- `specs/web/WEB_PLATFORM_COMPLETION.md` → архив (итоговый отчёт, не spec)
+
+### 4. Документация offboarding
+
+Создан `docs/onboarding/offboarding_city.md` — протокол отключения города:
+- 6-шаговый чеклист (БД → migration → рестарт → очистка → docs)
+- Секция «что НЕ делать» с объяснением ловушки с migration
+- Разбор кейса Ижевска как примера
+
+### 5. Аудит данных — реестр покрытия 09.03.2026
+
+Добавлено в `docs/onboarding/registry.md`:
+- Обновлены данные Шабурова: 2 активных города вместо 3
+- Добавлены проблемы #7 (Ижевск мусор) и #8 (cross-tenant pollution)
+- Добавлен раздел «Покрытие данных» с таблицами по всем 4 таблицам для T1 и T3
+
+**Ключевые выводы аудита:**
+- T1 `orders_raw`: полные с 2025-01-01, discount_sum = 0 (нужен бэкфилл)
+- T1 `daily_stats`: с 2024-12-01, cash/noncash только с 2026-01-01, new_customers ≈ 0
+- T1/T3 `hourly_stats`: с 2025-12-01, покрытие 94-98%
+- T3 `has_lates` в hourly_stats: ~5% (аномалия, нужно расследование planned_time)
+- Shifts_raw: T1 с 2026-02-21, T3 с 2026-03-02
+
+### Файлы изменены
+- `app/migrations/004_shaburov_onboarding.sql` — Ижевск is_active=false идемпотентно
+- `app/onboarding/backfill_new_client.py` — убраны конкретные города в примерах
+- `app/onboarding/backfill_orders_generic.py` — аналогично
+- `docs/onboarding/offboarding_city.md` — создан
+- `docs/onboarding/registry.md` — обновлено покрытие, статус Шабурова
+- `docs/onboarding/protocol.md` — ссылка на offboarding_city.md
+- `docs/archive/specs_done/` — 5 выполненных ТЗ перемещены
+
+---
+
 ## Сессия 74 — март 2026 (refactor: консолидация OLAP → единый пайплайн) ✅
+
 
 **Контекст:** ~15 разных OLAP-запросов в 5+ файлах. cancel_sync опрашивал iiko каждые 3 мин. olap_enrichment делал отдельные запросы в add. В итоге ~496 OLAP запросов/сутки вместо необходимых 10–12.
 

@@ -5,9 +5,19 @@
 | Параметр | Значение |
 |----------|---------|
 | IP | `5.42.98.2` (Timeweb Cloud, Ubuntu 24.04, 1 vCPU 2GB) |
-| SSH | `ssh -i ~/.ssh/artemii_vps root@5.42.98.2` |
+| SSH алиас | `ssh arkentiy` (в ~/.ssh/config → root@5.42.98.2) |
+| SSH прямой | `ssh -i ~/.ssh/cursor_arkentiy_vps root@5.42.98.2` |
 | Проект | `/opt/ebidoebi/` |
 | Стек | Python 3.11, FastAPI, APScheduler, PostgreSQL, Docker |
+
+## Тенанты (мультитенант)
+
+| tenant_id | Клиент | Города |
+|-----------|--------|--------|
+| 1 | Артемий (Ёбидоёби) | Барнаул (4), Абакан (2), Томск (2), Черногорск (1) |
+| 3 | Шабуров | Канск, Зеленогорск (Ижевск is_active=false) |
+
+Конфиг точек — в таблице `iiko_credentials` (не в `branches.json`).
 
 ## Google Service Account
 

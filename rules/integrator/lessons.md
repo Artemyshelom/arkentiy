@@ -37,62 +37,9 @@ EXTRACT(EPOCH FROM (
 
 ---
 
-## ~~🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2 (Phase 1–5)~~ ⚠️ УСТАРЕЛО
+## ~~🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2~~ ⚠️ АРХИВ
 
-> **Обновлено в сессии 74:** `backfill_orders_generic.py` теперь 2 фазы (было 5).
-> Phase 1 = DELIVERIES (16 полей, нед. чанки). Phase 2 = SALES dishes+courier (нед. чанки).
-> Актуальная документация: `rules/integrator/olap_pipeline.md`
-
-## 🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2 (Phase 1–5) — АРХИВ
-
-**Контекст:** Онбординг Шабурова (tenant_id=3, март 2026). `orders_raw` должна содержать полные данные для `/поиск`.
-
-**Архитектура:** 5 независимых фаз (можно запускать по отдельности), каждая обогащает `orders_raw`:
-
-| Фаза | OLAP поле | Результат | Логика |
-|------|-----------|----------|--------|
-| **1** | `Delivery.Number`, `Department`, `Delivery.CustomerPhone`, `Delivery.CancelCause`, `Delivery.ActualTime`, `Delivery.Address`, `Delivery.ServiceType` | core: delivery_num, branch_name, client_phone, sum, date, actual_time, delivery_address, is_self_service, status, cancel_reason | Идёт по дням (возобновляемо), `SALES` |
-| **2** | `Delivery.Number`, `Department`, `DishName` | items (JSON блюд) | Идёт по неделям, UPDATE только NULL, `SALES` |
-| **3** | `Delivery.Number`, `Department`, `WaiterName` | courier (имя) | Идёт по неделям, UPDATE только NULL, `SALES` |
-| **4** | `Delivery.Number`, `Department`, `Delivery.ExpectedTime` | planned_time | Идёт по неделям, UPDATE только NULL, **DELIVERIES** |
-| **5** | `Delivery.Number`, `Department`, `Delivery.CustomerName` | client_name (фильтр GUEST*) | Идёт по неделям, UPDATE только NULL, **DELIVERIES** |
-
-**Скрипт-шаблон:** `app/onboarding/backfill_orders_shaburov.py`
-
-**Для нового клиента:**
-```python
-TENANT_ID = N  # новый ID тенанта
-DATE_FROM = date(2026, X, Y)  # дата начала подписки
-SKIP_CITIES = {"Ижевск"}  # если сервер iiko не отвечает
-```
-
-**Запуск:**
-```bash
-ssh arkentiy "cd /opt/ebidoebi && \
-  docker compose exec app pkill -f backfill_orders_shaburov || true && \
-  docker compose exec app rm -f /app/data/backfill_orders_shaburov_progress.json || true && \
-  docker compose exec app python -m app.onboarding.backfill_orders_shaburov 2>&1 | tee /opt/ebidoebi/logs/backfill_orders_SLUG.log"
-```
-
-**Возобновление:** прогресс фазы 1 хранится в `/app/data/backfill_orders_shaburov_progress.json`. Фазы 2–5 идут всегда, UPDATE срабатывает только на NULL/пустые.
-
-**Проверка результата:**
-```sql
-SELECT branch_name, 
-       COUNT(*) as total,
-       COUNT(*) FILTER (WHERE items != '') as has_items,
-       COUNT(*) FILTER (WHERE courier != '') as has_courier,
-       COUNT(*) FILTER (WHERE planned_time != '') as has_planned,
-       COUNT(*) FILTER (WHERE client_name != '') as has_client_name
-FROM orders_raw WHERE tenant_id = N GROUP BY branch_name;
-
--- Ожидаемые метрики:
--- - Все с tenant_id = N (не 1!)
--- - 100% items (составы)
--- - ~95-98% courier (пропускаются редкие)
--- - 100% planned_time
--- - ~95-98% client_name (пропускаются GUEST*)
-```
+> Устарело в сессии 74. Сейчас используй `app/onboarding/backfill_new_client.py` — 5 шагов автоматически. Детали: `docs/onboarding/protocol.md` раздел 4.
 
 ---
 

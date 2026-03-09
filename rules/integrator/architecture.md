@@ -1,6 +1,6 @@
 # Архитектура — Проект «Аркентий»
 
-> Актуально: февраль 2026. 9 точек, 4 города: Барнаул (4), Абакан (2), Томск (2), Черногорск (1).
+> Актуально: март 2026. Мультитенант: Артемий (tenant_id=1, 9 точек) + Шабуров (tenant_id=3, 2 активных города). PostgreSQL.
 
 ---
 
@@ -10,34 +10,38 @@
 /opt/ebidoebi/
 ├── app/
 │   ├── main.py                  # FastAPI + APScheduler: регистрация всех jobs
-│   ├── config.py                # Pydantic settings → читает .env и branches.json
-│   ├── database.py              # SQLite: все таблицы, UPSERT-функции
+│   ├── config.py                # Pydantic settings, читает .env
+│   ├── database_pg.py           # PostgreSQL: все таблицы, UPSERT-функции, пул
+│   ├── ctx.py                   # ContextVar tenant_id — текущий тенант в запросе
 │   ├── clients/
-│   │   ├── iiko_bo_olap.py      # iiko BO OLAP-пресеты (финансовые метрики, cookie-auth)
-│   │   ├── iiko_bo_events.py    # iiko BO Events API (real-time: заказы, смены, повара, курьеры)
-│   │   ├── iiko.py              # iiko Cloud API (стоп-лист, номенклатура — почти не используется)
-│   │   ├── telegram.py          # Telegram Bot API: alert(), report(), monitor(), error_alert()
-│   │   └── google_sheets.py     # Google Sheets API v4 + Drive API v3
+│   │   ├── iiko_auth.py         # Единый менеджер токенов/куки iiko (ОБЯЗАТЕЛЬНО использовать)
+│   │   ├── iiko_bo_olap_v2.py   # iiko BO OLAP v2 (основной, JSON, token-auth)
+│   │   ├── iiko_bo_events.py    # iiko BO Events API (real-time: заказы, смены)
+│   │   ├── iiko.py              # iiko Cloud API (стоп-лист, номенклатура)
+│   │   ├── telegram.py          # Telegram Bot API
+│   │   ├── google_sheets.py     # Google Sheets API v4 + Drive API v3
+│   │   └── tbank_reconciliation.py  # Сверка эквайринга ТБанк
 │   ├── jobs/
-│   │   ├── telegram_commands.py # [ОТКЛЮЧЁН] Арсений (8392478039) — заменён Аркентием
-│   │   ├── arkentiy.py          # Аркентий — Диспетчер (8479820766) — единственный бот
-│   │   │                        # (analytics_bot.py зарезервирован под будущий модуль аналитики)
-│   │   ├── iiko_status_report.py# /статус: OLAP + real-time данные
-│   │   ├── iiko_to_sheets.py    # Ежедневная выгрузка iiko → Google Sheets
-│   │   ├── daily_report.py      # Вечерний 🌙 / утренний ☀️ отчёт → Telegram
-│   │   ├── late_alerts.py       # Алерты о задержках >15 мин (polling каждые 2 мин)
-│   │   ├── competitor_monitor.py# Парсинг цен конкурентов (еженедельно пн 10:00 МСК)
-│   │   ├── google_sheets.py     # Sheets → TG отчёт (включён, не тестировался)
-│   │   ├── task_tracker.py      # Битрикс24 задачи → TG (отключён, нет webhook-ключа)
-│   │   ├── iiko_stoplist.py     # Стоп-листы (закомментирован в main.py)
-│   │   └── pre_meeting.py       # MyMeet.ai (отключён, нет API-ключа)
-│   └── monitoring/
-│       └── healthcheck.py       # GET /health + уведомление о старте (тихие часы 23-07)
+│   │   ├── arkentiy.py          # Диспетчер бота — все команды, мультитенант
+│   │   ├── iiko_status_report.py
+│   │   ├── iiko_to_sheets.py
+│   │   ├── daily_report.py
+│   │   ├── late_alerts.py
+│   │   ├── hourly_stats.py      # Почасовая статистика → hourly_stats
+│   │   ├── olap_enrichment.py   # Обогащение orders_raw из OLAP (тайминги, источник)
+│   │   ├── cancel_sync.py       # Синхронизация статуса «Отменена» каждые 3 мин
+│   │   └── competitor_monitor.py
+│   ├── services/                # Бизнес-логика: access_manager, auth
+│   ├── routers/                 # FastAPI endpoints: cabinet, payments, stats, auth
+│   ├── onboarding/              # Скрипты бэкфилла (backfill_new_client.py и др.)
+│   ├── monitoring/
+│   │   └── healthcheck.py
+│   └── migrations/              # SQL-миграции (Alembic not used — прямые .sql файлы)
 ├── secrets/
-│   ├── branches.json            # Конфиг 9 точек: name, dept_id, city, utc_offset, bo_url
-│   ├── google-service-account.json
-│   └── org_ids.json             # iiko Cloud org IDs (только Барнаул)
-├── .env                         # Все переменные окружения
+│   ├── api_keys.json            # Ключи API (iiko, TG, Sheets и др.)
+│   └── google-service-account.json
+├── web/                         # Личный кабинет (HTML/JS, Jinja2)
+├── .env                         # Переменные окружения
 ├── Dockerfile
 └── docker-compose.yml
 ```
@@ -48,16 +52,16 @@
 
 | Модуль | Статус | Заметки |
 |--------|--------|---------|
-| `telegram_commands.py` | 🔴 Отключён | Арсений (8392478039) — заменён Аркентием |
-| `arkentiy.py` | ✅ Работает | **Аркентий — Диспетчер** (8479820766) — единственный бот, все команды + Kyrgyz режим |
-| `analytics_bot.py` | 🔲 Не создан | Зарезервирован под будущий модуль глубокой аналитики |
-| `iiko_status_report.py` | ✅ Работает | OLAP финансы + RT из Events API |
-| `iiko_bo_events.py` | ✅ Работает | Event sourcing, polling 30с, все 9 точек, fallback из shifts_raw |
-| `iiko_bo_olap.py` | ✅ Работает | 4 пресета параллельно на все точки |
-| `iiko_to_sheets.py` | ✅ Работает | Инкрементально, трекинг изменений в SQLite |
-| `daily_report.py` | ✅ Работает | Вечер + утро, RT-снапшот, delays + staff |
-| `late_alerts.py` | ✅ Работает | Алерты задержек >15 мин, каждые 2 мин |
-| `competitor_monitor.py` | ✅ Работает | Пн 10:00 МСК, данные Томска (4 конкурента, 345+ позиций) |
+| `arkentiy.py` | ✅ Работает | Диспетчер — все команды, мультитенант |
+| `iiko_bo_events.py` | ✅ Работает | Real-time, polling 30с, все точки |
+| `iiko_bo_olap_v2.py` | ✅ Работает | Основной OLAP (JSON, token-auth) |
+| `iiko_to_sheets.py` | ✅ Работает | Ежедневная выгрузка в Sheets |
+| `daily_report.py` | ✅ Работает | Утро + вечер, мультитенант |
+| `late_alerts.py` | ✅ Работает | Алерты задержек >15/30/45 мин |
+| `hourly_stats.py` | ✅ Работает | Почасовая статистика |
+| `olap_enrichment.py` | ✅ Работает | Обогащение заказов из OLAP |
+| `cancel_sync.py` | ✅ Работает | Синхронизация отмены каждые 3 мин |
+| `competitor_monitor.py` | ✅ Работает | Пн 10:00 МСК |
 | `healthcheck.py` | ✅ Работает | /health + TG-уведомление в личку Артемию |
 | `sheets_to_tg.py` | ⚠️ Не тестировался | Нужна таблица "Сводка" |
 | `iiko_stoplist.py` | 🔴 Отключён | Закомментирован в main.py |
@@ -66,29 +70,19 @@
 
 ---
 
-## Расписание Jobs (APScheduler, сервер UTC+3 = МСК)
+## Расписание Jobs (APScheduler, МСК)
 
-| Job | Когда (МСК) | Когда (Барнаул UTC+7) | Примечание |
-|-----|------------|----------------------|------------|
-| ~~Арсений polling~~ | ~~каждые 3 сек~~ | — | 🔴 Отключён |
-| Аркентий (Диспетчер) polling | каждые 3 сек | — | Все команды: /статус /повара /курьеры /поиск /день /опоздания |
-| Events polling | каждые 30 сек | — | Real-time данные все 9 точек |
-| Алерты задержек | каждые 2 мин | — | >15 мин, whitelist статусов |
-| iiko → Sheets | 23:00 ежедн. | 03:00 (+1д) | Инкрементальная выгрузка |
-| Sheets → TG | не задан отдельно | — | В рамках iiko_to_sheets |
-| Битрикс24 задачи | 09:00 ежедн. | 13:00 | Отключён (нет ключа) |
-| Бэкап SQLite | 02:00 ежедн. | 06:00 | |
-| **Мониторинг конкурентов** | **пн 10:00** | **пн 14:00** | Парсинг цен, история |
-| **Вечерний отчёт вс-чт** | 19:30 | 23:30 | Текущий день |
-| **Вечерний отчёт пт/сб** | 20:30 МСК пт и сб | 00:30 сб и вс | Данные предыдущего дня |
-| **RT-снапшот (пт/сб)** | 19:50 пт/сб | 23:50 пт/сб | За 40 мин до вечернего отчёта |
-| **Утренний отчёт** | 05:30 ежедн. | 09:30 | Данные вчера из БД |
-
-**Логика пт/сб отчётов:**
-- RT-снапшот сохраняется в 23:50 лок → читается вечерним отчётом в 00:30 лок (+40 мин)
-- Пятница: снапшот пт 23:50 → отчёт сб 00:30 (МСК: job срабатывает в пт 20:30)
-- Суббота: снапшот сб 23:50 → отчёт вс 00:30 (МСК: job срабатывает в сб 20:30)
-- Утренний читает снапшот из SQLite (`daily_rt_snapshot` таблица)
+| Job | Когда (МСК) | Примечание |
+|-----|------------|------------|
+| Аркентий polling | каждые 3 сек | Все команды бота |
+| Events polling | каждые 30 сек | Real-time, все точки всех тенантов |
+| cancel_sync | каждые 3 мин | Отменённые заказы из OLAP |
+| Алерты задержек | каждые 2 мин | >15/30/45 мин |
+| Утренний отчёт | 09:25 | Данные вчера из БД |
+| OLAP → Sheets | 09:26 | iiko OLAP → Google Sheets |
+| Аудит | 09:27 | Подозрительные операции |
+| Мониторинг конкурентов | пн 12:00 | Парсинг цен |
+| Бэкап БД | 02:00 | `/opt/ebidoebi/backups/` |
 
 ---
 
@@ -205,39 +199,23 @@ class BranchState:
 
 ---
 
-## SQLite таблицы
+## PostgreSQL таблицы (актуально)
 
-| Таблица | Назначение |
-|---------|-----------|
-| `iiko_tokens` | Кэш токенов iiko BO (TTL ~15 мин) |
-| `job_logs` | История запусков задач |
-| `stoplist_state` | Хэши стоп-листов (дедупликация алертов) |
-| `telegram_queue` | Очередь TG сообщений (retry) |
-| `report_updates` | Флаги изменения данных (для утреннего отчёта) |
-| `daily_rt_snapshot` | RT-итоги дня: delays + staff (для утреннего и пт/сб вечернего отчёта) |
-| `daily_stats` | OLAP-итоги дня по точкам (выручка, чеки, с/с и др.) |
-| `orders_raw` | Заказы из Events API: статус, курьер, время, опоздание |
-| `shifts_raw` | Смены сотрудников: employee_id, role_class, clock_in/out по точкам |
-| `competitor_snapshots` | Скрапинг конкурентов: дата, статус |
-| `competitor_menu_items` | Меню конкурентов: позиция, цена, история изменений |
+Полный справочник → `rules/integrator/database.md`
+
+Ключевые группы:
+- **Мультитенант:** `tenants`, `subscriptions`, `iiko_credentials`, `tenant_chats`, `tenant_users`
+- **Данные:** `orders_raw`, `daily_stats`, `shifts_raw`, `hourly_stats`
+- **Real-time:** `iiko_tokens`, `job_logs`, `competitor_snapshots`, `competitor_menu_items`
 
 ---
 
-## Масштабирование
+## Мультитенантность
 
-| Город | Точек | iiko BO | Events RT | Статус |
-|-------|-------|---------|-----------|--------|
-| Барнаул | 4 | ✅ | ✅ | Полностью рабочий |
-| Абакан | 2 | ✅ | ✅ | Работает |
-| Томск | 2 | ✅ | ✅ | Работает |
-| Черногорск | 1 | ✅ | ✅ | Работает |
-| **Итого** | **9** | ✅ | ✅ | Все подключены |
+| tenant_id | Клиент | Города (активные) |
+|-----------|--------|------------------|
+| 1 | Артемий (Ёбидоёби) | Барнаул (4), Абакан (2), Томск (2), Черногорск (1) |
+| 3 | Шабуров | Канск, Зеленогорск |
 
----
-
-## Графики работы
-
-| День | Закрытие | Вечерний отчёт |
-|------|---------|---------------|
-| Вс-Чт | 23:00 лок | 23:30 лок (текущий день) |
-| Пт, Сб | 00:00 лок (+1д) | 00:30 лок следующего дня (данные пт или сб) |
+**Изоляция:** все бизнес-таблицы имеют `tenant_id`. Конфиг точек — в `iiko_credentials` (не в `branches.json`).  
+**Текущий тенант в запросе:** `app/ctx.py`, ContextVar `_ctx_tenant_id`.

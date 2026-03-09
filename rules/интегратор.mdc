@@ -39,8 +39,8 @@ alwaysApply: false
 
 1. Events API — **сортировка по дате обязательна** (иначе 30-40% статусов неверны)
 2. `deliveryOrderEdited` — **merge**, не overwrite (иначе потеря данных)
-3. OLAP — через `/service/`, не `/api/` (500 ошибка)
-4. OLAP — **клиентская фильтрация** (`departmentIds` не работает)
+3. OLAP — **основной способ**: `POST /api/v2/reports/olap` (token-auth, JSON). `/service/` только для `audit.py` (XML-пресеты, deprecated)
+4. OLAP — **клиентская фильтрация** (`departmentIds` не работает, фильтруй по `Department` в коде)
 5. XML теги с точками — **итерация**, не `findtext` (баг ElementTree)
 
 ---

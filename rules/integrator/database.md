@@ -1,29 +1,39 @@
 # Справочник БД Аркентия
 
-**Модуль:** `app/database.py` — все таблицы, UPSERT-функции, инициализация, пул.
+**Модуль:** `app/database_pg.py` — PostgreSQL: все таблицы, UPSERT-функции, инициализация пула.
 
 ## Таблицы
 
+### Мультитенант
+| Таблица | Назначение |
+|---------|-----------|
+| `tenants` | Клиенты SaaS: slug (уник.), email, plan, status, bot_token |
+| `subscriptions` | Тариф клиента: модули, кол-во точек, дата оплаты |
+| `iiko_credentials` | Точки по тенанту: bo_url, bo_login, dept_id, utc_offset, is_active |
+| `tenant_chats` | Telegram-чаты тенанта: chat_id, modules_json, city |
+| `tenant_users` | Пользователи тенанта: tg user_id, role, is_active |
+
+### Данные (все с tenant_id)
+| Таблица | Назначение |
+|---------|-----------|
+| `orders_raw` | Заказы: статус, курьер, тайминги, состав, источник — Events API + OLAP обогащение |
+| `daily_stats` | OLAP-итоги дня: выручка, чеки, COGS, скидки, тайминги |
+| `shifts_raw` | Смены сотрудников: employee_id, role_class, clock_in/out |
+| `hourly_stats` | Почасовая статистика (из orders_raw + shifts_raw) |
+
+### Real-time / служебные
 | Таблица | Назначение |
 |---------|-----------|
 | `iiko_tokens` | Кэш токенов iiko BO (TTL ~15 мин) |
-| `orders_raw` | Заказы из Events API: статус, курьер, время, опоздание |
-| `shifts_raw` | Смены: employee_id, role_class, clock_in/out по точкам |
-| `daily_stats` | OLAP-итоги дня по точкам (выручка, чеки, с/с) |
-| `daily_rt_snapshot` | RT-итоги дня: delays + staff (утренние и пт/сб отчёты) |
 | `job_logs` | История запусков задач |
-| `telegram_queue` | Очередь TG сообщений (retry) |
-| `stoplist_state` | Хэши стоп-листов (дедупликация алертов) |
-| `report_updates` | Флаги изменения данных |
 | `competitor_snapshots` | Скрапинг конкурентов: дата, статус |
 | `competitor_menu_items` | Меню конкурентов: позиция, цена, история |
 
-Полная схема с полями → `99_Системное/Интегратор/Архитектура.md`.
-
 ## Правила
 
-- **UPSERT:** `INSERT ... ON CONFLICT DO UPDATE SET ...` (PostgreSQL). `INSERT OR REPLACE` НЕ работает
-- **Не удаляй строки** — помечай `is_active=0` или `deleted_at`
-- **Читай `database.py`** перед добавлением таблицы — там шаблон
-- **Новая таблица** → в `database.py`, не отдельный файл
-- **Запросы из job-модулей** — через функции `database.py`, не raw SQL inline
+- **UPSERT:** `INSERT ... ON CONFLICT DO UPDATE SET ...` (asyncpg). `INSERT OR REPLACE` — SQLite, не использовать
+- **Не удаляй строки** — помечай `is_active=false` или `deleted_at`
+- **Читай `database_pg.py`** перед добавлением таблицы — там шаблон
+- **Новая таблица** → SQL-миграция в `app/migrations/`, функция в `database_pg.py`
+- **Запросы из job-модулей** — через функции `database_pg.py`, не raw SQL inline
+- **Изоляция тенанта:** `tenant_id` обязателен во всех запросах к бизнес-таблицам — антипаттерн `get_daily_stats()` без tenant_id является ошибкой

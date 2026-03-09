@@ -22,6 +22,7 @@ backfill_shifts_generic.py — бэкфилл shifts_raw из /api/v2/employees/
 
 import argparse
 import asyncio
+import datetime
 import json
 import logging
 import os
@@ -257,7 +258,7 @@ class ShiftsBackfiller:
                                 continue
 
                             # dateFrom: "2025-12-01T09:45:00+07:00" → date + timestamp
-                            shift_date = date_from_str[:10]
+                            shift_date = datetime.date.fromisoformat(date_from_str[:10])
 
                             rows_to_insert.append({
                                 "branch_name": branch_name,

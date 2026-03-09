@@ -219,7 +219,11 @@ async def step4_hourly_stats(tenant_id: int, date_from: date, date_to: date):
             date_from=date_from,
             date_to=date_to,
         )
-        await backfiller.run()
+        await backfiller.init_db()
+        try:
+            await backfiller.run()
+        finally:
+            await backfiller.close_db()
     except Exception as e:
         logger.error(f"Шаг 4 ошибка: {e}")
         raise

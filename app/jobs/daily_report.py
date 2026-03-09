@@ -1,8 +1,8 @@
 """
 Ежедневный утренний отчёт по точкам → Telegram.
 
-09:25 местного (после OLAP enrichment в 09:00):
-OLAP v2 → выручка/COGS/скидки + orders_raw → агрегаты → daily_stats + ТГ.
+09:25 местного (после olap_pipeline в 05:00):
+daily_stats (iiko OLAP, заполнен пайплайном) + orders_raw → ТГ.
 """
 
 import html
@@ -11,16 +11,15 @@ import logging
 from datetime import datetime, timedelta, timezone
 
 from app.clients import telegram
-from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.jobs.humor import get_morning_quip
 from app.db import (
     aggregate_orders_for_daily_stats,
     clear_updates_for_date,
+    get_daily_stats,
     get_updates_for_date,
     log_job_finish,
     log_job_start,
-    upsert_daily_stats_batch,
 )
 from app.utils.formatting import fmt_money as _fmt_money, fmt_num as _fmt_num, fmt_pct as _fmt_pct
 from app.utils.timezone import tz_from_offset as _branch_tz
@@ -173,12 +172,7 @@ def _format_daily_summary(date_str: str, branches: list[tuple[str, float, int]])
 
 @track_job("daily_report")
 async def job_send_morning_report(utc_offset: int) -> None:
-    """Единственный ежедневный отчёт. Запускается утром за вчера.
-    1) OLAP v2 → выручка, COGS, скидки
-    2) orders_raw → агрегаты (задержки, времена, типы скидок)
-    3) Пишет daily_stats
-    4) Отправляет в ТГ
-    """
+    """Утренний отчёт. Читает из daily_stats (заполнен пайплайном в 05:00), 0 OLAP-запросов."""
     log_id = await log_job_start(f"morning_report_utc{utc_offset}")
 
     tz = _branch_tz(utc_offset)
@@ -195,14 +189,6 @@ async def job_send_morning_report(utc_offset: int) -> None:
         await log_job_finish(log_id, "ok", f"Нет точек для UTC+{utc_offset}")
         return
 
-    try:
-        all_stats = await get_all_branches_stats(yesterday, branches=branches)
-    except Exception as e:
-        logger.error(f"Ошибка iiko BO в утреннем отчёте: {e}")
-        await telegram.error_alert(f"morning_report_utc{utc_offset}", str(e))
-        await log_job_finish(log_id, "error", str(e))
-        return
-
     updates = await get_updates_for_date(date_iso)
     updates_by_branch: dict[str, list[dict]] = {}
     for u in updates:
@@ -215,57 +201,21 @@ async def job_send_morning_report(utc_offset: int) -> None:
     sent = 0
     for branch in branches:
         name = branch["name"]
-        stats = all_stats.get(name, {})
+        tenant_id = branch.get("tenant_id", 1)
 
-        # Агрегаты из orders_raw (задержки, времена, типы скидок)
+        # Читаем из daily_stats (заполнен пайплайном в 05:00)
+        stats = await get_daily_stats(name, date_iso, tenant_id) or {}
+
+        # Агрегаты из orders_raw (задержки, времена, взаимедействия со сменой оплаты)
         agg = await aggregate_orders_for_daily_stats(name, date_iso)
 
-        rev = stats.get("revenue_net") or 0
-        chk = stats.get("check_count") or 0
-        tenant_id = branch.get("tenant_id", 1)
+        rev = stats.get("revenue") or 0
+        chk = stats.get("orders_count") or 0
         branch_summaries.setdefault(tenant_id, []).append((name, rev, chk))
 
-        discount_types_json = json.dumps(
-            stats.get("discount_types") or agg.get("discount_types_agg") or [],
-            ensure_ascii=False,
-        )
-
-        total_d = agg.get("total_delivery_count") or 0
-        late_d = agg.get("late_delivery_count") or 0
+        late_d = agg.get("late_delivery_count") or stats.get("late_count") or 0
+        total_d = agg.get("total_delivery_count") or stats.get("total_delivered") or 0
         late_pct = round(late_d / total_d * 100, 1) if total_d else 0
-
-        try:
-            await upsert_daily_stats_batch([{
-                "branch_name":    name,
-                "date":           date_iso,
-                "orders_count":   chk,
-                "revenue":        rev,
-                "avg_check":      round(rev / chk) if chk else 0,
-                "cogs_pct":       stats.get("cogs_pct"),
-                "sailplay":       stats.get("sailplay"),
-                "discount_sum":   stats.get("discount_sum"),
-                "discount_types": discount_types_json,
-                "delivery_count": chk - (stats.get("pickup_count") or 0),
-                "pickup_count":   stats.get("pickup_count") or 0,
-                "late_count":     late_d,
-                "total_delivered": total_d,
-                "late_percent":   late_pct,
-                "avg_late_min":   agg.get("avg_late_min") or 0,
-                "cooks_count":    agg.get("cooks_today") or 0,
-                "couriers_count": agg.get("couriers_today") or 0,
-                "late_delivery_count": late_d,
-                "late_pickup_count":   agg.get("late_pickup_count") or 0,
-                "avg_cooking_min":     agg.get("avg_cooking_min"),
-                "avg_wait_min":        agg.get("avg_wait_min"),
-                "avg_delivery_min":    agg.get("avg_delivery_min"),
-                "exact_time_count":    agg.get("exact_time_count") or 0,
-                "new_customers":             agg.get("new_customers", 0),
-                "new_customers_revenue":     agg.get("new_customers_revenue", 0.0),
-                "repeat_customers":          agg.get("repeat_customers", 0),
-                "repeat_customers_revenue":  agg.get("repeat_customers_revenue", 0.0),
-            }], tenant_id=branch.get("tenant_id", 1))
-        except Exception as e:
-            logger.warning(f"Не удалось сохранить daily_stats [{name}]: {e}")
 
         # Отправка в ТГ — per-tenant роутинг
         branch_updates = updates_by_branch.get(name, [])

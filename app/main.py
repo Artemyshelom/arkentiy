@@ -39,7 +39,8 @@ from app.routers.stats import router as stats_router
 # Импорт задач
 from app.jobs.hourly_stats import job_hourly_stats, job_recalc_yesterday_hourly
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
-from app.jobs.olap_enrichment import job_olap_enrichment
+from app.jobs.olap_enrichment import job_olap_enrichment  # DEPRECATED: заменён olap_pipeline
+from app.jobs.olap_pipeline import job_olap_pipeline
 from app.clients.iiko_bo_events import job_poll_iiko_events
 from app.jobs.competitor_monitor import job_monitor_competitors
 from app.jobs.arkentiy import poll_analytics_bot, run_polling_loop
@@ -47,7 +48,7 @@ from app.jobs.late_alerts import job_late_alerts
 from app.jobs.daily_report import job_send_morning_report
 from app.jobs.weekly_report import job_weekly_report
 from app.jobs.audit import job_audit_report
-from app.jobs.cancel_sync import job_cancel_sync
+from app.jobs.cancel_sync import job_cancel_sync  # DEPRECATED: заменён olap_pipeline шаг A
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 from app.utils.tenant import run_for_all_tenants
@@ -78,34 +79,35 @@ def register_jobs() -> None:
     )
 
 
-    # OLAP enrichment orders_raw: каждый час в :00, за 25 мин до утреннего отчёта.
-    # Обогащает только тенантов, у которых сейчас 09:00 местного.
-    async def _olap_enrichment_by_tz():
+    # Ежедневный OLAP-пайплайн: 05:00 локального (A → B → C).
+    # Заменяет olap_enrichment + cancel_sync (до ~480 запросов/сутки → ~12).
+    # Формула: 05:00 лок → мск_час + (offset - 3) = 5 → offset = 8 - мск_час.
+    async def _olap_pipeline_by_tz():
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from app.db import get_all_branches
         from app.ctx import ctx_tenant_id
         msk_now = _dt.now(_tz(_td(hours=3)))
-        target_offset = 12 - msk_now.hour
+        target_offset = 8 - msk_now.hour  # UTC+7 → MSK 01:00; UTC+8 → MSK 00:00
         all_branches = get_all_branches()
-        # Собираем tenant_id, у которых есть точки с нужным offset
         tenant_ids = {b["tenant_id"] for b in all_branches if b.get("utc_offset", 7) == target_offset}
         for tid in sorted(tenant_ids):
             token = ctx_tenant_id.set(tid)
             try:
-                await job_olap_enrichment(tenant_id=tid)
+                await job_olap_pipeline(tenant_id=tid)
             except Exception as e:
-                logger.error(f"olap_enrichment UTC+{target_offset} tenant={tid}: {e}", exc_info=True)
+                logger.error(f"olap_pipeline UTC+{target_offset} tenant={tid}: {e}", exc_info=True)
             finally:
                 ctx_tenant_id.reset(token)
 
     scheduler.add_job(
-        _olap_enrichment_by_tz,
+        _olap_pipeline_by_tz,
         trigger=CronTrigger(minute=0),  # каждый час в :00
-        id="olap_enrichment",
-        name="OLAP обогащение orders_raw (по таймзонам)",
+        id="olap_pipeline",
+        name="Ежедневный OLAP-пайплайн → orders_raw + daily_stats (по таймзонам)",
         replace_existing=True,
-        misfire_grace_time=300,
+        misfire_grace_time=600,
     )
+    # DEPRECATED: olap_enrichment заменён olap_pipeline; оставлен импорт до полного удаления
 
     # Выгрузка iiko → Google Sheets: 05:26 МСК
     scheduler.add_job(
@@ -208,15 +210,10 @@ def register_jobs() -> None:
         misfire_grace_time=600,
     )
 
-    # Синхронизация отменённых заказов из OLAP v2: каждые 3 минуты (все тенанты)
-    scheduler.add_job(
-        run_for_all_tenants(job_cancel_sync),
-        trigger=IntervalTrigger(minutes=3),
-        id="cancel_sync",
-        name="Синхронизация отмен (OLAP v2, все тенанты)",
-        replace_existing=True,
-        misfire_grace_time=120,
-    )
+    # DEPRECATED: cancel_sync (~480 запросов/сутки) — заменён olap_pipeline шагом A.
+    # cancel_reason теперь приходит из DELIVERIES (поле Delivery.CancelCause) ежедневно в 05:00.
+    # Факт отмены в реальном времени — через Events API (status='Отменена', <30 сек.).
+    # scheduler.add_job(run_for_all_tenants(job_cancel_sync), ...)  <- отключено
 
     # Рекуррентный биллинг ЮKassa: ежедневно в 03:00 МСК
     scheduler.add_job(

@@ -51,10 +51,14 @@ VPS (5.42.98.2)
 
 **Ключевые модули:**
 - `app/clients/iiko_bo_events.py` — реал-тайм события доставок (Events API)
-- `app/clients/iiko_bo_olap.py` — аналитика по дням (OLAP v2)
+- `app/clients/olap_queries.py` — 4 канонических OLAP-запроса (Query A/B/C/D)
+- `app/jobs/olap_pipeline.py` — ночной пайплайн 05:00 (заполняет orders_raw + daily_stats)
 - `app/jobs/late_alerts.py` — алерты при опозданиях (15, 30, 45 мин)
-- `app/jobs/daily_report.py` — ежедневные отчёты в Sheets & Telegram
-- `app/jobs/competitors.py` — скрапинг конкурентов
+- `app/jobs/daily_report.py` — ежедневные отчёты в Sheets & Telegram (из БД)
+- `app/jobs/competitor_monitor.py` — скрапинг конкурентов
+
+**OLAP-архитектура:** один пайплайн в 05:00 делает все OLAP-запросы за день (~12 запросов).
+Остальные джобы читают только из БД. Подробнее → [`rules/integrator/olap_pipeline.md`](rules/integrator/olap_pipeline.md)
 
 **База данных:**
 - `orders_raw` — заказы из Events API (статус, время, опоздание)
@@ -173,23 +177,26 @@ ssh ... "cd /opt/ebidoebi && git add app/ && git commit -m 'feat: ...' && git pu
 arkentiy/
 ├── app/
 │   ├── main.py                  — FastAPI + scheduler registry
-│   ├── database.py              — ORM, таблицы, UPSERT логика
-│   ├── database_pg.py           — PostgreSQL backend
-│   ├── db.py                    — proxy (SQLite или PG)
+│   ├── database_pg.py           — PostgreSQL backend (UPSERT, агрегаты)
+│   ├── db.py                    — proxy-функции для БД-запросов
 │   ├── clients/
-│   │   ├── iiko_bo_events.py    — real-time заказы
-│   │   ├── iiko_bo_olap.py      — аналитика iiko OLAP
+│   │   ├── iiko_bo_events.py    — real-time заказы (Events API)
+│   │   ├── iiko_bo_olap_v2.py  — legacy OLAP (iiko_status_report, tbank)
+│   │   ├── olap_queries.py      — 4 канонических OLAP-запроса (Query A/B/C/D)
 │   │   ├── competitor_scraper.py — парсинг конкурентов
 │   │   └── google_sheets.py     — экспорт в Sheets
 │   ├── jobs/
+│   │   ├── olap_pipeline.py     — ночной пайплайн 05:00 (→ orders_raw + daily_stats)
 │   │   ├── late_alerts.py       — алерты при опозданиях
-│   │   ├── daily_report.py      — ежедневные отчёты
-│   │   ├── competitors.py       — мониторинг конкурентов
+│   │   ├── daily_report.py      — ежедневные отчёты (читает из daily_stats)
+│   │   ├── iiko_to_sheets.py    — OLAP → Google Sheets (читает из daily_stats)
+│   │   ├── competitor_monitor.py — мониторинг конкурентов
 │   │   └── ...
+│   ├── onboarding/              — бэкфилл для новых клиентов
+│   │   ├── backfill_orders_generic.py
+│   │   ├── backfill_daily_stats_generic.py
+│   │   └── backfill_hourly_stats.py
 │   └── utils/
-│       ├── iiko_auth.py         — авторизация в iiko BO
-│       ├── telegram.py          — helper для Telegram API
-│       └── formatting.py        — форматирование сообщений
 ├── docs/
 │   ├── CHANGELOG.md             — что обновлено (user-friendly)
 │   ├── Модули_и_команды_бота.md — описание команд
@@ -253,10 +260,12 @@ arkentiy/
 | Файл | Для кого | Что там |
 |------|----------|--------|
 | `docs/CHANGELOG.md` | **Пользователи** | Что обновлено (язык: команды бота, новые фичи, баги) |
-| `docs/Модули...md` | **Разработчики** | Описание команд, модулей, API |
-| `docs/Дорожная карта.md` | **PM** | Планы на квартал, фазы развития |
+| `docs/journal.md` | **Разработчики** | Техническая история изменений по сессиям |
+| `docs/roadmap.md` | **PM** | Планы на квартал, фазы развития |
 | `docs/BACKLOG.md` | **Разработчики** | Очередь задач (что не начинали) |
 | `docs/specs/` | **UX/Разработчики** | Макеты и требования перед кодом |
+| `rules/integrator/olap_pipeline.md` | **Разработчики** | Архитектура OLAP-пайплайна, Query A/B/C/D |
+| `rules/integrator/lessons.md` | **Разработчики** | Критические баги и антипаттерны — читать перед работой |
 
 **Правило:** перед реализацией UX-задачи — сначала spec, потом код. Не додумывай интерфейс сам.
 

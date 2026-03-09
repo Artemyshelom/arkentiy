@@ -18,6 +18,75 @@
 
 ---
 
+## Сессия 74 — март 2026 (refactor: консолидация OLAP → единый пайплайн) ✅
+
+**Контекст:** ~15 разных OLAP-запросов в 5+ файлах. cancel_sync опрашивал iiko каждые 3 мин. olap_enrichment делал отдельные запросы в add. В итоге ~496 OLAP запросов/сутки вместо необходимых 10–12.
+
+### Что сделано
+
+**feat: 4 канонических OLAP-запроса (`app/clients/olap_queries.py`)**
+- Query A (`fetch_order_detail`) — DELIVERIES, 16 полей заказа + sum/discount_sum
+- Query B (`fetch_dish_detail`) — SALES, состав заказа + курьер (WaiterName)
+- Query C (`fetch_branch_aggregate`) — SALES, 3 параллельных sub-запроса: core/payment/discount → `{dept: {revenue_net, cogs_pct, check_count, cash, noncash, sailplay, discount_sum, pickup_count}}`
+- Query D (`fetch_storno_audit`) — SALES, поля Storned/CashierName только для audit.py
+
+**feat: единый ночной пайплайн (`app/jobs/olap_pipeline.py`, запуск 05:00 локального)**
+- Step A: DELIVERIES → orders_raw (force-update тайминги, COALESCE остальное, пишет discount_sum)
+- Step B: SALES dishes → items JSON + courier в orders_raw
+- Step C: Query C → aggregate_orders_for_daily_stats() → upsert_daily_stats_batch()
+- Понедельник — 7-дневный диапазон (перезаписывает воскресные корректировки)
+
+**perf: отключены polling-джобы**
+- `cancel_sync` — закомментирован в scheduler (~480 запросов/сутки → 0)
+- `olap_enrichment` — помечен DEPRECATED, не регистрируется в scheduler (~24 запроса/сутки → 0)
+
+**refactor: daily_report.py читает только из БД**
+- Убран `get_all_branches_stats` из импортов
+- `stats = await get_daily_stats(name, date_iso, tenant_id)` — пайплайн уже заполнил daily_stats в 05:00
+
+**refactor: iiko_to_sheets.py читает только из БД**
+- Убран OLAP, читает `get_daily_stats` per branch
+- cash/noncash теперь тоже доступны (добавлены в migration 010)
+
+**refactor: backfill_orders_generic.py → 2 фазы (было 5)**
+- Phase 1: DELIVERIES, 16 полей, недельные чанки — заменяет старые фазы 1/4/5/6
+- Phase 2: SALES dishes+courier, недельные чанки — заменяет старые фазы 2/3
+
+**refactor: backfill_daily_stats_generic.py → fetch_branch_aggregate**
+- Убраны 2 inline OLAP-запроса, используется `fetch_branch_aggregate` (3 sub-запроса, параллельно)
+- UPSERT теперь пишет cash/noncash (новые поля)
+
+**migration 010 (`app/migrations/010_olap_consolidation.sql`)**
+- `orders_raw.discount_sum DOUBLE PRECISION` — не было в схеме
+- `daily_stats.exact_time_count INTEGER DEFAULT 0`
+- `daily_stats.cash DOUBLE PRECISION DEFAULT 0`
+- `daily_stats.noncash DOUBLE PRECISION DEFAULT 0`
+
+**schema: upsert_daily_stats_batch расширен**
+- 22 → 30 параметров: добавлены late_delivery_count, late_pickup_count, avg_cooking_min, avg_wait_min, avg_delivery_min, exact_time_count, cash, noncash
+
+### Итог
+
+| Метрика | До | После |
+|---------|-----|-------|
+| OLAP-запросов/сутки | ~496 | ~12 |
+| Файлов с inline OLAP-кодом | 7+ | 2 (iiko_status_report, audit — on-demand) |
+| backfill_orders фаз | 5 | 2 |
+| cancel_sync опросов/сутки | 480 | 0 |
+
+### Файлы изменены
+- `app/clients/olap_queries.py` — создан
+- `app/jobs/olap_pipeline.py` — создан
+- `app/migrations/010_olap_consolidation.sql` — создан
+- `app/database_pg.py` — upsert_daily_stats_batch расширен
+- `app/main.py` — pipeline зарегистрирован, cancel_sync/olap_enrichment отключены
+- `app/jobs/daily_report.py` — убран OLAP
+- `app/jobs/iiko_to_sheets.py` — убран OLAP
+- `app/onboarding/backfill_orders_generic.py` — 5 фаз → 2
+- `app/onboarding/backfill_daily_stats_generic.py` — inline OLAP → fetch_branch_aggregate
+
+---
+
 ## Сессия 73 — 8 марта 2026 (fix: timezone hourly_stats + бэкфил завершён) ✅
 
 **Контекст:** Бэкфил `hourly_stats`, запущенный в сессии 71, падал с ошибкой timezone. Починили, задеплоили, запустили — завершён успешно.

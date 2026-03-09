@@ -347,9 +347,12 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                         cogs_pct, sailplay, discount_sum, discount_types,
                         delivery_count, pickup_count, late_count, total_delivered,
                         late_percent, avg_late_min, cooks_count, couriers_count,
+                        late_delivery_count, late_pickup_count,
+                        avg_cooking_min, avg_wait_min, avg_delivery_min, exact_time_count,
+                        cash, noncash,
                         new_customers, new_customers_revenue,
                         repeat_customers, repeat_customers_revenue)
-                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
                        ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
                          orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
                          avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
@@ -359,6 +362,13 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                          late_count=EXCLUDED.late_count, total_delivered=EXCLUDED.total_delivered,
                          late_percent=EXCLUDED.late_percent, avg_late_min=EXCLUDED.avg_late_min,
                          cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
+                         late_delivery_count=EXCLUDED.late_delivery_count,
+                         late_pickup_count=EXCLUDED.late_pickup_count,
+                         avg_cooking_min=EXCLUDED.avg_cooking_min,
+                         avg_wait_min=EXCLUDED.avg_wait_min,
+                         avg_delivery_min=EXCLUDED.avg_delivery_min,
+                         exact_time_count=EXCLUDED.exact_time_count,
+                         cash=EXCLUDED.cash, noncash=EXCLUDED.noncash,
                          new_customers=EXCLUDED.new_customers,
                          new_customers_revenue=EXCLUDED.new_customers_revenue,
                          repeat_customers=EXCLUDED.repeat_customers,
@@ -373,6 +383,10 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                     r.get("late_count", 0), r.get("total_delivered", 0),
                     r.get("late_percent", 0), r.get("avg_late_min", 0),
                     r.get("cooks_count", 0), r.get("couriers_count", 0),
+                    r.get("late_delivery_count", 0), r.get("late_pickup_count", 0),
+                    r.get("avg_cooking_min"), r.get("avg_wait_min"), r.get("avg_delivery_min"),
+                    r.get("exact_time_count", 0),
+                    r.get("cash", 0.0), r.get("noncash", 0.0),
                     r.get("new_customers", 0), r.get("new_customers_revenue", 0.0),
                     r.get("repeat_customers", 0), r.get("repeat_customers_revenue", 0.0),
                 )

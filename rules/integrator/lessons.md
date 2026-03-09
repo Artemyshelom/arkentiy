@@ -37,7 +37,13 @@ EXTRACT(EPOCH FROM (
 
 ---
 
-## 🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2 (Phase 1–5)
+## ~~🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2 (Phase 1–5)~~ ⚠️ УСТАРЕЛО
+
+> **Обновлено в сессии 74:** `backfill_orders_generic.py` теперь 2 фазы (было 5).
+> Phase 1 = DELIVERIES (16 полей, нед. чанки). Phase 2 = SALES dishes+courier (нед. чанки).
+> Актуальная документация: `rules/integrator/olap_pipeline.md`
+
+## 🟢 [ПРАКТИКА] 5-фазовый бэкфилл `orders_raw` через OLAP v2 (Phase 1–5) — АРХИВ
 
 **Контекст:** Онбординг Шабурова (tenant_id=3, март 2026). `orders_raw` должна содержать полные данные для `/поиск`.
 

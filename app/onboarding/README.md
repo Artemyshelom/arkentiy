@@ -1,19 +1,40 @@
 # Onboarding — Подключение новых клиентов
 
-Скрипты и инструменты для автоматизации процесса подключения новых SaaS-клиентов.
+Скрипты для онбординга новых SaaS-клиентов (бэкфилл исторических данных).
 
-## Содержимое
+## Актуальные скрипты
 
-- `backfill_shaburov.py` — Пример: бэкфилл OLAP-данных для Shaburov (Канск, Зеленогорск) — **Фазы 1-5**
-- `phase6_enrich_times.py` — Phase 6: обогащение временных полей (cooked_time, ready_time, service_print_time)
-- `backfill_daily.py` — Шаблон для ежедневного синхронизационного бэкфилла
+| Скрипт | Что делает | Когда запускать |
+|--------|-----------|----------------|
+| `backfill_orders_generic.py` | Заполняет `orders_raw` — 2 фазы (DELIVERIES + SALES dishes) | При онбординге нового клиента |
+| `backfill_daily_stats_generic.py` | Заполняет `daily_stats` — daily через Query C | При онбординге или пересчёте cash/noncash |
+| `backfill_hourly_stats.py` | Заполняет `hourly_stats` — почасовая аналитика | При онбординге нового клиента |
+| `set_chat_avatars.py` | Устанавливает аватарки чатам из iiko | Разово при подключении |
 
-## Как использовать
+## Как запускать
 
-1. Скопируй и адаптируй `backfill_shaburov.py` под нового клиента
-2. Обнови параметры: `tenant_id`, `branch_names`, `iiko_url`
-3. Запусти: `python -m app.onboarding.backfill_<client_slug>`
-4. Проверь логи в `/opt/ebidoebi/logs/`
+```bash
+# backfill orders_raw (Phase 1: DELIVERIES + Phase 2: SALES dishes)
+python -m app.onboarding.backfill_orders_generic \
+    --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
+
+# backfill daily_stats (выручка, COGS, cash/noncash, самовывоз)
+python -m app.onboarding.backfill_daily_stats_generic \
+    --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
+
+# backfill hourly_stats
+python -m app.onboarding.backfill_hourly_stats \
+    --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
+```
+
+Прогресс сохраняется в `/tmp/<hash>.json` — скрипт возобновляем после падения.
+
+## Архив
+
+`archive/` — устаревшие скрипты (не удалять, нужны как справочник):
+- `backfill_shaburov.py`, `backfill_orders_shaburov.py` — заменены generic-версиями
+- `phase6_enrich_times.py`, `phase7_calculate_durations.py` — тайминги теперь заполняет пайплайн, duration-колонки дропнуты (migration 009)
+- `backfill_olap_enrichment.py` — `olap_enrichment` deprecated (сессия 74)
 
 ## Миграции
 

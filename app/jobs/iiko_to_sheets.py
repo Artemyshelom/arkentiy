@@ -2,12 +2,12 @@
 Задача: Ежедневная выгрузка метрик iiko → Google Sheets.
 Расписание: ежедневно в 23:31 местного (19:31 МСК).
 
-Источник данных: OLAP v2 (app/clients/iiko_bo_olap_v2.py).
+Источник данных: daily_stats (заполнен olap_pipeline в 05:00, 0 OLAP запросов).
 Логика:
   1. Инкрементальная запись — не дублировать уже существующие строки.
-  2. Перепроверка вчерашнего дня — обновлять если iiko BO изменил данные.
+  2. Перепроверка вчерашнего дня — обновлять если daily_stats изменился.
   3. Еженедельная перепроверка (понедельник) — прогон за 7 дней.
-  4. Флаги изменений пишутся в SQLite → утренний отчёт видит что изменилось.
+  4. Флаги изменений пишутся в БД → утренний отчёт видит что изменилось.
 
 13 колонок: Дата | Точка | Город | Выручка | Чеков | Средний чек |
             Наличные | Безналичные | Скидки | SailPlay ₽ | Самовывоз | С/с ₽ | С/с %
@@ -28,6 +28,7 @@ from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
 from app.config import get_settings
 from app.db import (
     get_branches,
+    get_daily_stats,
     log_job_finish,
     log_job_start,
     record_data_update,
@@ -80,10 +81,10 @@ def _fmt(v):
 
 
 def _build_row(date_iso: str, branch: dict, s: dict) -> list:
-    """Строит строку для Sheets из сырых данных точки."""
-    revenue = s.get("revenue_net")
+    """Строит строку для Sheets из данных точки (daily_stats или OLAP-структура)."""
+    revenue = s.get("revenue_net") or s.get("revenue")
     cogs_pct = s.get("cogs_pct")
-    check_count = s.get("check_count")
+    check_count = s.get("check_count") or s.get("orders_count")
     cash = s.get("cash")
     noncash = s.get("noncash")
     discount_sum = s.get("discount_sum")
@@ -172,7 +173,7 @@ async def _compare_and_update_date(
     branches: list[dict] | None = None,
 ) -> list[str]:
     """
-    Сравнивает данные в Sheets с iiko BO за дату.
+    Сравнивает данные в Sheets с daily_stats за дату.
     Обновляет строки если данные изменились.
     Возвращает список названий точек где были изменения.
     """
@@ -182,11 +183,12 @@ async def _compare_and_update_date(
     if not branches or date_iso not in index:
         return []
 
-    try:
-        all_stats = await get_all_branches_stats(date, branches=branches)
-    except Exception as e:
-        logger.error(f"Ошибка iiko BO при перепроверке за {date_iso}: {e}")
-        return []
+    # Читаем из daily_stats (пайплайн обновил в 05:00 или в понедельник)
+    all_stats: dict[str, dict] = {}
+    for branch in branches:
+        row = await get_daily_stats(branch["name"], date_iso, branch.get("tenant_id", 1))
+        if row:
+            all_stats[branch["name"]] = row
 
     # Читаем текущие строки из Sheets для этой даты
     existing_rows = await _read_sheet_rows_for_date(date_iso)
@@ -236,8 +238,7 @@ async def _compare_and_update_date(
 
 async def export_day(date: datetime, branches: list[dict] | None = None) -> list[list]:
     """
-    Выгружает данные за один день. Возвращает список строк для Sheets.
-    Используется и в ежедневном джобе, и при бэкфилле.
+    Выгружает данные за один день из daily_stats. Возвращает список строк для Sheets.
     """
     if branches is None:
         branches = settings.branches
@@ -245,13 +246,12 @@ async def export_day(date: datetime, branches: list[dict] | None = None) -> list
         logger.error("Нет точек для выгрузки")
         return []
 
-    all_stats = await get_all_branches_stats(date, branches=branches)
     date_iso = date.strftime("%Y-%m-%d")
     rows = []
     for branch in branches:
-        s = all_stats.get(branch["name"], {})
+        s = await get_daily_stats(branch["name"], date_iso, branch.get("tenant_id", 1)) or {}
         if not s:
-            logger.warning(f"Нет данных для {branch['name']} за {date_iso}")
+            logger.warning(f"Нет данных для {branch['name']} за {date_iso} в daily_stats")
         rows.append(_build_row(date_iso, branch, s))
     return rows
 

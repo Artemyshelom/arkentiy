@@ -142,14 +142,15 @@ class DailyStatsBackfiller:
         await self.pool.execute(
             """INSERT INTO daily_stats
                (tenant_id, branch_name, date, orders_count, revenue, avg_check,
-                cogs_pct, discount_sum, pickup_count, cash, noncash, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+                cogs_pct, sailplay, discount_sum, pickup_count, cash, noncash, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
               ON CONFLICT (tenant_id, branch_name, date)
               DO UPDATE SET
                 orders_count = EXCLUDED.orders_count,
                 revenue      = EXCLUDED.revenue,
                 avg_check    = EXCLUDED.avg_check,
                 cogs_pct     = EXCLUDED.cogs_pct,
+                sailplay     = EXCLUDED.sailplay,
                 discount_sum = EXCLUDED.discount_sum,
                 pickup_count = EXCLUDED.pickup_count,
                 cash         = EXCLUDED.cash,
@@ -163,6 +164,7 @@ class DailyStatsBackfiller:
             s.get("revenue_net") or 0.0,
             avg_check,
             s.get("cogs_pct"),
+            float(s.get("sailplay") or 0.0),
             s.get("discount_sum") or 0.0,
             s.get("pickup_count") or 0,
             s.get("cash") or 0.0,

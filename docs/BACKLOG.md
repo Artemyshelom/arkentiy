@@ -32,6 +32,7 @@
 
 - [ ] `docs_cleanup` (P0) — закрыть миграцию путей и убрать дубли в документации
 - [ ] `deploy_stability` (P0) — единый чеклист деплоя + контроль отката по инцидентам
+- [ ] `bf_hourly_t1` (P1) — `bf_hourly` (step 5) ещё выполняется на сервере (~1 ч). Проверить: `ssh arkentiy 'tail -5 /tmp/bf_hourly.log'`
 
 ## 📋 Готово к разработке
 
@@ -62,6 +63,9 @@
 
 ## ✅ Сделано (последние релевантные)
 
+- [x] `t1_data_completeness` — 100% заполняемость T1 с 01.12.2025: cash/noncash (277 строк), new_customers (879), discount_sum (14k заказов), shifts (4024 смены), hourly (в процессе) (09.03.2026)
+- [x] `backfill_shifts_generic` — новый скрипт для исторических смен из iiko schedule API + интеграция в orchestrator как step 4 (09.03.2026)
+- [x] `izhevsk_offboarding` — отключение города из монитора: migration fix, очистка 184 строк из БД, протокол offboarding_city.md (09.03.2026)
 - [x] `audit_richformat` — детальные экраны с таймлайном, иконки оплаты, cashier_name в скидках, период /аудит 1.03-7.03 (06.03.2026)
 - [x] `audit_ui_redesign_v2` — сводка + 6 inline детальных экранов, callback-роутер, кнопка Назад (06.03.2026)
 - [x] `audit_risk_pack` — 2 новых детектора (courier_multicancellation, manual_discount) + ежедневный дайджест по всем городам (06.03.2026)
@@ -81,4 +85,4 @@
 
 ---
 
-*Обновлено: 7 марта 2026*
+*Обновлено: 9 марта 2026*

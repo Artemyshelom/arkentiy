@@ -6,16 +6,17 @@
 
 | Скрипт | Что делает | Когда запускать |
 |--------|-----------|----------------|
-| `backfill_new_client.py` | **Мастер-скрипт**: 4 шага последовательно (orders_raw + daily_stats + timing + hourly_stats) | Основной инструмент при онбординге |
-| `backfill_orders_generic.py` | Заполняет `orders_raw` — 2 фазы (DELIVERIES + SALES dishes) | Если нужно только orders_raw |
-| `backfill_daily_stats_generic.py` | Заполняет `daily_stats` — daily через Query C (только OLAP-поля) | Если нужно только пересчитать revenue/cash/noncash |
-| `backfill_hourly_stats.py` | Заполняет `hourly_stats` — почасовая аналитика | Если нужно только hourly_stats |
+| `backfill_new_client.py` | **Мастер-скрипт**: 5 шагов последовательно (orders → daily OLAP → daily timing → shifts → hourly) | **Основной инструмент при онбординге** |
+| `backfill_orders_generic.py` | Заполняет `orders_raw` — 2 фазы (DELIVERIES + SALES dishes) | Шаг 1 мастера; или отдельно если нужен только orders_raw |
+| `backfill_daily_stats_generic.py` | Заполняет `daily_stats` — daily через Query C (только OLAP-поля) | Шаг 2 мастера; или отдельно если нужен только revenue/cash/noncash |
+| `backfill_shifts_generic.py` | Заполняет `shifts_raw` — расписание поваров/курьеров из iiko schedule API | Шаг 4 мастера; или отдельно если нужен только shifts_raw |
+| `backfill_hourly_stats.py` | Заполняет `hourly_stats` — почасовая аналитика из orders_raw + shifts_raw | Шаг 5 мастера; требует заполненных orders_raw и shifts_raw |
 | `set_chat_avatars.py` | Устанавливает аватарки чатам из iiko | Разово при подключении |
 
 ## Как запускать (новый клиент — быстрый старт)
 
 ```bash
-# Полный бэкфилл нового клиента (все 4 шага)
+# Полный бэкфилл нового клиента (все 5 шагов)
 python -m app.onboarding.backfill_new_client \
     --tenant-id 5 \
     --date-from 2026-01-01 \
@@ -33,7 +34,7 @@ python -m app.onboarding.backfill_new_client \
     --tenant-id 1 \
     --date-from 2026-01-01 \
     --date-to 2026-03-10 \
-    --steps 3,4
+    --steps 3,4,5
 ```
 
 ### Шаги backfill_new_client
@@ -43,9 +44,12 @@ python -m app.onboarding.backfill_new_client \
 | 1 | iiko OLAP | `orders_raw` | все поля заказов + блюда |
 | 2 | iiko OLAP | `daily_stats` | revenue, cogs_pct, cash, noncash, pickup_count, discount_sum |
 | 3 | orders_raw (БД) | `daily_stats` | avg_cooking_min, avg_delivery_min, late_*, exact_time_count, new/repeat customers |
-| 4 | orders_raw + shifts_raw (БД) | `hourly_stats` | почасовая аналитика |
+| 4 | iiko schedule API | `shifts_raw` | расписание поваров/курьеров (clock_in, clock_out, role_class) |
+| 5 | orders_raw + shifts_raw (БД) | `hourly_stats` | почасовая аналитика |
 
-Прогресс шагов 1 и 4 сохраняется в `/app/data/` — скрипты возобновляемы после падения.
+> ⚠️ **Порядок важен**: шаг 5 (hourly) читает shifts_raw → шаг 4 должен быть выполнен раньше.
+
+Прогресс шагов 1, 2 и 5 сохраняется в `/app/data/` — скрипты возобновляемы после падения.
 
 ## Индивидуальный запуск скриптов
 
@@ -58,7 +62,11 @@ python -m app.onboarding.backfill_orders_generic \
 python -m app.onboarding.backfill_daily_stats_generic \
     --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
 
-# Только hourly_stats
+# Только shifts_raw (расписание поваров/курьеров)
+python -m app.onboarding.backfill_shifts_generic \
+    --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
+
+# Только hourly_stats (требует заполненных orders_raw + shifts_raw)
 python -m app.onboarding.backfill_hourly_stats \
     --tenant-id 3 --date-from 2025-12-01 --date-to 2026-03-09
 ```

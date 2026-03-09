@@ -1,51 +1,57 @@
 """
 backfill_new_client.py — полный бэкфилл при подключении нового клиента.
 
-Выполняет 4 шага последовательно:
+Выполняет 5 шагов последовательно:
   1. orders_raw  — DELIVERIES (тайминги, оплата, скидки) + SALES (блюда, курьер)
   2. daily_stats — агрегат по точке из OLAP Query C (выручка, COGS, нал/безнал)
   3. daily_stats — timing-поля из orders_raw (avg_cooking_min, exact_time_count…)
-  4. hourly_stats — почасовая аналитика из orders_raw + shifts_raw (только БД)
+  4. shifts_raw  — расписание сотрудников из iiko schedule API (повара/курьеры)
+  5. hourly_stats — почасовая аналитика из orders_raw + shifts_raw (только БД)
+
+Порядок важен: шаг 4 (shifts) должен идти до шага 5 (hourly),
+так как hourly_stats читает shifts_raw для подсчёта cooks_on_shift.
 
 Использование:
     python -m app.onboarding.backfill_new_client \\
         --tenant-id 5 \\
         --date-from 2026-01-01 \\
-        --date-to 2026-03-09 \\
-        --skip-cities "Город1,Город2"
+        --date-to 2026-03-09
 
 Флаги:
     --tenant-id     ID тенанта в БД (обязательно)
     --date-from     Начало диапазона YYYY-MM-DD (обязательно)
     --date-to       Конец диапазона YYYY-MM-DD (не включительно, обязательно)
     --skip-cities   Через запятую — города, у которых iiko-сервер недоступен
-    --steps         Через запятую — запустить только указанные шаги (1,2,3,4)
+    --steps         Через запятую — запустить только указанные шаги (1,2,3,4,5)
 
 Примеры:
-    # Полный бэкфилл нового клиента
+    # Полный бэкфилл нового клиента (все 5 шагов)
     python -m app.onboarding.backfill_new_client --tenant-id 5 --date-from 2026-01-01 --date-to 2026-03-10
 
     # Пропустить город с недоступным iiko-сервером
     python -m app.onboarding.backfill_new_client --tenant-id 5 --date-from 2026-01-01 --date-to 2026-03-10 --skip-cities "Город1,Город2"
 
-    # Только orders_raw + daily_stats (без hourly)
+    # Только orders_raw + daily_stats (без shifts и hourly)
     python -m app.onboarding.backfill_new_client --tenant-id 5 --date-from 2026-01-01 --date-to 2026-03-10 --steps 1,2,3
 
     # Пересчитать только timing-поля в daily_stats (шаг 3)
     python -m app.onboarding.backfill_new_client --tenant-id 1 --date-from 2026-01-01 --date-to 2026-03-10 --steps 3
 
-    # Перезаполнить daily_stats с новыми cash/noncash за период
-    python -m app.onboarding.backfill_new_client --tenant-id 1 --date-from 2026-01-01 --date-to 2026-03-10 --steps 2,3
+    # Только shifts + hourly (если orders_raw уже есть)
+    python -m app.onboarding.backfill_new_client --tenant-id 1 --date-from 2026-01-01 --date-to 2026-03-10 --steps 4,5
+
+    # Пересчитать только hourly_stats (shifts уже загружены)
+    python -m app.onboarding.backfill_new_client --tenant-id 1 --date-from 2026-01-01 --date-to 2026-03-10 --steps 5
 
 Требования:
     DATABASE_URL — в окружении или .env (asyncpg DSN)
-    Для шагов 1–2: доступ к iiko OLAP API через iiko_credentials в БД
-    Для шагов 3–4: только БД (читает из orders_raw / shifts_raw)
+    Для шагов 1–2, 4: доступ к iiko OLAP/schedule API через iiko_credentials в БД
+    Для шагов 3, 5: только БД (читает из orders_raw / shifts_raw)
 
 Недоступные серверы (--skip-cities):
     Используй --skip-cities, если iiko-сервер одного из городов временно недоступен.
     Значение — поле `city` из iiko_credentials. Можно передать несколько через запятую.
-    Шаги 3 и 4 не делают OLAP-запросов, --skip-cities на них не влияет.
+    Шаги 3 и 5 не делают OLAP-запросов, --skip-cities на них не влияет.
 """
 
 from __future__ import annotations
@@ -206,12 +212,32 @@ async def step3_daily_stats_timing(tenant_id: int, date_from: date, date_to: dat
 
 
 # ---------------------------------------------------------------------------
-# Шаг 4 — hourly_stats (только из БД)
+# Шаг 4 — shifts_raw из iiko schedule API
 # ---------------------------------------------------------------------------
 
-async def step4_hourly_stats(tenant_id: int, date_from: date, date_to: date):
+async def step4_shifts_raw(tenant_id: int, date_from: date, date_to: date):
+    """Загружает shifts_raw из /api/v2/employees/schedule. Нужен до hourly_stats."""
+    logger.info("=== Шаг 4: shifts_raw из iiko schedule API ===")
+    try:
+        from app.onboarding.backfill_shifts_generic import ShiftsBackfiller
+        backfiller = ShiftsBackfiller(
+            tenant_id=tenant_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        await backfiller.run()
+    except Exception as e:
+        logger.error(f"Шаг 4 ошибка: {e}")
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Шаг 5 — hourly_stats (только из БД)
+# ---------------------------------------------------------------------------
+
+async def step5_hourly_stats(tenant_id: int, date_from: date, date_to: date):
     """Агрегирует hourly_stats из orders_raw + shifts_raw. Только БД."""
-    logger.info("=== Шаг 4: hourly_stats (из orders_raw + shifts_raw) ===")
+    logger.info("=== Шаг 5: hourly_stats (из orders_raw + shifts_raw) ===")
     try:
         from app.onboarding.backfill_hourly_stats import HourlyStatsBackfiller
         backfiller = HourlyStatsBackfiller(
@@ -225,7 +251,7 @@ async def step4_hourly_stats(tenant_id: int, date_from: date, date_to: date):
         finally:
             await backfiller.close_db()
     except Exception as e:
-        logger.error(f"Шаг 4 ошибка: {e}")
+        logger.error(f"Шаг 5 ошибка: {e}")
         raise
 
 
@@ -243,7 +269,7 @@ async def main():
     parser.add_argument("--date-from", type=str, required=True, help="YYYY-MM-DD")
     parser.add_argument("--date-to", type=str, required=True, help="YYYY-MM-DD (не включительно)")
     parser.add_argument("--skip-cities", type=str, default="", help="Города через запятую (недоступные серверы)")
-    parser.add_argument("--steps", type=str, default="1,2,3,4", help="Шаги для запуска (по умолчанию: 1,2,3,4)")
+    parser.add_argument("--steps", type=str, default="1,2,3,4,5", help="Шаги для запуска (по умолчанию: 1,2,3,4,5)")
 
     args = parser.parse_args()
 
@@ -278,7 +304,10 @@ async def main():
             await step3_daily_stats_timing(tenant_id, date_from, date_to)
 
         if 4 in steps:
-            await step4_hourly_stats(tenant_id, date_from, date_to)
+            await step4_shifts_raw(tenant_id, date_from, date_to)
+
+        if 5 in steps:
+            await step5_hourly_stats(tenant_id, date_from, date_to)
 
     except Exception as e:
         logger.error(f"Бэкфилл прерван: {e}")

@@ -18,6 +18,80 @@
 
 ---
 
+## Сессия 76 — 9 марта 2026 (fix: T1 100% completeness backfill + backfill architecture) ✅
+
+**Цель:** Довести T1 до 100% заполняемости с 01.12.2025 по всем 4 таблицам.
+
+### 1. Диагноз — 4 дыры в данных T1 с 2025-12-01
+
+| Таблица | Проблема | Масштаб |
+|---------|---------|---------|
+| `daily_stats` | `cash/noncash = 0` | 277 строк |
+| `daily_stats` | `new_customers ≈ 0` | ~870 дней×точек |
+| `orders_raw` | `discount_sum = 0` | 103 253 заказа |
+| `hourly_stats` | `cooks_on_shift = 0` | 9 329 часов |
+
+### 2. Исправленные баги в backfill-скриптах
+
+**Bug 1 — `backfill_orders_generic.py`, SyntaxError**
+- 481 строка мёртвого кода после новой `_print_summary` — скрипт падал при старте
+- Fix: удалены строки 507–988. Коммит `7f85114`
+
+**Bug 2 — `backfill_orders_generic.py`, Auth через NULL**
+- Весь T1: `bo_login = NULL`, `bo_password = NULL` в `iiko_credentials`
+- Старый `_get_token` делал `bo_password.encode()` → AttributeError на None
+- Fix: заменён на `get_bo_token()` из `iiko_auth.py` с env-fallback. Коммит `07ce3b7`
+
+**Bug 3 — `backfill_new_client.py`, date type mismatch**
+- Step 3: `date=$3::date` — asyncpg пытался передать строку как date-тип → `'str' has no attribute 'toordinal'`
+- Fix: `date::text = $3`. Коммит `07ce3b7`
+
+**Bug 4 — `backfill_new_client.py`, init_db не вызывался**
+- Step 4 (hourly) создавал `HourlyStatsBackfiller` но не вызывал `init_db()` → `pool = None`, первый же `pool.fetch()` → AttributeError
+- Fix: добавлены `init_db()` + `close_db()` в `step4_hourly_stats`. Коммит `80f3559`
+
+**Bug 5 — `backfill_shifts_generic.py`, shift_date строка вместо date**
+- `shift_date = date_from_str[:10]` → строка `"2025-12-01"` передавалась в asyncpg как date-тип
+- Fix: `datetime.date.fromisoformat(date_from_str[:10])`. Коммит `8ef6d3c`
+
+### 3. Новый скрипт: backfill_shifts_generic.py
+
+Обнаружено: iiko хранит полную историю расписания через `/api/v2/employees/schedule?key=TOKEN&from=DATE&to=DATE`.
+
+Написан `app/onboarding/backfill_shifts_generic.py` (304 строки):
+- Чанки по 7 дней, resumable (progress JSON в `/app/data/`)
+- Загружает employees dict один раз на сервер (~24 000 сотрудников, 18 МБ XML)
+- `departmentId` → `branch_name` через `iiko_credentials.dept_id` (уже заполнено у T1)
+- `clock_in = dateFrom`, `clock_out = dateTo` из XML
+- Классификация ролей через `_classify_role` (повара/курьеры, остальные пропускаются)
+- Протестировано: 9 серверов, 4024 смены за Dec 2025 – Feb 21 2026. Коммит `f61357f`
+
+### 4. Рефактор orchestrator: backfill_new_client.py
+
+Shifts не был интегрирован в мастер-скрипт. Исправлено:
+- Добавлен `step4_shifts_raw()` — вызывает `ShiftsBackfiller.run()`
+- Прежний `step4_hourly_stats` → `step5_hourly_stats`
+- `--steps` по умолчанию теперь `1,2,3,4,5` (было `1,2,3,4`)
+- Docstring обновлён: 5 шагов, порядок важен (shifts до hourly)
+
+### 5. Результаты бэкфиллов
+
+| Скрипт | Результат |
+|--------|-----------|
+| `backfill_daily_stats_generic` | ✅ 277 строк cash/noncash заполнено |
+| `backfill_new_client --steps 3` | ✅ 879 записей new_customers обновлено |
+| `backfill_orders_generic` | ✅ 14 531 заказ phase1 обработан |
+| `backfill_shifts_generic` | ✅ 4 024 смены Dec 2025 – Feb 21 2026 |
+| `backfill_new_client --steps 5` | ⏳ запущен, ~99 дней × 9 точек × 24ч |
+
+### Файлы изменены
+- `app/onboarding/backfill_orders_generic.py` — bugfix ×2 (SyntaxError, auth)
+- `app/onboarding/backfill_shifts_generic.py` — создан (304 строки) + bugfix shift_date
+- `app/onboarding/backfill_new_client.py` — bugfix ×2 (date::text, init_db) + shifts как step 4, hourly → step 5
+- `app/onboarding/README.md` — добавлен backfill_shifts_generic, обновлена таблица шагов (5 шагов)
+
+---
+
 ## Сессия 75 — 9 марта 2026 (fix: Ижевск offboarding + аудит данных + порядок в docs) ✅
 
 **Контекст:** После деплоя 9 марта обнаружено что Ижевск (is_active=false в БД) продолжает опрашиваться Events API и копить мусорные строки в orders_raw / shifts_raw. Также накопились выполненные ТЗ в specs/, устаревшие упоминания Ижевска в коде.

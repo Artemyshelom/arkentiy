@@ -44,13 +44,14 @@ SELECT id, 'Зеленогорск_1 Изы', 'Зеленогорск',
 FROM tenants WHERE slug = 'shaburov'
 ON CONFLICT (tenant_id, branch_name) DO NOTHING;
 
+-- Ижевск отключён (is_active=false) — точка отключена от сервиса
 INSERT INTO iiko_credentials (tenant_id, branch_name, city, bo_url, bo_login, bo_password, dept_id, utc_offset, is_active, created_at)
 SELECT id, 'Ижевск_1 Авт', 'Ижевск',
     'https://yobidoyobi-izhevsk.iiko.it/resto',
     'lazarevich', '19121984',
-    '5093557c-7089-42c7-9405-98ac641521eb', 4, true, now()
+    '5093557c-7089-42c7-9405-98ac641521eb', 4, false, now()
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, branch_name) DO NOTHING;
+ON CONFLICT (tenant_id, branch_name) DO UPDATE SET is_active = false;
 
 -- 4. Telegram chats
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
@@ -68,10 +69,11 @@ SELECT id, -5169819257, 'Поиск заказов', '["search"]'::jsonb, NULL, 
 FROM tenants WHERE slug = 'shaburov'
 ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, modules_json = '["search"]'::jsonb;
 
+-- Чат Ижевск отключён (is_active=false)
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
-SELECT id, -4860116340, 'Опоздания Ижевск', '["late_alerts","late_queries"]'::jsonb, '["Ижевск"]', true
+SELECT id, -4860116340, 'Опоздания Ижевск', '["late_alerts","late_queries"]'::jsonb, '["Ижевск"]', false
 FROM tenants WHERE slug = 'shaburov'
-ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = true, city = '["Ижевск"]', modules_json = '["late_alerts","late_queries"]'::jsonb;
+ON CONFLICT (tenant_id, chat_id) DO UPDATE SET is_active = false, city = '["Ижевск"]', modules_json = '["late_alerts","late_queries"]'::jsonb;
 
 INSERT INTO tenant_chats (tenant_id, chat_id, name, modules_json, city, is_active)
 SELECT id, -5168619845, 'Опоздания Зеленогорск', '["late_alerts","late_queries"]'::jsonb, '["Зеленогорск"]', true

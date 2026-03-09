@@ -37,9 +37,10 @@ def _olap_body(
     agg_fields: list[str],
     date_from: str,
     date_to: str,
+    report_type: str = "SALES",
 ) -> dict:
     return {
-        "reportType": "SALES",
+        "reportType": report_type,
         "buildSummary": "false",
         "groupByRowFields": group_fields,
         "aggregateFields": agg_fields,
@@ -64,8 +65,9 @@ async def _query_olap_v2(
     date_from: str,
     date_to: str,
     client: httpx.AsyncClient,
+    report_type: str = "SALES",
 ) -> list[dict]:
-    body = _olap_body(group_fields, agg_fields, date_from, date_to)
+    body = _olap_body(group_fields, agg_fields, date_from, date_to, report_type=report_type)
     resp = await client.post(
         f"{bo_url}/api/v2/reports/olap?key={token}",
         json=body,
@@ -119,9 +121,11 @@ async def _fetch_from_server(
         if include_delivery:
             detail_group.append("Delivery.ServiceType")
 
-        # --- Query 3: discount type breakdown (реальные суммы скидок по типу) ---
+        # --- Query 3: скидки по типу (DELIVERIES — DiscountSum на уровне заказа, не блюда) ---
+        # В SALES reportType DiscountSum считается per-dish и даёт завышенные значения.
+        # DELIVERIES возвращает одну строку на заказ, DiscountSum корректен.
         discount_group = ["Department", "OrderDiscount.Type"]
-        discount_agg = ["DiscountSum", "UniqOrderId"]
+        discount_agg = ["DiscountSum"]
 
         q1, q2, q3 = await asyncio.gather(
             _query_olap_v2(
@@ -135,6 +139,7 @@ async def _fetch_from_server(
             _query_olap_v2(
                 bo_url, token, discount_group, discount_agg,
                 date_from, date_to, client,
+                report_type="DELIVERIES",
             ),
         )
 
@@ -174,17 +179,20 @@ async def _fetch_from_server(
                 continue
             disc_type = (row.get("OrderDiscount.Type") or "").strip()
             disc_sum = float(row.get("DiscountSum", 0))
-            disc_count = int(row.get("UniqOrderId", 0))
             if disc_type and disc_sum > 0:
                 stats[dept]["discount_types"].append({
                     "type": disc_type,
                     "sum": disc_sum,
-                    "count": disc_count,
                 })
 
-        # Сортируем разбивку скидок по убыванию суммы
+        # Сортируем разбивку и пересчитываем discount_sum из DELIVERIES
+        # (Q1 SALES DiscountSum считается per-dish и даёт завышенное значение)
         for dept in stats:
-            stats[dept]["discount_types"].sort(key=lambda x: x["sum"], reverse=True)
+            if stats[dept]["discount_types"]:
+                stats[dept]["discount_types"].sort(key=lambda x: x["sum"], reverse=True)
+                stats[dept]["discount_sum"] = round(
+                    sum(dt["sum"] for dt in stats[dept]["discount_types"]), 2
+                )
 
     return dict(stats)
 

@@ -121,6 +121,29 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
     # Если Events API ещё не загружен (revision=0 после рестарта) — подставляем
     # счётчики из orders_raw как fallback. Они менее оперативны, но лучше пустого экрана.
     db_fallback = rt_data is None
+
+    # Мёрж разбивки скидок: суммы из OLAP DELIVERIES (корректные) + счётчики из orders_raw
+    olap_disc_types = branch_olap.get("discount_types") or []
+    if olap_disc_types:
+        # Обогащаем OLAP-записи кол-вом заказов из orders_raw (orders_raw.sum — неверный, count — верный)
+        orders_count_by_type = {
+            d["type"]: d["count"]
+            for d in orders_agg.get("discount_types_agg", [])
+            if isinstance(d, dict)
+        }
+        for dt in olap_disc_types:
+            dt["count"] = orders_count_by_type.get(dt["type"], "")
+        discount_types_final = olap_disc_types
+        # Логируем расхождение суммы разбивки с итогом (диагностика)
+        if discount_sum:
+            breakdown_total = sum(dt["sum"] for dt in olap_disc_types)
+            if breakdown_total > 0 and abs(breakdown_total - discount_sum) / max(breakdown_total, discount_sum) > 0.01:
+                logger.warning(
+                    f"Скидки [{branch['name']}]: итог {discount_sum:.0f} ≠ сумма разбивки {breakdown_total:.0f}"
+                )
+    else:
+        discount_types_final = orders_agg.get("discount_types_agg", [])
+
     return {
         "name": branch["name"],
         "city": branch.get("city", ""),
@@ -129,7 +152,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
         "avg_check": avg_check,
         "cogs_pct": cogs_pct,
         "discount_sum": discount_sum,
-        "discount_types_agg": branch_olap.get("discount_types") or orders_agg.get("discount_types_agg", []),
+        "discount_types_agg": discount_types_final,
         "sailplay": sailplay,
         "tz": tz,
         "active_orders": rt_data["active_orders"] if rt_data else orders_agg.get("active_count"),

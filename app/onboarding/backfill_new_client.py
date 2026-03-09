@@ -117,98 +117,19 @@ async def step2_daily_stats_olap(tenant_id: int, date_from: date, date_to: date,
 # ---------------------------------------------------------------------------
 
 async def step3_daily_stats_timing(tenant_id: int, date_from: date, date_to: date):
-    """
-    Пересчитывает timing-поля daily_stats из orders_raw:
-      avg_cooking_min, avg_wait_min, avg_delivery_min,
-      late_delivery_count, late_pickup_count, exact_time_count,
-      new_customers, repeat_customers, cooks_count, couriers_count.
-
-    Использует глобальный пул database_pg (без обращения к iiko API).
-    """
+    """Пересчитывает timing-поля daily_stats из orders_raw (только БД)."""
     logger.info("=== Шаг 3: daily_stats timing из orders_raw ===")
-
-    from app.database_pg import init_pool_only, aggregate_orders_for_daily_stats, upsert_daily_stats_batch, get_pool
-
-    await init_pool_only(os.environ["DATABASE_URL"])
-    pool = get_pool()
-
-    # Получаем список точек тенанта за указанный период
-    branch_rows = await pool.fetch(
-        "SELECT DISTINCT branch_name FROM orders_raw WHERE tenant_id=$1 AND date BETWEEN $2 AND $3",
-        tenant_id, date_from, date_to - timedelta(days=1),
-    )
-    branches = [r["branch_name"] for r in branch_rows]
-
-    if not branches:
-        logger.warning("Нет данных в orders_raw за период, шаг 3 пропущен")
-        return
-
-    ok = err = 0
-    current = date_from
-    yesterday = date.today() - timedelta(days=1)
-
-    while current <= min(date_to - timedelta(days=1), yesterday):
-        date_iso = current.isoformat()
-        day_rows = []
-
-        for branch_name in branches:
-            try:
-                agg = await aggregate_orders_for_daily_stats(branch_name, date_iso)
-
-                # Читаем текущий daily_stats чтобы не затереть OLAP-поля (revenue, cash, noncash...)
-                existing = await pool.fetchrow(
-                    "SELECT revenue, avg_check, cogs_pct, discount_sum, pickup_count, cash, noncash "
-                    "FROM daily_stats WHERE tenant_id=$1 AND branch_name=$2 AND date::text = $3",
-                    tenant_id, branch_name, date_iso,
-                )
-                if existing:
-                    late_d = agg.get("late_delivery_count") or 0
-                    total_d = agg.get("total_delivery_count") or 0
-                    late_pct = round(late_d / total_d * 100, 1) if total_d else 0.0
-
-                    day_rows.append({
-                        "branch_name": branch_name,
-                        "date": date_iso,
-                        "orders_count":        existing.get("orders_count") or 0,
-                        "revenue":             existing["revenue"],
-                        "avg_check":           existing["avg_check"],
-                        "cogs_pct":            existing["cogs_pct"],
-                        "sailplay":            0.0,
-                        "discount_sum":        existing["discount_sum"],
-                        "pickup_count":        existing["pickup_count"],
-                        "cash":                existing["cash"],
-                        "noncash":             existing["noncash"],
-                        "late_count":          late_d,
-                        "total_delivered":     total_d,
-                        "late_percent":        late_pct,
-                        "avg_late_min":        agg.get("avg_late_min") or 0,
-                        "cooks_count":         agg.get("cooks_today") or 0,
-                        "couriers_count":      agg.get("couriers_today") or 0,
-                        "late_delivery_count": late_d,
-                        "late_pickup_count":   agg.get("late_pickup_count") or 0,
-                        "avg_cooking_min":     agg.get("avg_cooking_min"),
-                        "avg_wait_min":        agg.get("avg_wait_min"),
-                        "avg_delivery_min":    agg.get("avg_delivery_min"),
-                        "exact_time_count":    agg.get("exact_time_count") or 0,
-                        "new_customers":             agg.get("new_customers") or 0,
-                        "new_customers_revenue":     agg.get("new_customers_revenue") or 0.0,
-                        "repeat_customers":          agg.get("repeat_customers") or 0,
-                        "repeat_customers_revenue":  agg.get("repeat_customers_revenue") or 0.0,
-                    })
-            except Exception as e:
-                logger.warning(f"  {date_iso} {branch_name}: {e}")
-                err += 1
-
-        if day_rows:
-            await upsert_daily_stats_batch(day_rows, tenant_id=tenant_id)
-            ok += len(day_rows)
-
-        if ok > 0 and ok % 50 == 0:
-            logger.info(f"  ... {date_iso}, обработано: {ok}")
-
-        current += timedelta(days=1)
-
-    logger.info(f"Шаг 3 завершён: обновлено {ok}, ошибок {err}")
+    try:
+        from app.onboarding.backfill_timing_stats import TimingStatsBackfiller
+        backfiller = TimingStatsBackfiller(
+            tenant_id=tenant_id,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        await backfiller.run()
+    except Exception as e:
+        logger.error(f"Шаг 3 ошибка: {e}")
+        raise
 
 
 # ---------------------------------------------------------------------------

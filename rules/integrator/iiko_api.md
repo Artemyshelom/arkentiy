@@ -78,14 +78,15 @@ Cookie живёт ~30 мин. SHA1 пароля: `hashlib.sha1(password.encode()
 
 ```
 GET /api/auth?login=LOGIN&pass=SHA1HASH
-GET /api/reports/sales?key=TOKEN&department=DEPT_ID&dateFrom=dd.MM.yyyy&dateTo=dd.MM.yyyy  ← НЕ ИСПОЛЬЗУЕТСЯ (выручка из OLAP v2)
-GET /api/corporation/departments?key=TOKEN    → список отделов с dept_id
+GET /api/corporation/departments?key=TOKEN    → список отделов с dept_id (нужен при онбординге)
 GET /api/employees?key=TOKEN                  → все сотрудники (23к+, ~18 МБ XML!) — только при старте!
 GET /api/events?key=TOKEN                     → все события с начала дня
 GET /api/events?from_rev=N&key=TOKEN          → события с ревизии N
 ```
 
-**Не работает:** `/api/reports/olap` (500 NPE), cash_shifts (404), delivery orders (404)
+> Endpoint'ы `/api/v2/*` (employees, salary, schedule, products, version) — полная спецификация в `docs/reference/iiko_bo_api.md`.
+
+**Не работает:** `/api/reports/olap` (500 NPE), `cash_shifts` (404), `delivery orders` (404)
 
 ### OLAP v2 API (JSON, программные отчёты)
 
@@ -200,7 +201,7 @@ Content-Type: application/json
 `Delivery.ExpectedDeliveryTime` (это другое поле — несуществующее),
 `Delivery.PlannedTime`, `Delivery.DeliveryDate`
 
-**reportType:** `SALES` (основной), `DELIVERIES` (работает), `TRANSACTIONS` (другие фильтры). `EMPLOYEES`, `LABOR` — не существуют.
+**reportType + полный справочник полей:** `docs/reference/iiko_bo_api.md`. `EMPLOYEES`, `LABOR` — не существуют в OLAP.
 
 **Формат дат:** ISO (`YYYY-MM-DD`), **НЕ** `dd.MM.yyyy` как в пресетах! `from` и `to` не должны быть равны (иначе 409).
 

@@ -31,7 +31,7 @@ ENRICHMENT_FIELDS = [
     "Delivery.Number", "Department", "PayTypes",
     "OrderDiscount.Type", "Delivery.SourceKey",
     "Delivery.PrintTime", "Delivery.CookingFinishTime",
-    "Delivery.SendTime", "Delivery.BillTime", "OpenTime",
+    "Delivery.SendTime", "OpenTime",
 ]
 
 
@@ -106,7 +106,6 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
         send_time = ""
         print_time = ""
         cooked_time = ""
-        ready_time = ""
         opened_at = ""
 
         for r in order_rows:
@@ -135,10 +134,6 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
             if ct and not cooked_time:
                 cooked_time = str(ct)
 
-            bt = r.get("Delivery.BillTime")
-            if bt and not ready_time:
-                ready_time = str(bt)
-
             ot = r.get("OpenTime")
             if ot and not opened_at:
                 opened_at = str(ot)
@@ -153,7 +148,6 @@ def _aggregate_by_order(rows: list[dict], target_branches: set[str]) -> dict:
             "send_time": send_time,
             "service_print_time": print_time,
             "cooked_time": cooked_time,
-            "ready_time": ready_time,
             "opened_at": opened_at,
         }
     return result
@@ -180,7 +174,6 @@ async def _update_orders_raw(enriched: dict, tenant_id: int) -> int:
             ("send_time", data["send_time"]),
             ("service_print_time", data["service_print_time"]),
             ("cooked_time", data["cooked_time"]),
-            ("ready_time", data["ready_time"]),
             ("opened_at", data["opened_at"]),
         ]:
             if val:

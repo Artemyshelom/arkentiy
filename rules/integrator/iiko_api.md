@@ -2,6 +2,8 @@
 
 > Два разных API. Всегда сверяйся сюда перед работой с iiko.
 
+**Полный справочник endpoint'ов iiko BO:** `docs/reference/iiko_bo_api.md`
+
 ---
 
 ## ПРАВИЛО ВЫБОРА API

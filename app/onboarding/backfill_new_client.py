@@ -152,7 +152,7 @@ async def step3_daily_stats_timing(tenant_id: int, date_from: date, date_to: dat
                 # Читаем текущий daily_stats чтобы не затереть OLAP-поля (revenue, cash, noncash...)
                 existing = await pool.fetchrow(
                     "SELECT revenue, avg_check, cogs_pct, discount_sum, pickup_count, cash, noncash "
-                    "FROM daily_stats WHERE tenant_id=$1 AND branch_name=$2 AND date=$3::date",
+                    "FROM daily_stats WHERE tenant_id=$1 AND branch_name=$2 AND date::text = $3",
                     tenant_id, branch_name, date_iso,
                 )
                 if existing:

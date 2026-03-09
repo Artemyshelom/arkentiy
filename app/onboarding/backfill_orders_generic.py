@@ -88,11 +88,9 @@ class OrdersBackfiller:
         with open(self.progress_file, "w") as f:
             json.dump(sorted(done), f)
 
-    async def _get_token(self, bo_url: str, bo_login: str, bo_password: str, client: httpx.AsyncClient) -> str:
-        pw_hash = hashlib.sha1(bo_password.encode()).hexdigest()
-        r = await client.get(f"{bo_url}/api/auth?login={bo_login}&pass={pw_hash}", timeout=30)
-        r.raise_for_status()
-        return r.text.strip()
+    async def _get_token(self, bo_url: str, bo_login: str | None, bo_password: str | None, client: httpx.AsyncClient) -> str:
+        from app.clients.iiko_auth import get_bo_token
+        return await get_bo_token(bo_url, client=client, bo_login=bo_login, bo_password=bo_password)
 
     def _date_filter(self, date_from: str, date_to: str) -> dict:
         return {

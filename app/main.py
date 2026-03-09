@@ -187,13 +187,14 @@ def register_jobs() -> None:
         misfire_grace_time=600,
     )
 
-    # Еженедельный отчёт: каждый понедельник в :30, аналогичная логика по таймзонам.
-    # 09:30 локального = понедельник и target_offset == 12 - msk_hour.
+    # Еженедельный отчёт: каждый понедельник в 06:00 МСК = 10:00 UTC+7 (строго после пайплайна и утреннего).
+    # Формула: 10:00 лок → UTC+7 06:00 UTC → МСК 09:00... нет: UTC+7 10:00 = UTC 03:00 = МСК 06:00.
+    # target_offset = 13 - msk_hour (13 - 6 = 7 ✓).
     async def _weekly_report_by_tz():
         from datetime import datetime as _dt, timezone as _tz, timedelta as _td
         from app.db import get_all_branches
         msk_now = _dt.now(_tz(_td(hours=3)))
-        target_offset = 12 - msk_now.hour
+        target_offset = 13 - msk_now.hour
         offsets = {b.get("utc_offset", 7) for b in get_all_branches()}
         if target_offset in offsets:
             try:
@@ -203,7 +204,7 @@ def register_jobs() -> None:
 
     scheduler.add_job(
         _weekly_report_by_tz,
-        trigger=CronTrigger(day_of_week="mon", minute=30),  # каждый пн в :30
+        trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),  # пн 06:00 МСК = 10:00 UTC+7
         id="weekly_report",
         name="Еженедельный отчёт → Telegram (по таймзонам)",
         replace_existing=True,

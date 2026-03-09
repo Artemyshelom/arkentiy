@@ -362,7 +362,7 @@ async def fetch_branch_aggregate(
                 cogs = row.get("ProductCostBase.Percent")
                 if cogs is not None:
                     stats[dept]["cogs_pct"] = round(cogs * 100, 2)
-                stats[dept]["check_count"] = row.get("UniqOrderId.OrdersCount", 0)
+                stats[dept]["check_count"] = int(row.get("UniqOrderId.OrdersCount") or 0)
                 stats[dept]["discount_sum"] = float(row.get("DiscountSum", 0))
 
             for row in q2:

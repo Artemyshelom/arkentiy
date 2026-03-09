@@ -1063,7 +1063,7 @@ async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int
     }
 
     dt_rows = await pool.fetch(
-        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+        """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
            FROM orders_raw
            WHERE tenant_id = $1 AND branch_name = $2 AND date::text = $3
              AND discount_type IS NOT NULL AND discount_type != ''
@@ -1087,6 +1087,11 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
 
     row = await pool.fetchrow(
         """SELECT
+            COUNT(*) AS raw_orders_count,
+            COALESCE(SUM(CASE
+                WHEN pay_breakdown LIKE '%SailPlay%'
+                THEN (pay_breakdown::jsonb->>'SailPlay Бонус')::numeric
+            END), 0) AS raw_sailplay,
             SUM(CASE WHEN is_late = true AND is_self_service = false 
                      AND COALESCE(payment_changed, false) = false THEN 1 ELSE 0 END)
                 AS late_delivery_count,
@@ -1183,7 +1188,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
         result["exact_time_count"] = exact_row["exact_time_count"] or 0
 
     dt_rows = await pool.fetch(
-        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+        """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
            FROM orders_raw
            WHERE branch_name = $1 AND date::text = $2
              AND discount_type IS NOT NULL AND discount_type != ''
@@ -1303,8 +1308,8 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
             SUM(avg_late_min * COALESCE(late_count, 0))
                 / NULLIF(SUM(CASE WHEN avg_late_min > 0 THEN COALESCE(late_count, 0) ELSE 0 END), 0)
                 AS avg_late_min,
-            SUM(avg_cooking_min * COALESCE(orders_count, 0))
-                / NULLIF(SUM(CASE WHEN avg_cooking_min IS NOT NULL THEN COALESCE(orders_count, 0) ELSE 0 END), 0)
+            SUM(avg_cooking_min * COALESCE(total_delivered, 0))
+                / NULLIF(SUM(CASE WHEN avg_cooking_min IS NOT NULL THEN COALESCE(total_delivered, 0) ELSE 0 END), 0)
                 AS avg_cooking_min,
             SUM(avg_wait_min * COALESCE(total_delivered, 0))
                 / NULLIF(SUM(CASE WHEN avg_wait_min IS NOT NULL THEN COALESCE(total_delivered, 0) ELSE 0 END), 0)
@@ -1339,7 +1344,7 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
             result[k] = round(float(v), 1 if k != "cogs_pct" else 2)
 
     dt_rows = await pool.fetch(
-        """SELECT discount_type, COUNT(*) as cnt, SUM(sum) as total
+        """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
            FROM orders_raw
            WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
              AND discount_type IS NOT NULL AND discount_type != ''

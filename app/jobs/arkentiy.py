@@ -1352,6 +1352,10 @@ async def _build_branch_report(
             "couriers_today": ds.get("couriers_count") or 0,
             "exact_time_count": ds.get("exact_time_count") or 0,
             "payment_changed_count": ds.get("payment_changed_count") or 0,
+            "new_customers":            ds.get("new_customers") or 0,
+            "new_customers_revenue":    ds.get("new_customers_revenue") or 0.0,
+            "repeat_customers":         ds.get("repeat_customers") or 0,
+            "repeat_customers_revenue": ds.get("repeat_customers_revenue") or 0.0,
         }
 
     # Обогащаем разбивку скидок через DELIVERIES OLAP (корректный DiscountSum).
@@ -1403,6 +1407,8 @@ async def _build_city_aggregate(
         "revenue", "orders_count", "discount_sum", "sailplay",
         "late_delivery_count", "total_delivered", "exact_time_count",
         "payment_changed_count", "cooks_today", "couriers_today",
+        "new_customers", "new_customers_revenue",
+        "repeat_customers", "repeat_customers_revenue",
     )
     count = 0
     all_dt: dict[str, dict] = {}
@@ -1500,6 +1506,10 @@ async def _build_city_aggregate(
         "couriers_today": totals.get("couriers_today", 0),
         "exact_time_count": totals.get("exact_time_count", 0),
         "payment_changed_count": totals.get("payment_changed_count", 0),
+        "new_customers":            totals.get("new_customers", 0),
+        "new_customers_revenue":    totals.get("new_customers_revenue", 0.0),
+        "repeat_customers":         totals.get("repeat_customers", 0),
+        "repeat_customers_revenue": totals.get("repeat_customers_revenue", 0.0),
     }
 
     result = _format_branch_report(

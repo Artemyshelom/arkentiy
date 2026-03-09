@@ -410,7 +410,12 @@ async def _upsert_daily_stats_from_aggregate(
             agg = await aggregate_orders_for_daily_stats(name, date_iso)
 
             rev = stats.get("revenue_net") or 0.0
-            chk = stats.get("check_count") or 0
+            chk = int(stats.get("check_count") or agg.get("raw_orders_count") or 0)
+            if not stats.get("check_count") and chk:
+                logger.warning(f"[pipeline] check_count fallback orders_raw: {name} {date_iso} → {chk}")
+            sailplay_val = float(stats.get("sailplay") or agg.get("raw_sailplay") or 0.0)
+            if not stats.get("sailplay") and sailplay_val:
+                logger.warning(f"[pipeline] sailplay fallback orders_raw: {name} {date_iso} → {sailplay_val}")
             late_d = agg.get("late_delivery_count") or 0
             total_d = agg.get("total_delivery_count") or 0
             late_pct = round(late_d / total_d * 100, 1) if total_d else 0.0
@@ -427,7 +432,7 @@ async def _upsert_daily_stats_from_aggregate(
                 "revenue":        rev,
                 "avg_check":      round(rev / chk) if chk else 0,
                 "cogs_pct":       stats.get("cogs_pct"),
-                "sailplay":       stats.get("sailplay"),
+                "sailplay":       sailplay_val,
                 "discount_sum":   stats.get("discount_sum"),
                 "discount_types": discount_types_json,
                 "delivery_count": chk - (stats.get("pickup_count") or 0),

@@ -119,13 +119,21 @@ async def _fetch_from_server(
         if include_delivery:
             detail_group.append("Delivery.ServiceType")
 
-        q1, q2 = await asyncio.gather(
+        # --- Query 3: discount type breakdown (реальные суммы скидок по типу) ---
+        discount_group = ["Department", "OrderDiscount.Type"]
+        discount_agg = ["DiscountSum", "UniqOrderId"]
+
+        q1, q2, q3 = await asyncio.gather(
             _query_olap_v2(
                 bo_url, token, ["Department"], core_agg,
                 date_from, date_to, client,
             ),
             _query_olap_v2(
                 bo_url, token, detail_group, detail_agg,
+                date_from, date_to, client,
+            ),
+            _query_olap_v2(
+                bo_url, token, discount_group, discount_agg,
                 date_from, date_to, client,
             ),
         )
@@ -159,6 +167,24 @@ async def _fetch_from_server(
 
             if include_delivery and service_type == "PICKUP":
                 stats[dept]["pickup_count"] += count
+
+        for row in q3:
+            dept = row.get("Department", "").strip()
+            if not dept or dept not in target_names:
+                continue
+            disc_type = (row.get("OrderDiscount.Type") or "").strip()
+            disc_sum = float(row.get("DiscountSum", 0))
+            disc_count = int(row.get("UniqOrderId", 0))
+            if disc_type and disc_sum > 0:
+                stats[dept]["discount_types"].append({
+                    "type": disc_type,
+                    "sum": disc_sum,
+                    "count": disc_count,
+                })
+
+        # Сортируем разбивку скидок по убыванию суммы
+        for dept in stats:
+            stats[dept]["discount_types"].sort(key=lambda x: x["sum"], reverse=True)
 
     return dict(stats)
 

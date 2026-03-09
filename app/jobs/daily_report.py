@@ -68,8 +68,8 @@ def _format_branch_report(
 
     disc_str = _fmt_money(discount_sum) if discount_sum else "—"
     sail_str = _fmt_money(sailplay) if sailplay else "—"
-    lines.append(f"💸 Скидки: {disc_str} | SailPlay: {sail_str}")
-    discount_types = agg.get("discount_types_agg") or []
+    lines.append(f"💸 Скидки: {disc_str} | Оплата бонусами: {sail_str}")
+    discount_types = stats.get("discount_types") or agg.get("discount_types_agg") or []
     if isinstance(discount_types, str):
         try:
             discount_types = json.loads(discount_types)
@@ -79,8 +79,11 @@ def _format_branch_report(
         if isinstance(dt, dict):
             cnt = dt.get("count", "")
             s = dt.get("sum", 0)
-            cnt_str = f" x {cnt}" if cnt else ""
-            lines.append(f"   └ {dt.get('type', '?')}{cnt_str}: {_fmt_money(s)}")
+            dtype = dt.get("type", "?")
+            if dtype == "SailPlay":
+                dtype = "Промокоды SailPlay"
+            cnt_str = f" ({cnt} шт.)" if cnt else ""
+            lines.append(f"   └ {dtype}: {_fmt_money(s)}{cnt_str}")
         else:
             lines.append(f"   └ {dt}")
     lines.append("")
@@ -223,7 +226,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
         branch_summaries.setdefault(tenant_id, []).append((name, rev, chk))
 
         discount_types_json = json.dumps(
-            agg.get("discount_types_agg") or stats.get("discount_types") or [],
+            stats.get("discount_types") or agg.get("discount_types_agg") or [],
             ensure_ascii=False,
         )
 

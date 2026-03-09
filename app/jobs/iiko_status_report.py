@@ -129,7 +129,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
         "avg_check": avg_check,
         "cogs_pct": cogs_pct,
         "discount_sum": discount_sum,
-        "discount_types_agg": orders_agg.get("discount_types_agg", []),
+        "discount_types_agg": branch_olap.get("discount_types") or orders_agg.get("discount_types_agg", []),
         "sailplay": sailplay,
         "tz": tz,
         "active_orders": rt_data["active_orders"] if rt_data else orders_agg.get("active_count"),
@@ -181,14 +181,17 @@ def format_branch_status(data: dict) -> str:
     if disc is not None or sail is not None:
         disc_str = f"{int(disc):,} ₽".replace(",", " ") if disc else "—"
         sail_str = f"{int(sail):,} ₽".replace(",", " ") if sail else "—"
-        lines.append(f"💸 Скидки: {disc_str} | SailPlay: {sail_str}")
+        lines.append(f"💸 Скидки: {disc_str} | Оплата бонусами: {sail_str}")
         for dt in disc_types:
             if isinstance(dt, dict):
                 cnt = dt.get("count", "")
                 s = dt.get("sum", 0)
-                cnt_str = f" x {cnt}" if cnt else ""
+                dtype = dt.get("type", "?")
+                if dtype == "SailPlay":
+                    dtype = "Промокоды SailPlay"
                 s_str = f"{int(s):,} ₽".replace(",", " ") if s else "—"
-                lines.append(f"   └ {dt.get('type', '?')}{cnt_str}: {s_str}")
+                cnt_str = f" ({cnt} шт.)" if cnt else ""
+                lines.append(f"   └ {dtype}: {s_str}{cnt_str}")
             else:
                 lines.append(f"   └ {dt}")
     cogs = data.get("cogs_pct")

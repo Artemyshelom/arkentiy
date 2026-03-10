@@ -52,9 +52,11 @@ def _calc_hours(clock_in: str | None, clock_out: str | None) -> float:
         return 0.0
 
 
-async def run_fot_pipeline(target_date: date, tenant_id: int) -> dict:
+async def run_fot_pipeline(target_date: date, tenant_id: int, *, notify: bool = False) -> dict:
     """Рассчитывает и сохраняет fot_daily для tenant за target_date.
 
+    notify=True — отправлять TG-алерты о сотрудниках без ставки (только при
+    ежедневном прогоне, не при бэкфиле).
     Возвращает сводку: {branches, rows_saved, no_rate_total}.
     """
     date_iso = target_date.isoformat()
@@ -153,12 +155,13 @@ async def run_fot_pipeline(target_date: date, tenant_id: int) -> dict:
             f"данные занижены. Проверь /api/v2/employees/salary"
         )
         logger.warning(f"fot_pipeline: {msg}")
-        try:
-            alert_chats = await get_alert_chats_for_city(city, tenant_id)
-            for chat_id in alert_chats:
-                await telegram.send_message(str(chat_id), msg)
-        except Exception as e:
-            logger.error(f"fot_pipeline: уведомление не отправлено {branch_name}: {e}")
+        if notify:
+            try:
+                alert_chats = await get_alert_chats_for_city(city, tenant_id)
+                for chat_id in alert_chats:
+                    await telegram.send_message(str(chat_id), msg)
+            except Exception as e:
+                logger.error(f"fot_pipeline: уведомление не отправлено {branch_name}: {e}")
 
     # 7. Формируем строки для upsert
     rows: list[dict] = []
@@ -202,7 +205,7 @@ async def job_fot_pipeline() -> None:
 
     for tenant_id in sorted(tenant_ids):
         try:
-            result = await run_fot_pipeline(yesterday, tenant_id)
+            result = await run_fot_pipeline(yesterday, tenant_id, notify=True)
             logger.info(f"job_fot_pipeline tenant={tenant_id} {yesterday}: {result}")
         except Exception as e:
             logger.error(f"job_fot_pipeline tenant={tenant_id}: {e}", exc_info=True)

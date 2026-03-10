@@ -1826,6 +1826,160 @@ TELEGRAM_BOT_USERNAME=arkentiy_bot
   - ✅ Все старые jobs на месте
 - ✅ Static files (`web/`) смонтированы и доступны
 
+---
+
+## Сессия 79 — 10 марта 2026 (feat: ФОТ по категориям персонала — pipeline, отчёты, бэкфил) ✅
+
+**Цель:** Добавить расчёт и отображение ФОТ (фонда оплаты труда) поваров и курьеров в утренних и еженедельных отчётах. Интегрировать с iiko Events API (shifts_raw) и iiko BO salary API.
+
+### 1. Архитектура решения
+
+**Источники данных:**
+- `shifts_raw` — реальные смены из iiko Events API (уже полётся в реал-тайм)
+- `/api/v2/employees/salary` — почасовые ставки из iiko BO (запрос раз в сутки)
+- `fot_daily` — новая таблица со сводкой по категориям за день (cook/courier/admin)
+
+**Новые компоненты:**
+- `app/clients/iiko_schedule.py` — фетч salary rates с iiko BO, парсинг XML, COALESCE по rates
+- `app/jobs/fot_pipeline.py` — дневной расчёт: shifts_raw × rates → fot_sum/hours_sum/employees_count
+- `app/db.py` — 4 новые функции: `get_fot_daily`, `get_fot_period`, `upsert_fot_daily_batch`, `get_fot_shifts_by_date`
+
+### 2. Классификация ролей (расширено)
+
+В `app/clients/iiko_bo_events.py` функция `_classify_role()` теперь возвращает 4 категории:
+- `"cook"` — prefix "пов", substring "повар"
+- `"courier"` — prefix "кур", substring "курьер"
+- `"admin"` — **новое**, prefix "ас"/"ад"/"крт", substring "адм"/"администрат"
+- `"other"` — всё остальное (вместо `None`)
+
+### 3. Таблица fot_daily (migration 011)
+
+```sql
+CREATE TABLE fot_daily (
+  tenant_id int,
+  branch_name text,
+  date date,
+  category text,  -- cook/courier/admin
+  fot_sum numeric,
+  hours_sum numeric,
+  employees_count int,
+  created_at timestamptz
+)
+UNIQUE (tenant_id, branch_name, date, category)
+```
+
+### 4. FOT пайплайн (job_fot_pipeline, 04:00 МСК)
+
+**Логика:**
+1. Получить все смены за `yesterday` через `get_fot_shifts_by_date()` — исключает `clock_in == clock_out` (нулевые смены)
+2. Для каждого BO-сервера (по `bo_url`) → `fetch_salary_map()` один раз
+3. Итерировать смены, рассчитать [hours = (clock_out - clock_in) / 3600, пропустить если <= 0]
+4. Агрегировать по (branch_name, role_class)
+5. Отправить TG-уведомления о сотрудниках без ставки (только при `notify=True`, т.е. при ежедневном прогоне)
+6. UPSERT результаты в `fot_daily`
+
+**Параметр `notify`:** Передаётся как `notify=True` в ежедневном job'е, но `notify=False` при бэкфиле → нет TG-спама в чат опозданий при backfill-е.
+
+### 5. Интеграция в отчёты
+
+**Daily report** (`_format_branch_report`):
+- Блок ФОТ только если `is_period=False`
+- Format: `💼 ФОТ поваров: X.X% от выручки (Y ₽)` — без курьеров (они на мотивационной программе, payment=0 в iiko)
+
+**Weekly report** (`_format_network_summary` + per-branch):
+- Сводка по сети: `💼 ФОТ поваров: X.X% от выручки (Y ₽)` за каждый день недели
+- Per-branch детали также только повара
+
+### 6. Бэкфил (backfill_fot.py)
+
+**Создан новый скрипт:**
+```bash
+python -m app.onboarding.backfill_fot --tenant-id 1 --date-from 2026-02-01 --date-to 2026-03-09
+```
+
+- Iterable по датам, resumable (progress JSON)
+- Вызывает `run_fot_pipeline()` для каждого дня
+- CLI опция: `--skip-branches` (если нужно пропустить точки)
+
+**Результаты бэкфилов:**
+- Tenant 1 (Артемий): 17 дней обработано, 37 дней пропущено (нет смен), 1099 сотр. без ставки
+- Tenant 3 (Шабуров): 37 дней обработано, 0 пропущено, 132 сотр. без ставки
+
+### 7. Обновления и фиксы в процессе
+
+**Fix 1:** `get_repeat_conversion()` — asyncpg не конвертирует строку в date автоматически
+- Было: `.isoformat()` строка в параметры
+- Стало: передавать `date` объект напрямую
+
+**Fix 2:** `aggregate_orders_for_daily_stats()` — считал нулевые смены в "На смене за день"
+- Было: `COUNT(DISTINCT employee_id) from shifts_raw`
+- Стало: `... WHERE clock_in != clock_out` — исключает инциденты типа Томск_1 (нулевые смены 09.03)
+
+**Fix 3:** Отправка ФОТ-алертов в чат опозданий при бэкфиле (спам)
+- Было: каждый день = сообщение в чат
+- Стало: параметр `notify=False` при бэкфиле, `notify=True` при ежедневном прогоне
+
+### 8. Тестирование
+
+**Тестовые отчёты отправлены в личку** (9 марта, прошлая неделя 2–8 марта):
+- Утренний отчёт: 9 точек Артемия, все с ФОТ блоком
+- Еженедельный: сводка по сети + детали по точкам
+- Черногорск_1 Тих: **3 повара** (было 4, fix: исключены нулевые смены)
+- ФОТ % за неделю: 6.4–15.8% (бенчмарк 9–11.5%, нормально)
+
+**Аномалии найденные:**
+- Томск_1 Яко: 0.2% ФОТ (9 марта были 8 нулевых смен из 12 в iiko) — данные, не код
+- Обнаружено что курьеры в iiko salary имеют `payment=0` (не почасовые, мотивационная программа) → их ФОТ не рассчитывается
+
+### 9. Документация
+
+**Обновлена:** `docs/onboarding/protocol.md` — Шаг 6 добавлен:
+```markdown
+### Шаг 6: Бэкфил ФОТ (если нужна история с 01.02 или раньше)
+python -m app.onboarding.backfill_fot --tenant-id=N --date-from 2026-02-01 --date-to $(date +%Y-%m-%d)
+```
+
+### Файлы изменены
+
+**Новые файлы:**
+- `app/clients/iiko_schedule.py` — fetch salary rates
+- `app/jobs/fot_pipeline.py` — расчёт ФОТ daily
+- `app/onboarding/backfill_fot.py` — бэкфил с resumable progress
+- `app/migrations/011_fot_tables.sql` — создание `fot_daily` + `fot_default_rates` (placeholder)
+
+**Модифицированные:**
+- `app/clients/iiko_bo_events.py` — добавлена admin категория, `_classify_role()` теперь возвращает 4 варианта
+- `app/database_pg.py` — 4 новые функции для ФОТ + fix на `get_repeat_conversion()` + fix на `clock_in != clock_out`
+- `app/jobs/daily_report.py` — FOT блок в отчёт, только повара (no couriers)
+- `app/jobs/weekly_report.py` — FOT блок, only cooks
+- `app/main.py` — регистрация `job_fot_pipeline` at 04:00 МСК
+- `docs/onboarding/protocol.md` — добавлен Шаг 6
+
+**Коммиты:**
+- `feat: ФОТ по категориям персонала — pipeline, отчёты, бэкфил`
+- `fix: ФОТ — только повара (курьеры на мотивационной программе)`
+- `fix: ФОТ-алерты только при ежедневном прогоне, не при бэкфиле`
+- `fix: timedelta не импортирован в get_repeat_conversion`
+- `fix: явный ::date каст в get_repeat_conversion`
+- `fix: передавать date объект в get_repeat_conversion, не строку`
+- `fix: исключить нулевые смены из счётчика поваров/курьеров на день`
+
+### Статус
+
+✅ **Завершено и задеплоено:**
+- ФОТ-пайплайн работает (job стартует 04:00 МСК)
+- Утренний отчёт показывает ФОТ поваров
+- Еженедельный отчёт показывает ФОТ поваров за сутки и неделю
+- Бэкфил готов к запуску для истории
+- Тесты практические отправлены в личку Артемия
+
+⏳ **Проверка на завтра:**
+- Сверка расчётных %, ФОТ с записанными значениями Артемия
+- Проверка нескольких дней с разными сценариями
+- Решение вопроса с курьерами (пока Артемий их не платит через iiko salary)
+
+---
+
 ### Следующие шаги (TODO)
 
 1. ⏳ Заполнить `YUKASSA_SHOP_ID`/`YUKASSA_SECRET_KEY` в `.env` на VPS

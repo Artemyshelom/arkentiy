@@ -241,6 +241,13 @@ class OrdersBackfiller:
                     is_self_service = True
 
             main_pay = max(pay_parts, key=pay_parts.get) if pay_parts else ""
+            # Извлекаем реальную дату заказа из OpenTime
+            order_date_str = None
+            if opened_at:
+                try:
+                    order_date_str = opened_at[:10]  # "2026-03-09T14:35:00" → "2026-03-09"
+                except Exception:
+                    pass
             result[(branch, num)] = {
                 "status": "Отменена" if cancel_reason else "Доставлена",
                 "cancel_reason": cancel_reason,
@@ -260,6 +267,7 @@ class OrdersBackfiller:
                 "pay_breakdown": json.dumps(pay_parts, ensure_ascii=False) if pay_parts else "",
                 "discount_type": "; ".join(disc_types),
                 "source": source,
+                "order_date": order_date_str,
             }
         return result
 
@@ -268,6 +276,14 @@ class OrdersBackfiller:
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 for (branch, num), data in orders.items():
+                    # Используем реальную дату из OpenTime, fallback на week_start
+                    real_date = order_date
+                    if data.get("order_date"):
+                        try:
+                            from datetime import date as _date
+                            real_date = _date.fromisoformat(data["order_date"])
+                        except Exception:
+                            pass
                     await conn.execute(
                         """
                         INSERT INTO orders_raw (
@@ -279,6 +295,7 @@ class OrdersBackfiller:
                             payment_type, pay_breakdown, discount_type, source, updated_at
                         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,now())
                         ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
+                            date             = EXCLUDED.date,
                             status           = EXCLUDED.status,
                             cancel_reason    = COALESCE(NULLIF(EXCLUDED.cancel_reason,''), orders_raw.cancel_reason),
                             client_phone     = COALESCE(NULLIF(EXCLUDED.client_phone,''), orders_raw.client_phone),
@@ -299,7 +316,7 @@ class OrdersBackfiller:
                             source           = COALESCE(NULLIF(EXCLUDED.source,''), orders_raw.source),
                             updated_at       = now()
                         """,
-                        self.tenant_id, branch, num, order_date,
+                        self.tenant_id, branch, num, real_date,
                         data["status"], data["cancel_reason"], data["client_phone"], data["client_name"],
                         data["sum"], data["discount_sum"],
                         data["actual_time"], data["planned_time"], data["send_time"], data["service_print_time"],

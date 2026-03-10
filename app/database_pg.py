@@ -1478,8 +1478,8 @@ async def get_repeat_conversion(
                (SELECT COUNT(*) FROM converted)    AS converted_count""",
         tenant_id,
         branch_names,
-        first_of_prev.isoformat(),
-        last_of_prev.isoformat(),
+        first_of_prev,
+        last_of_prev,
     )
 
     new_count = int(row["new_count"] or 0)

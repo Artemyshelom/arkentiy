@@ -124,27 +124,50 @@ class AcquiringEntry:
 
 
 # ── загрузка конфига ─────────────────────────────────────────────────────────
+# Формат bank_accounts.json — по тенантам:
+# { "1": { "label": "...", "acquiring_corr_account": "...",
+#           "accounts": { "р/с": { "label", "short", "city", "iiko_branch" } } },
+#   "3": { ... } }
+# Добавить нового тенанта = добавить ключ в JSON. Код менять не нужно.
+
+def load_config(path: Path | None = None) -> dict:
+    """Загружает полный конфиг (все тенанты)."""
+    p = path or _ACCOUNTS_PATH
+    with open(p, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def find_tenant_config(
+    config: dict, statement_accounts: set[str],
+) -> tuple[str, dict] | None:
+    """Определяет тенанта по р/с из выписки. Возвращает (tenant_id, tenant_config)."""
+    for tenant_id, tenant in config.items():
+        tenant_accs = set(tenant.get("accounts", {}).keys())
+        if tenant_accs & statement_accounts:
+            return tenant_id, tenant
+    return None
+
 
 def load_accounts_map(path: Path | None = None) -> dict[str, dict]:
-    p = path or _ACCOUNTS_PATH
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data["accounts"]
+    """Плоский маппинг р/с → инфо (все тенанты). Обратная совместимость."""
+    config = load_config(path)
+    merged: dict[str, dict] = {}
+    for tenant in config.values():
+        merged.update(tenant.get("accounts", {}))
+    return merged
 
 
-def load_acquiring_corr_account(path: Path | None = None) -> str:
-    p = path or _ACCOUNTS_PATH
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("acquiring_corr_account", "")
+def load_acquiring_corr_account(path: Path | None = None, tenant_id: str = "1") -> str:
+    config = load_config(path)
+    tenant = config.get(tenant_id, {})
+    return tenant.get("acquiring_corr_account", "")
 
 
-def load_commission_counterpart(path: Path | None = None) -> tuple[str, str]:
+def load_commission_counterpart(path: Path | None = None, tenant_id: str = "1") -> tuple[str, str]:
     """Возвращает (inn, name) кастомного контрагента для документов на комиссию."""
-    p = path or _ACCOUNTS_PATH
-    with open(p, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    return data.get("commission_counterpart_inn", ""), data.get("commission_counterpart_name", "")
+    config = load_config(path)
+    tenant = config.get(tenant_id, {})
+    return tenant.get("commission_counterpart_inn", ""), tenant.get("commission_counterpart_name", "")
 
 
 # ── парсер 1С ────────────────────────────────────────────────────────────────
@@ -403,9 +426,16 @@ def generate_1c_file(
 
 # ── парсинг эквайринга ───────────────────────────────────────────────────────
 
+# Сбербанк / СберБизнес: "Возмещение по торговому эквайрингу Мерчант 123 за 08.03.2026. Операций 50. Сумма 100 000 руб., комиссия 1 500 руб."
 _ACQ_RE = re.compile(
     r"Возмещение по торговому эквайрингу Мерчант (\d+) за (\d{2}\.\d{2}\.\d{4})\."
     r"\s*Операций (\d+)\.\s*Сумма ([\d\s]+(?:\.\d+)?)\s*руб\.,\s*комиссия ([\d\s]+(?:\.\d+)?)\s*руб\."
+)
+
+# Точка банк: "Зачисление средств по операциям. Мерчант №871000265780. Дата реестра 08.03.2026. Комиссия 10 863.42."
+# doc.amount = нетто (уже за вычетом комиссии), gross = нетто + комиссия
+_ACQ_RE_TOCHKA = re.compile(
+    r"Зачисление средств по операциям\.\s*Мерчант №(\d+)\.\s*Дата реестра (\d{2}\.\d{2}\.\d{4})\.\s*Комиссия ([\d\s]+(?:\.\d+)?)[\.\s]"
 )
 
 
@@ -417,31 +447,61 @@ def parse_acquiring(documents: list[Document], accounts_map: dict[str, dict]) ->
         payee = doc.payee_account
         if payee not in our_accounts:
             continue
-        m = _ACQ_RE.search(doc.purpose)
-        if not m:
-            continue
-        gross = _parse_spaced_number(m.group(4))
-        commission = _parse_spaced_number(m.group(5))
+
         f = doc.fields
-        entries.append(AcquiringEntry(
-            account=payee,
-            doc_date=doc.date,
-            shift_date=m.group(2),
-            merchant_id=m.group(1),
-            operations=int(m.group(3)),
-            gross_amount=gross,
-            commission=commission,
-            net_amount=round(gross - commission, 2),
-            our_inn=f.get("ПолучательИНН", ""),
-            our_name=f.get("Получатель", ""),
-            our_kpp=f.get("ПолучательКПП", ""),
-            bank_bik=f.get("ПлательщикБИК", ""),
-            bank_korshet=f.get("ПлательщикКорсчет", ""),
-            bank_name=f.get("ПлательщикБанк1", ""),
-            sbr_account=f.get("ПлательщикРасчСчет", ""),
-            sbr_inn=f.get("ПлательщикИНН", ""),
-            sbr_name=f.get("Плательщик", ""),
-        ))
+
+        # Формат Сбербанк / СберБизнес
+        m = _ACQ_RE.search(doc.purpose)
+        if m:
+            gross = _parse_spaced_number(m.group(4))
+            commission = _parse_spaced_number(m.group(5))
+            entries.append(AcquiringEntry(
+                account=payee,
+                doc_date=doc.date,
+                shift_date=m.group(2),
+                merchant_id=m.group(1),
+                operations=int(m.group(3)),
+                gross_amount=gross,
+                commission=commission,
+                net_amount=round(gross - commission, 2),
+                our_inn=f.get("ПолучательИНН", ""),
+                our_name=f.get("Получатель", ""),
+                our_kpp=f.get("ПолучательКПП", ""),
+                bank_bik=f.get("ПлательщикБИК", ""),
+                bank_korshet=f.get("ПлательщикКорсчет", ""),
+                bank_name=f.get("ПлательщикБанк1", ""),
+                sbr_account=f.get("ПлательщикРасчСчет", ""),
+                sbr_inn=f.get("ПлательщикИНН", ""),
+                sbr_name=f.get("Плательщик", ""),
+            ))
+            continue
+
+        # Формат Точка банк: gross = нетто (doc.amount) + комиссия из назначения
+        m2 = _ACQ_RE_TOCHKA.search(doc.purpose)
+        if m2:
+            commission = _parse_spaced_number(m2.group(3))
+            net = doc.amount
+            gross = round(net + commission, 2)
+            entries.append(AcquiringEntry(
+                account=payee,
+                doc_date=doc.date,
+                shift_date=m2.group(2),
+                merchant_id=m2.group(1),
+                operations=0,
+                gross_amount=gross,
+                commission=commission,
+                net_amount=net,
+                our_inn=f.get("ПолучательИНН", ""),
+                our_name=f.get("Получатель", ""),
+                our_kpp=f.get("ПолучательКПП", ""),
+                bank_bik=f.get("ПлательщикБИК", ""),
+                bank_korshet=f.get("ПлательщикКорсчет", ""),
+                bank_name=f.get("ПлательщикБанк1", ""),
+                sbr_account=f.get("ПлательщикРасчСчет", ""),
+                sbr_inn=f.get("ПлательщикИНН", ""),
+                sbr_name=f.get("Плательщик", ""),
+            ))
+            continue
 
     return entries
 
@@ -511,13 +571,6 @@ def build_summary(
 
 SBER_ACQ_PAY_TYPES = {"Картой при получении", "Сбербанк"}
 
-_SHORT_LABELS = {
-    "Барнаул-1": "Б1 Ана", "Барнаул-2": "Б2 Гео",
-    "Барнаул-3": "Б3 Тим", "Барнаул-4": "Б4 Бал",
-    "Абакан-1": "А1 Кир", "Абакан-2": "А2 Аск",
-    "Черногорск-1": "Ч1 Тих",
-}
-
 
 def _dd_mm_yyyy_to_iso(s: str) -> str:
     parts = s.strip().split(".")
@@ -554,8 +607,6 @@ async def reconcile_acquiring(
         bank_by_acc[a.account] += a.gross_amount
         comm_by_acc[a.account] += a.commission
 
-    CITY_ORDER = ["Барнаул", "Абакан", "Черногорск"]
-
     branches_by_city: dict[str, list[dict]] = defaultdict(list)
     for acc, info in accounts_map.items():
         # Показываем только счета, которые есть в загруженной выписке
@@ -568,9 +619,16 @@ async def reconcile_acquiring(
         branches_by_city[city].append({
             "acc": acc,
             "label": info["label"],
-            "short": _SHORT_LABELS.get(info["label"], info["label"]),
+            "short": info.get("short", info["label"]),
             "iiko_branch": iiko_branch,
         })
+
+    # Порядок городов — по первому появлению в конфиге (стабильный)
+    city_order: list[str] = []
+    for acc, info in accounts_map.items():
+        c = info.get("city")
+        if c and c not in city_order:
+            city_order.append(c)
 
     date_display_from = date_from[:5].replace(".", ".")
     date_display_to = date_to[:5].replace(".", ".")
@@ -582,7 +640,7 @@ async def reconcile_acquiring(
     ok_count = 0
     warn_count = 0
 
-    for city in CITY_ORDER:
+    for city in city_order:
         city_branches = branches_by_city.get(city, [])
         if not city_branches:
             continue
@@ -668,21 +726,28 @@ def _fmt_rub(v: float) -> str:
 def process_statement(content: str, accounts_path: Path | None = None) -> dict:
     """
     Полный цикл: парсинг → разбивка → генерация файлов → сводка.
+    Автоматически определяет тенанта по р/с из выписки.
     Возвращает dict с ключами:
-      - files: dict[label, bytes]  — готовые файлы для отправки
-      - summary: str               — HTML-сводка для Telegram
-      - branches: list[BranchResult]
-      - acquiring: list[AcquiringEntry]
-      - unmatched: list[Document]
-      - parsed: ParsedStatement
+      - files, summary, branches, acquiring, unmatched, parsed
+      - accounts_map: dict  — маппинг р/с тенанта (для reconcile)
+      - tenant_id: str
     """
-    accounts_map = load_accounts_map(accounts_path)
-    acq_corr_account = load_acquiring_corr_account(accounts_path)
-    comm_inn, comm_name = load_commission_counterpart(accounts_path)
+    config = load_config(accounts_path)
+    parsed = parse_1c(content)
+
+    match = find_tenant_config(config, set(parsed.accounts))
+    if not match:
+        raise ValueError(f"Не найден тенант для р/с: {', '.join(parsed.accounts)}")
+
+    tenant_id, tenant_config = match
+    accounts_map = tenant_config["accounts"]
+    acq_corr_account = tenant_config.get("acquiring_corr_account", "")
+    comm_inn = tenant_config.get("commission_counterpart_inn", "")
+    comm_name = tenant_config.get("commission_counterpart_name", "")
     parsed = parse_1c(content)
 
     logger.info(
-        f"[bank_statement] Parsed: {len(parsed.documents)} docs, "
+        f"[bank_statement] tenant={tenant_id}: {len(parsed.documents)} docs, "
         f"{len(parsed.balances)} balance sections, "
         f"{len(parsed.accounts)} accounts, "
         f"period {parsed.date_from}—{parsed.date_to}"
@@ -710,4 +775,6 @@ def process_statement(content: str, accounts_path: Path | None = None) -> dict:
         "acquiring": acquiring,
         "unmatched": unmatched,
         "parsed": parsed,
+        "accounts_map": accounts_map,
+        "tenant_id": tenant_id,
     }

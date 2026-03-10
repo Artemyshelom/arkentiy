@@ -5,13 +5,11 @@
 
 ---
 
-## 📍 Где остановились — Сессия 76 (9 марта 2026)
+## 📍 Где остановились — Сессия 78 (10 марта 2026)
 
-**Последнее действие:** Бэкфилл T1 (100% с 01.12.2025) — все скрипты запущены/завершены. `bf_hourly` (step 5) ещё выполняется (~99 дней × 9 точек).
+**Последнее действие:** Добавлены выписки Томска (ИП Сергеев). Рефактор `bank_statement.py` — мультитенант, поддержка Точка банка. Сверка эквайринга для Томска работает.
 
-**Рефактор orchestrator:** `backfill_new_client.py` теперь 5 шагов (добавлен shifts как step 4, hourly → step 5).
-
-**Все 5 багов в бэкфилл-скриптах устранены**, архитектура зафиксирована.
+**bank_accounts.json** переведён на per-tenant структуру: новый тенант = новый ключ в JSON, код менять не нужно.
 
 ---
 
@@ -36,16 +34,16 @@
 
 ## 🔴 Активные проблемы / риски
 
-- **`bf_hourly` (step 5) ещё выполняется** на сервере в screen-сессии `bf_hourly` (~1 час). Можно проверить: `ssh arkentiy 'tail -5 /tmp/bf_hourly.log'`
 - **`boris_api_regression_audit`** — не проверена изоляция `_states` по tenant_id в `/api/stats?metric=realtime`. Данные Шабурова потенциально видны в ответах Бориса.
+- **Сверка Томска с iiko** — `operations=0` для Точка банка (поле не парсится из назначения, только merchant+date+commission). Функционально не влияет — сверка суммами работает.
 
 ---
 
 ## 📋 Приоритеты на следующую сессию
 
-1. Проверить завершение `bf_hourly` + финальная валидация данных T1
-2. `boris_api_regression_audit` — проверить изоляцию tenant_id в `/api/stats`, `_states`
-3. `orders_status_optimization` — анализ OLAP vs Events для активных заказов
+1. `boris_api_regression_audit` — проверить изоляцию tenant_id в `/api/stats`, `_states`
+2. `orders_status_optimization` — анализ OLAP vs Events для активных заказов
+3. `email_statement_auto` — автозабор выписок с почты (актуально для Томска)
 
 ---
 
@@ -58,17 +56,36 @@
 | Telegram бот | ✅ работает |
 | APScheduler | ✅ 14 jobs зарегистрировано |
 | Бэкфилл T1 (shifts) | ✅ 4 024 смены Dec 2025 – Feb 21 |
-| Бэкфилл T1 (hourly) | ⏳ выполняется в screen bf_hourly |
+| Бэкфилл T1 (hourly) | ✅ завершён (сессия 76) |
+| bank_statement Томск | ✅ Томск-1, Томск-2 + Точка банк формат |
 
 ---
 
-## 📌 Ключевые файлы сессии
+## 📌 Ключевые файлы сессии 78
 
-- [app/onboarding/backfill_new_client.py](app/onboarding/backfill_new_client.py) — 5 шагов, shifts=4, hourly=5
-- [app/onboarding/backfill_shifts_generic.py](app/onboarding/backfill_shifts_generic.py) — новый скрипт
-- [app/onboarding/backfill_orders_generic.py](app/onboarding/backfill_orders_generic.py) — bugfix auth + SyntaxError
-- [app/onboarding/README.md](app/onboarding/README.md) — обновлена таблица (5 скриптов + 5 шагов)
-- [docs/journal.md](docs/journal.md) — сессия 76
+- [app/jobs/bank_statement.py](app/jobs/bank_statement.py) — per-tenant конфиг, _ACQ_RE_TOCHKA, auto CITY_ORDER
+- [app/jobs/arkentiy.py](app/jobs/arkentiy.py) — убрана summary, accounts_map из result
+- `secrets/bank_accounts.json` (сервер) — новая структура по тенантам
+- [docs/journal.md](docs/journal.md) — сессия 78
+
+---
+
+## 🗺 Архитектура bank_accounts.json (актуально)
+
+```json
+{
+  "<tenant_id>": {
+    "label": "Имя тенанта",
+    "acquiring_corr_account": "...",
+    "commission_counterpart_inn": "...",
+    "commission_counterpart_name": "...",
+    "accounts": {
+      "<р/с>": { "label": "Город-N", "short": "ХN Xxx", "city": "Город", "iiko_branch": "Город_N Xxx" }
+    }
+  }
+}
+```
+Добавить тенанта = добавить ключ. Код менять не нужно.
 
 ---
 
@@ -87,4 +104,4 @@ backfill_new_client.py (мастер-оркестратор, 5 шагов)
 
 ---
 
-*Обновлено: 9 марта 2026, сессия 76*
+*Обновлено: 10 марта 2026, сессия 78*

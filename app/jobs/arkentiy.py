@@ -401,8 +401,6 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
         await _send(chat_id, f"❌ Ошибка обработки: {html.escape(str(e))}")
         return
 
-    await _send(chat_id, result["summary"])
-
     for filename, file_bytes in result["files"].items():
         ok = await _send_document(chat_id, filename, file_bytes)
         if not ok:
@@ -414,9 +412,8 @@ async def _handle_bank_statement(chat_id: int, tg_doc: dict, user_id: int = 0) -
     # Сверка эквайринга с iiko (отдельно — если iiko недоступен, файлы уже отправлены)
     if result["acquiring"]:
         try:
-            accounts_map = bank_statement.load_accounts_map()
             reconcile_text = await bank_statement.reconcile_acquiring(
-                result["acquiring"], accounts_map,
+                result["acquiring"], result["accounts_map"],
                 result["parsed"].date_from, result["parsed"].date_to,
                 statement_accounts=set(result["parsed"].accounts),
             )

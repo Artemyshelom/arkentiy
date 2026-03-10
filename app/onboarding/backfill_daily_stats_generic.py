@@ -136,26 +136,31 @@ class DailyStatsBackfiller:
 
     async def _upsert_daily_stat(self, branch_name: str, date_iso: str, s: dict):
         """UPSERT в daily_stats, включая cash/noncash из Query C."""
+        import json as _json
         date_obj = date.fromisoformat(date_iso)
         avg_check = round((s["revenue_net"] or 0) / s["check_count"]) if s.get("check_count") else 0
+        discount_types_json = _json.dumps(
+            s.get("discount_types") or [], ensure_ascii=False
+        )
 
         await self.pool.execute(
             """INSERT INTO daily_stats
                (tenant_id, branch_name, date, orders_count, revenue, avg_check,
-                cogs_pct, sailplay, discount_sum, pickup_count, cash, noncash, updated_at)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+                cogs_pct, sailplay, discount_sum, discount_types, pickup_count, cash, noncash, updated_at)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now())
               ON CONFLICT (tenant_id, branch_name, date)
               DO UPDATE SET
-                orders_count = EXCLUDED.orders_count,
-                revenue      = EXCLUDED.revenue,
-                avg_check    = EXCLUDED.avg_check,
-                cogs_pct     = EXCLUDED.cogs_pct,
-                sailplay     = EXCLUDED.sailplay,
-                discount_sum = EXCLUDED.discount_sum,
-                pickup_count = EXCLUDED.pickup_count,
-                cash         = EXCLUDED.cash,
-                noncash      = EXCLUDED.noncash,
-                updated_at   = now()
+                orders_count  = EXCLUDED.orders_count,
+                revenue       = EXCLUDED.revenue,
+                avg_check     = EXCLUDED.avg_check,
+                cogs_pct      = EXCLUDED.cogs_pct,
+                sailplay      = EXCLUDED.sailplay,
+                discount_sum  = EXCLUDED.discount_sum,
+                discount_types = EXCLUDED.discount_types,
+                pickup_count  = EXCLUDED.pickup_count,
+                cash          = EXCLUDED.cash,
+                noncash       = EXCLUDED.noncash,
+                updated_at    = now()
             """,
             self.tenant_id,
             branch_name,
@@ -166,6 +171,7 @@ class DailyStatsBackfiller:
             s.get("cogs_pct"),
             float(s.get("sailplay") or 0.0),
             s.get("discount_sum") or 0.0,
+            discount_types_json,
             s.get("pickup_count") or 0,
             s.get("cash") or 0.0,
             s.get("noncash") or 0.0,

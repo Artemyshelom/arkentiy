@@ -404,10 +404,11 @@ async def _upsert_daily_stats_from_aggregate(
         for branch in branches:
             name = branch["name"]
             stats = olap_stats.get(name, {})
-            if not stats and not stats.get("check_count"):
-                continue
-
             agg = await aggregate_orders_for_daily_stats(name, date_iso)
+
+            # Пропускаем только если нет данных ни в OLAP, ни в orders_raw
+            if not stats and not agg.get("raw_orders_count"):
+                continue
 
             rev = stats.get("revenue_net") or 0.0
             chk = int(stats.get("check_count") or agg.get("raw_orders_count") or 0)

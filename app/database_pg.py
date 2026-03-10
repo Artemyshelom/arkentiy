@@ -1343,22 +1343,58 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
         if v is not None:
             result[k] = round(float(v), 1 if k != "cogs_pct" else 2)
 
-    dt_rows = await pool.fetch(
-        """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
-           FROM orders_raw
-           WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
-             AND discount_type IS NOT NULL AND discount_type != ''
-             AND status != 'Отменена'
-           GROUP BY discount_type
-           ORDER BY total DESC""",
-        branch_name, date_from, date_to,
+    # Скидки по типам — сначала из daily_stats.discount_types (OLAP, корректные суммы),
+    # fallback к orders_raw для данных без OLAP-разбивки.
+    daily_dt_rows = await pool.fetch(
+        """SELECT discount_types FROM daily_stats
+           WHERE tenant_id = $1 AND branch_name = $2 AND date::text BETWEEN $3 AND $4
+             AND discount_types IS NOT NULL AND discount_types NOT IN ('', '[]')""",
+        tenant_id, branch_name, date_from, date_to,
     )
+    type_totals: dict[str, float] = {}
+    for _r in daily_dt_rows:
+        try:
+            for _item in _json.loads(_r["discount_types"]):
+                _t = _item.get("type", "?")
+                type_totals[_t] = type_totals.get(_t, 0.0) + float(_item.get("sum", 0))
+        except (TypeError, _json.JSONDecodeError):
+            pass
 
-    result["discount_types"] = _json.dumps(
-        [{"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
-         for r in dt_rows],
-        ensure_ascii=False,
-    ) if dt_rows else "[]"
+    if type_totals:
+        cnt_rows = await pool.fetch(
+            """SELECT discount_type, COUNT(*) as cnt FROM orders_raw
+               WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
+                 AND discount_type IS NOT NULL AND discount_type != ''
+                 AND status != 'Отменена'
+               GROUP BY discount_type""",
+            branch_name, date_from, date_to,
+        )
+        type_counts = {r["discount_type"]: r["cnt"] for r in cnt_rows}
+        result["discount_types"] = _json.dumps(
+            sorted(
+                [{"type": t, "sum": round(s), "count": type_counts.get(t, 0)}
+                 for t, s in type_totals.items()],
+                key=lambda x: x["sum"], reverse=True,
+            ),
+            ensure_ascii=False,
+        )
+    else:
+        # Fallback: orders_raw (discount_sum заполнен не для всех заказов)
+        dt_rows = await pool.fetch(
+            """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
+               FROM orders_raw
+               WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
+                 AND discount_type IS NOT NULL AND discount_type != ''
+                 AND status != 'Отменена'
+               GROUP BY discount_type
+               ORDER BY total DESC""",
+            branch_name, date_from, date_to,
+        )
+        result["discount_types"] = _json.dumps(
+            [{"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
+             for r in dt_rows],
+            ensure_ascii=False,
+        ) if dt_rows else "[]"
 
     pc_row = await pool.fetchrow(
         """SELECT COUNT(*) AS payment_changed_count

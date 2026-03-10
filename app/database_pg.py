@@ -1221,6 +1221,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
         """SELECT role_class, COUNT(DISTINCT employee_id) as cnt
            FROM shifts_raw
            WHERE branch_name = $1 AND date::text = $2
+             AND clock_in != clock_out
            GROUP BY role_class""",
         branch_name, date_iso,
     )

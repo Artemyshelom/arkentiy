@@ -1461,7 +1461,7 @@ async def get_repeat_conversion(
                  AND client_phone IS NOT NULL AND client_phone != ''
                  AND status != 'Отменена'
                GROUP BY client_phone
-               HAVING MIN(date) BETWEEN $3 AND $4
+               HAVING MIN(date) BETWEEN $3::date AND $4::date
            ),
            converted AS (
                -- из них кто заказал хотя бы раз после прошлого месяца
@@ -1470,7 +1470,7 @@ async def get_repeat_conversion(
                JOIN first_orders fo ON o.client_phone = fo.client_phone
                WHERE o.tenant_id = $1
                  AND o.branch_name = ANY($2::text[])
-                 AND o.date > $4
+                 AND o.date > $4::date
                  AND o.status != 'Отменена'
            )
            SELECT

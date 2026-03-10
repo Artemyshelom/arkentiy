@@ -219,3 +219,89 @@ class BranchState:
 
 **Изоляция:** все бизнес-таблицы имеют `tenant_id`. Конфиг точек — в `iiko_credentials` (не в `branches.json`).  
 **Текущий тенант в запросе:** `app/ctx.py`, ContextVar `_ctx_tenant_id`.
+
+---
+
+## Конфиг: bank_accounts.json (per-tenant)
+
+**Расположение:** `/opt/ebidoebi/secrets/bank_accounts.json` (на VPS, не в git, монтируется как volume)
+
+**Предназначение:** маппинг банковских счетов → филиалы для обработки выписок и сверки эквайринга.
+
+**Структура:**
+```json
+{
+  "1": {
+    "label": "Артемий",
+    "acquiring_corr_account": "2.2.11.8",
+    "commission_counterpart_inn": "11111111",
+    "commission_counterpart_name": "КОМИССИЯ ЭКВАЙРИНГ",
+    "accounts": {
+      "40802810271710001923": {
+        "label": "Томск-1",
+        "short": "Т1 Яко",
+        "city": "Томск",
+        "iiko_branch": "Томск_1 Яко"
+      },
+      "40802810971710001922": {
+        "label": "Томск-2",
+        "short": "Т2 Дуб",
+        "city": "Томск",
+        "iiko_branch": "Томск_2 Дуб"
+      }
+    }
+  },
+  "3": {
+    "label": "Шабуров",
+    "acquiring_corr_account": "...",
+    "accounts": { ... }
+  }
+}
+```
+
+**Правило масштабирования:** добавить нового тенанта = добавить новый ключ (`"<tenant_id>"`) в корень JSON. Код (`bank_statement.py`) менять не нужно.
+
+---
+
+## Архитектура: Backfill-оркестратор (5 шагов)
+
+**Цель:** заполнить историческую аналитику для нового тенанта (orders, daily_stats, shifts, hourly_stats).
+
+**Мастер-скрипт:** `app/onboarding/backfill_new_client.py`
+
+```
+┌─ step 1 ──┐  OrdersBackfiller      [iiko OLAP → orders_raw]
+│  ORDERS   │  2-6 месяцев, 5-20K заказов
+└───────────┘
+
+┌─ step 2 ──┐  DailyStatsBackfiller  [iiko OLAP → daily_stats]
+│ DAILY     │  cash/noncash разбивка
+└───────────┘
+
+┌─ step 3 ──┐  inline в backfill_new_client  [orders_raw → daily_stats тайминги]
+│ TIMING    │  service_time, delivery_time (из Event API)
+└───────────┘
+
+┌─ step 4 ──┐  ShiftsBackfiller      [iiko schedule API → shifts_raw]
+│ SHIFTS    │  историческое расписание сотрудников (до 5000+ смен)
+└───────────┘
+
+┌─ step 5 ──┐  HourlyStatsBackfiller [orders_raw + shifts_raw → hourly_stats]
+│ HOURLY    │  почасовая аналитика (DDD, средние чеки, кол-во заказов)
+└───────────┘
+```
+
+**Особенность:** каждый компонент (`OrdersBackfiller`, `ShiftsBackfiller` и т.д.) может запускаться **самостоятельно** (в `app/onboarding/<name>.py` есть `if __name__ == "__main__"`), а может быть вызван через `backfill_new_client.py`.
+
+**Пример вызова step 1 отдельно:**
+```bash
+python3 -m app.onboarding.backfill_orders_generic <tenant_id> <branch_name> 2025-12-01
+```
+
+**Пример полного бэкфилла:**
+```bash
+python3 app/onboarding/backfill_new_client.py 3 yobidoyobi-kansk
+# Автоматически запустит все 5 шагов последовательно
+```
+
+---

@@ -35,7 +35,6 @@
 ## 🔴 Активные проблемы / риски
 
 - **`boris_api_regression_audit`** — не проверена изоляция `_states` по tenant_id в `/api/stats?metric=realtime`. Данные Шабурова потенциально видны в ответах Бориса.
-- **Сверка Томска с iiko** — `operations=0` для Точка банка (поле не парсится из назначения, только merchant+date+commission). Функционально не влияет — сверка суммами работает.
 
 ---
 
@@ -70,37 +69,7 @@
 
 ---
 
-## 🗺 Архитектура bank_accounts.json (актуально)
-
-```json
-{
-  "<tenant_id>": {
-    "label": "Имя тенанта",
-    "acquiring_corr_account": "...",
-    "commission_counterpart_inn": "...",
-    "commission_counterpart_name": "...",
-    "accounts": {
-      "<р/с>": { "label": "Город-N", "short": "ХN Xxx", "city": "Город", "iiko_branch": "Город_N Xxx" }
-    }
-  }
-}
-```
-Добавить тенанта = добавить ключ. Код менять не нужно.
-
----
-
-## 🗺 Архитектура backfill-скриптов (актуально)
-
-```
-backfill_new_client.py (мастер-оркестратор, 5 шагов)
-├── step 1 → backfill_orders_generic.OrdersBackfiller      (iiko OLAP → orders_raw)
-├── step 2 → backfill_daily_stats_generic.DailyStatsBackfiller (iiko OLAP → daily_stats)
-├── step 3 → inline в new_client                            (orders_raw → daily_stats timing)
-├── step 4 → backfill_shifts_generic.ShiftsBackfiller       (iiko schedule API → shifts_raw)
-└── step 5 → backfill_hourly_stats.HourlyStatsBackfiller    (orders_raw + shifts_raw → hourly_stats)
-
-Все 4 компонента можно запускать и отдельно (standalone).
-```
+**Архитектура:** см. [rules/integrator/architecture.md](rules/integrator/architecture.md)
 
 ---
 

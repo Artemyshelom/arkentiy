@@ -16,7 +16,7 @@ import time
 from collections import defaultdict
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -44,16 +44,17 @@ _RATE_LIMIT = 60  # req/min
 # Auth
 # ---------------------------------------------------------------------------
 
-_keys_cache: dict | None = None
+_keys_cache: Optional[dict[str, Any]] = None
 
 
-def _load_api_keys() -> dict:
+def _load_api_keys() -> dict[str, Any]:
     global _keys_cache
     if _keys_cache is None:
         path = Path(settings.stats_api_keys_file)
         if path.exists():
             try:
                 _keys_cache = json.loads(path.read_text(encoding="utf-8"))
+                assert isinstance(_keys_cache, dict), "API keys должны быть dict"
                 logger.info(f"[stats api] Загружено {len(_keys_cache)} API ключей из {path}")
             except Exception as e:
                 logger.error(f"[stats api] Ошибка чтения {path}: {e}")
@@ -61,11 +62,11 @@ def _load_api_keys() -> dict:
         else:
             logger.warning(f"[stats api] {path} не найден — API недоступен")
             _keys_cache = {}
-    return _keys_cache
+    return _keys_cache if _keys_cache is not None else {}
 
 
 def _verify_token(
-    creds: HTTPAuthorizationCredentials | None = Depends(_bearer),
+    creds: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
 ) -> dict:
     """Проверяет Bearer-токен, возвращает метаданные ключа."""
     if not creds:
@@ -98,7 +99,7 @@ def _today_iso() -> str:
     return date.today().isoformat()
 
 
-def _parse_date(s: str | None, default: str) -> str:
+def _parse_date(s: Optional[str], default: str) -> str:
     if not s:
         return default
     try:
@@ -108,7 +109,7 @@ def _parse_date(s: str | None, default: str) -> str:
         raise HTTPException(status_code=400, detail=f"Неверный формат даты: {s!r}. Ожидается YYYY-MM-DD")
 
 
-def _maybe_int(v: Any) -> int | None:
+def _maybe_int(v: Any) -> Optional[int]:
     if v is None:
         return None
     try:
@@ -117,7 +118,7 @@ def _maybe_int(v: Any) -> int | None:
         return None
 
 
-def _maybe_float(v: Any, ndigits: int = 1) -> float | None:
+def _maybe_float(v: Any, ndigits: int = 1) -> Optional[float]:
     if v is None:
         return None
     try:
@@ -134,7 +135,7 @@ def _set_tenant(tenant_id: int):
 # Realtime
 # ---------------------------------------------------------------------------
 
-def _build_realtime(tenant_id: int, branch_filter: str | None, city_filter: str | None) -> dict:
+def _build_realtime(tenant_id: int, branch_filter: Optional[str], city_filter: Optional[str]) -> dict:
     tok = _set_tenant(tenant_id)
     try:
         branches_cfg = get_available_branches()
@@ -200,8 +201,8 @@ def _build_realtime(tenant_id: int, branch_filter: str | None, city_filter: str 
 async def _build_daily(
     tenant_id: int,
     date_iso: str,
-    branch_filter: str | None,
-    city_filter: str | None,
+    branch_filter: Optional[str],
+    city_filter: Optional[str],
 ) -> dict:
     tok = _set_tenant(tenant_id)
     try:
@@ -271,8 +272,8 @@ async def _build_period(
     tenant_id: int,
     date_from: str,
     date_to: str,
-    branch_filter: str | None,
-    city_filter: str | None,
+    branch_filter: Optional[str],
+    city_filter: Optional[str],
 ) -> dict:
     tok = _set_tenant(tenant_id)
     try:
@@ -334,8 +335,8 @@ async def _build_period(
 async def _build_hourly(
     tenant_id: int,
     date_iso: str,
-    branch_filter: str | None,
-    city_filter: str | None,
+    branch_filter: Optional[str],
+    city_filter: Optional[str],
 ) -> dict:
     tok = _set_tenant(tenant_id)
     try:
@@ -402,8 +403,8 @@ async def _build_hourly(
 async def _build_shifts(
     tenant_id: int,
     date_iso: str,
-    branch_filter: str | None,
-    city_filter: str | None,
+    branch_filter: Optional[str],
+    city_filter: Optional[str],
 ) -> dict:
     tok = _set_tenant(tenant_id)
     try:
@@ -463,11 +464,11 @@ async def _build_shifts(
 @router.get("", summary="Операционная статистика для AI-агентов")
 async def get_stats(
     metric: str = Query(..., description="realtime | daily | period | shifts | hourly"),
-    branch: str | None = Query(None, description="Фильтр по названию точки или подстроке"),
-    city: str | None = Query(None, description="Фильтр по городу: Барнаул, Томск, Абакан и т.д."),
-    date: str | None = Query(None, description="YYYY-MM-DD (для daily/shifts, по умолчанию — вчера)"),
-    from_: str | None = Query(None, alias="from", description="YYYY-MM-DD (для period)"),
-    to: str | None = Query(None, description="YYYY-MM-DD (для period)"),
+    branch: Optional[str] = Query(None, description="Фильтр по названию точки или подстроке"),
+    city: Optional[str] = Query(None, description="Фильтр по городу: Барнаул, Томск, Абакан и т.д."),
+    date: Optional[str] = Query(None, description="YYYY-MM-DD (для daily/shifts, по умолчанию — вчера)"),
+    from_: Optional[str] = Query(None, alias="from", description="YYYY-MM-DD (для period)"),
+    to: Optional[str] = Query(None, description="YYYY-MM-DD (для period)"),
     token_meta: dict = Depends(_verify_token),
 ) -> dict:
     """Операционные метрики для AI-агентов.

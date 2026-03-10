@@ -48,6 +48,7 @@ async def fetch_salary_map(
         return {}
 
     result: dict[str, Decimal] = {}
+    _date_tracker: dict[str, str] = {}  # служебный {emp_id → date_from_str для отслеживания}
 
     for salary in root.findall(".//salary"):
         emp_id = (salary.findtext("employeeId") or "").strip()
@@ -78,11 +79,10 @@ async def fetch_salary_map(
 
         # Если несколько записей — оставляем с наибольшим dateFrom (последнее изменение)
         if emp_id in result:
-            existing_entry = result.get(f"__df_{emp_id}")
-            if existing_entry and date_from_str <= existing_entry:
+            existing_date_str = _date_tracker.get(emp_id)
+            if existing_date_str and date_from_str <= existing_date_str:
                 continue
         result[emp_id] = rate
-        result[f"__df_{emp_id}"] = date_from_str  # служебный ключ для сравнения дат
+        _date_tracker[emp_id] = date_from_str
 
-    # Убираем служебные ключи
-    return {k: v for k, v in result.items() if not k.startswith("__df_")}
+    return result

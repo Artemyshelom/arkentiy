@@ -136,19 +136,12 @@ def _format_network_summary(
         lines.append(f"📈 Конверсия за {month}: {pct}%")
         lines.append(f"   (из {new_cnt} новых {conv_cnt} заказали повторно)")
 
+    # ФОТ поваров (курьеры на мотивационной программе — данных нет)
     if fot and total_rev > 0:
-        total_fot = sum(v for v in fot.values() if isinstance(v, (int, float)))
-        if total_fot > 0:
-            total_pct = round(total_fot / total_rev * 100, 1)
+        cook_fot = fot.get("cook") or 0
+        if cook_fot > 0:
             lines.append("")
-            lines.append(f"💼 ФОТ за неделю: {total_pct}% от выручки ({_fmt(total_fot)})")
-            parts = []
-            if (fot.get("cook") or 0) > 0:
-                parts.append(f"Повара: {round(fot['cook'] / total_rev * 100, 1)}%")
-            if (fot.get("courier") or 0) > 0:
-                parts.append(f"Курьеры: {round(fot['courier'] / total_rev * 100, 1)}%")
-            if parts:
-                lines.append("   " + " · ".join(parts))
+            lines.append(f"💼 ФОТ поваров: {round(cook_fot / total_rev * 100, 1)}% от выручки ({_fmt(cook_fot)})")
 
     return "\n".join(lines)
 

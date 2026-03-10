@@ -138,28 +138,18 @@ def _format_branch_report(
         if staff_parts:
             lines.append(f"👥 На смене за день: {', '.join(staff_parts)}")
 
-    # Блок ФОТ
+    # Блок ФОТ (только повара — курьеры на мотивационной программе)
     fot = agg.get("_fot")  # передаётся из job_send_morning_report
     if fot and revenue:
         cook_fot = fot.get("cook") or 0
-        courier_fot = fot.get("courier") or 0
-        total_fot = sum(v for v in fot.values() if isinstance(v, (int, float)))
-        if total_fot > 0:
-            total_pct = round(total_fot / revenue * 100, 1)
-            lines.append(f"💼 ФОТ: {total_pct}% от выручки ({_fmt_money(total_fot)})")
-            parts = []
-            if cook_fot > 0:
-                parts.append(f"Повара: {round(cook_fot / revenue * 100, 1)}%")
-            if courier_fot > 0:
-                parts.append(f"Курьеры: {round(courier_fot / revenue * 100, 1)}%")
-            if parts:
-                lines.append("   └ " + " · ".join(parts))
+        if cook_fot > 0:
+            lines.append(f"💼 ФОТ поваров: {round(cook_fot / revenue * 100, 1)}% от выручки ({_fmt_money(cook_fot)})")
     elif is_period:
         period_fot = agg.get("_fot")
         if period_fot and revenue:
-            total_fot = sum(v for v in period_fot.values() if isinstance(v, (int, float)))
-            if total_fot > 0:
-                lines.append(f"💼 ФОТ: {round(total_fot / revenue * 100, 1)}% от выручки")
+            cook_fot = period_fot.get("cook") or 0
+            if cook_fot > 0:
+                lines.append(f"💼 ФОТ поваров: {round(cook_fot / revenue * 100, 1)}% от выручки")
 
     new_c = agg.get("new_customers") or 0
     new_r = agg.get("new_customers_revenue") or 0.0

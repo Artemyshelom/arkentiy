@@ -18,6 +18,7 @@ from app.clients import telegram
 from app.config import get_settings
 from app.db import (
     get_branches,
+    get_fot_period,
     get_module_chats_for_city,
     get_period_stats,
     get_repeat_conversion,
@@ -45,6 +46,7 @@ def _format_network_summary(
     label: str,
     branches_stats: list[tuple[str, dict, dict | None]],
     conversion: dict | None = None,
+    fot: dict | None = None,
 ) -> str:
     """Сводка по всей сети тенанта за неделю.
 
@@ -134,6 +136,20 @@ def _format_network_summary(
         lines.append(f"📈 Конверсия за {month}: {pct}%")
         lines.append(f"   (из {new_cnt} новых {conv_cnt} заказали повторно)")
 
+    if fot and total_rev > 0:
+        total_fot = sum(v for v in fot.values() if isinstance(v, (int, float)))
+        if total_fot > 0:
+            total_pct = round(total_fot / total_rev * 100, 1)
+            lines.append("")
+            lines.append(f"💼 ФОТ за неделю: {total_pct}% от выручки ({_fmt(total_fot)})")
+            parts = []
+            if (fot.get("cook") or 0) > 0:
+                parts.append(f"Повара: {round(fot['cook'] / total_rev * 100, 1)}%")
+            if (fot.get("courier") or 0) > 0:
+                parts.append(f"Курьеры: {round(fot['courier'] / total_rev * 100, 1)}%")
+            if parts:
+                lines.append("   " + " · ".join(parts))
+
     return "\n".join(lines)
 
 
@@ -185,8 +201,11 @@ async def job_weekly_report(utc_offset: int) -> None:
             branch_names = [b["name"] for b in tbranches]
             conversion = await get_repeat_conversion(branch_names, tenant_id)
 
+            # ФОТ за неделю
+            fot_week = await get_fot_period(branch_names, date_from, date_to, tenant_id)
+
             # 1. Сводка по сети
-            summary_msg = _format_network_summary(label, branches_stats, conversion=conversion)
+            summary_msg = _format_network_summary(label, branches_stats, conversion=conversion, fot=fot_week)
 
             # 2. Детальные отчёты по точкам (переиспользуем daily_report форматтер)
             detail_msgs: list[str] = []
@@ -209,6 +228,13 @@ async def job_weekly_report(utc_offset: int) -> None:
                     "repeat_customers_revenue": cur.get("repeat_customers_revenue") or 0.0,
                     # штат не показываем в недельном (is_period=True в форматтере)
                 }
+                # ФОТ за период по этой точке
+                if fot_week:
+                    # Для одной точки нет детализации по точке в fot_week (это суммарный),
+                    # но передаём общие данные — форматтер покажет одну строку % от revenue
+                    branch_fot = await get_fot_period([name], date_from, date_to, tenant_id)
+                    if branch_fot:
+                        agg["_fot"] = branch_fot
                 # WoW-строка
                 wow_line = ""
                 if prev and (prev.get("revenue") or 0) > 0:
@@ -270,6 +296,10 @@ async def job_weekly_report(utc_offset: int) -> None:
                                 "payment_changed_count": n_cur.get("payment_changed_count") or 0,
                                 "discount_types_agg": n_cur.get("discount_types"),
                             }
+                            # ФОТ по этой точке за период
+                            n_fot = await get_fot_period([n], date_from, date_to, tenant_id)
+                            if n_fot:
+                                agg2["_fot"] = n_fot
                             wow_line = ""
                             if n_prev and (n_prev.get("revenue") or 0) > 0:
                                 delta = (n_cur.get("revenue") or 0) - n_prev["revenue"]

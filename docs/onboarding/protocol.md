@@ -244,8 +244,21 @@ SELECT
   (SELECT MIN(date)||' - '||MAX(date) FROM orders_raw   WHERE tenant_id=N) as orders,
   (SELECT MIN(date)||' - '||MAX(date) FROM daily_stats  WHERE tenant_id=N) as daily,
   (SELECT MIN(date)||' - '||MAX(date) FROM shifts_raw   WHERE tenant_id=N) as shifts,
-  (SELECT MIN(hour::date)||' - '||MAX(hour::date) FROM hourly_stats WHERE tenant_id=N) as hourly;
+  (SELECT MIN(hour::date)||' - '||MAX(hour::date) FROM hourly_stats WHERE tenant_id=N) as hourly,
+  (SELECT MIN(date)||' - '||MAX(date) FROM fot_daily    WHERE tenant_id=N) as fot;
 ```
+
+### Шаг 6 — ФОТ (после бэкфила shifts_raw на шаге 4)
+
+Требует заполненных `shifts_raw` за нужный период.
+
+```bash
+docker compose exec app python -m app.onboarding.backfill_fot \
+    --tenant-id N --date-from YYYY-MM-DD --date-to YYYY-MM-DD
+```
+
+Прогресс записывается в `/app/data/backfill_fot_{tenant_id}_progress.json`.
+При повторном запуске продолжает с последней незавершённой даты.
 
 ---
 

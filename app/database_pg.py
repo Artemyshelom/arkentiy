@@ -331,6 +331,19 @@ async def get_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_fot_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
+    """Смены с employee_id за дату — для расчёта ФОТ."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT branch_name, employee_id, role_class, clock_in, clock_out
+           FROM shifts_raw WHERE tenant_id = $1 AND date = $2
+             AND clock_out IS NOT NULL AND clock_out != ''
+           ORDER BY branch_name, clock_in""",
+        tenant_id, _to_date(date_iso),
+    )
+    return [dict(r) for r in rows]
+
+
 async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
     pool = get_pool()
     result = await pool.execute(
@@ -1819,6 +1832,71 @@ async def get_payment_changed_orders(branch_names: list[str], date_iso: str) -> 
         date_iso, branch_names,
     )
     return [dict(r) for r in rows]
+
+
+# =====================================================================
+# fot_daily
+# =====================================================================
+
+async def upsert_fot_daily_batch(rows: list[dict], tenant_id: int = 1) -> None:
+    """UPSERT записей ФОТ по точке+дате+категории."""
+    if not rows:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for r in rows:
+                await conn.execute(
+                    """INSERT INTO fot_daily
+                       (tenant_id, branch_name, date, category,
+                        fot_sum, hours_sum, employees_count, employees_no_rate)
+                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8)
+                       ON CONFLICT (tenant_id, branch_name, date, category) DO UPDATE SET
+                         fot_sum=EXCLUDED.fot_sum,
+                         hours_sum=EXCLUDED.hours_sum,
+                         employees_count=EXCLUDED.employees_count,
+                         employees_no_rate=EXCLUDED.employees_no_rate,
+                         updated_at=now()""",
+                    tenant_id,
+                    r["branch_name"], _to_date(r["date"]), r["category"],
+                    r["fot_sum"], r["hours_sum"], r["employees_count"], r["employees_no_rate"],
+                )
+
+
+async def get_fot_daily(
+    branch_name: str, date_iso: str, tenant_id: int = 1
+) -> dict | None:
+    """Возвращает {category: fot_sum} для точки за день. None если нет данных."""
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT category, fot_sum, hours_sum, employees_count, employees_no_rate
+           FROM fot_daily
+           WHERE tenant_id = $1 AND branch_name = $2 AND date = $3""",
+        tenant_id, branch_name, _to_date(date_iso),
+    )
+    if not rows:
+        return None
+    return {r["category"]: float(r["fot_sum"]) for r in rows}
+
+
+async def get_fot_period(
+    branch_names: list[str], date_from: str, date_to: str, tenant_id: int = 1
+) -> dict | None:
+    """Суммарный ФОТ по категориям для списка точек за период. None если нет данных."""
+    if not branch_names:
+        return None
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT category, SUM(fot_sum) AS fot_sum
+           FROM fot_daily
+           WHERE tenant_id = $1 AND branch_name = ANY($2)
+             AND date BETWEEN $3::date AND $4::date
+           GROUP BY category""",
+        tenant_id, branch_names, _to_date(date_from), _to_date(date_to),
+    )
+    if not rows:
+        return None
+    return {r["category"]: float(r["fot_sum"]) for r in rows}
 
 
 # =====================================================================

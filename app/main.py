@@ -51,6 +51,7 @@ from app.jobs.audit import job_audit_report
 from app.jobs.cancel_sync import job_cancel_sync  # DEPRECATED: заменён olap_pipeline шаг A
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
+from app.jobs.fot_pipeline import job_fot_pipeline
 from app.utils.tenant import run_for_all_tenants
 
 settings = get_settings()
@@ -224,6 +225,18 @@ def register_jobs() -> None:
         name="Рекуррентный биллинг ЮKassa",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # ФОТ-пайплайн: ежедневно в 04:00 МСК
+    # Все точки UTC+7 → смены закрыты к 02:00 local = 21:00 МСК накануне.
+    # До daily_report UTC+7 (05:25 МСК) и weekly_report (пн 06:00 МСК).
+    scheduler.add_job(
+        job_fot_pipeline,
+        trigger=CronTrigger(hour=4, minute=0),
+        id="fot_daily",
+        name="ФОТ-пайплайн → fot_daily (все тенанты)",
+        replace_existing=True,
+        misfire_grace_time=1800,
     )
 
     # Жизненный цикл подписок: ежедневно в 04:00 МСК (после биллинга в 03:00)

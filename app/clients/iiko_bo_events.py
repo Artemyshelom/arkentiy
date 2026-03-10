@@ -52,6 +52,9 @@ _COOK_ROLE_SUBSTRINGS = ("сушист", "kitchen", "помпов")  # кух у
 _COURIER_ROLE_PREFIXES = ("курьер", "courier", "delivery", "кур", "крс")
 _COURIER_ROLE_SUBSTRINGS = ("доставка", "k_rs")
 
+_ADMIN_ROLE_PREFIXES = ("ас", "ад", "крт")                 # АС, АД, АД(РСТ), КРТ
+_ADMIN_ROLE_SUBSTRINGS = ("адм", "администрат")            # Адм*, Администрат*
+
 FULL_RELOAD_INTERVAL = 6  # часов
 
 # ---------------------------------------------------------------------------
@@ -74,9 +77,9 @@ _last_full_reload: dict[str, float] = {}
 # ---------------------------------------------------------------------------
 
 def _classify_role(role_code: str) -> str | None:
-    """Определяет role_class ('cook' | 'courier' | None) по коду роли из iiko."""
+    """Определяет role_class ('cook' | 'courier' | 'admin' | 'other') по коду роли из iiko."""
     if not role_code:
-        return None
+        return "other"
     low = role_code.lower()
     for prefix in _COOK_ROLE_PREFIXES:
         if low.startswith(prefix):
@@ -90,7 +93,13 @@ def _classify_role(role_code: str) -> str | None:
     for sub in _COURIER_ROLE_SUBSTRINGS:
         if sub in low:
             return "courier"
-    return None
+    for prefix in _ADMIN_ROLE_PREFIXES:
+        if low.startswith(prefix):
+            return "admin"
+    for sub in _ADMIN_ROLE_SUBSTRINGS:
+        if sub in low:
+            return "admin"
+    return "other"
 
 
 # ---------------------------------------------------------------------------

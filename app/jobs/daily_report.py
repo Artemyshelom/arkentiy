@@ -17,6 +17,7 @@ from app.db import (
     aggregate_orders_for_daily_stats,
     clear_updates_for_date,
     get_daily_stats,
+    get_fot_daily,
     get_updates_for_date,
     log_job_finish,
     log_job_start,
@@ -137,6 +138,29 @@ def _format_branch_report(
         if staff_parts:
             lines.append(f"👥 На смене за день: {', '.join(staff_parts)}")
 
+    # Блок ФОТ
+    fot = agg.get("_fot")  # передаётся из job_send_morning_report
+    if fot and revenue:
+        cook_fot = fot.get("cook") or 0
+        courier_fot = fot.get("courier") or 0
+        total_fot = sum(v for v in fot.values() if isinstance(v, (int, float)))
+        if total_fot > 0:
+            total_pct = round(total_fot / revenue * 100, 1)
+            lines.append(f"💼 ФОТ: {total_pct}% от выручки ({_fmt_money(total_fot)})")
+            parts = []
+            if cook_fot > 0:
+                parts.append(f"Повара: {round(cook_fot / revenue * 100, 1)}%")
+            if courier_fot > 0:
+                parts.append(f"Курьеры: {round(courier_fot / revenue * 100, 1)}%")
+            if parts:
+                lines.append("   └ " + " · ".join(parts))
+    elif is_period:
+        period_fot = agg.get("_fot")
+        if period_fot and revenue:
+            total_fot = sum(v for v in period_fot.values() if isinstance(v, (int, float)))
+            if total_fot > 0:
+                lines.append(f"💼 ФОТ: {round(total_fot / revenue * 100, 1)}% от выручки")
+
     new_c = agg.get("new_customers") or 0
     new_r = agg.get("new_customers_revenue") or 0.0
     rep_c = agg.get("repeat_customers") or 0
@@ -208,6 +232,14 @@ async def job_send_morning_report(utc_offset: int) -> None:
 
         # Агрегаты из orders_raw (задержки, времена, взаимедействия со сменой оплаты)
         agg = await aggregate_orders_for_daily_stats(name, date_iso)
+
+        # ФОТ за вчера — если пайплайн отработал, подставляем в блок отчёта
+        try:
+            fot_data = await get_fot_daily(name, date_iso, tenant_id)
+            if fot_data:
+                agg["_fot"] = fot_data
+        except Exception as _e:
+            logger.debug(f"get_fot_daily [{name}]: {_e}")
 
         rev = stats.get("revenue") or 0
         chk = stats.get("orders_count") or 0

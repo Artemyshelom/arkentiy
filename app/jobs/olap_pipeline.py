@@ -410,7 +410,9 @@ async def _upsert_daily_stats_from_aggregate(
             if not stats and not agg.get("raw_orders_count"):
                 continue
 
-            rev = stats.get("revenue_net") or 0.0
+            rev = float(stats.get("revenue_net") or agg.get("raw_revenue") or 0.0)
+            if not stats.get("revenue_net") and rev:
+                logger.warning(f"[pipeline] revenue fallback orders_raw: {name} {date_iso} → {rev}")
             chk = int(stats.get("check_count") or agg.get("raw_orders_count") or 0)
             if not stats.get("check_count") and chk:
                 logger.warning(f"[pipeline] check_count fallback orders_raw: {name} {date_iso} → {chk}")

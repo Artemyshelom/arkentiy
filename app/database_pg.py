@@ -1088,6 +1088,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     row = await pool.fetchrow(
         """SELECT
             COUNT(*) AS raw_orders_count,
+            COALESCE(SUM(sum), 0) AS raw_revenue,
             COALESCE(SUM(CASE
                 WHEN pay_breakdown LIKE '%SailPlay%'
                 THEN (pay_breakdown::jsonb->>'SailPlay Бонус')::numeric

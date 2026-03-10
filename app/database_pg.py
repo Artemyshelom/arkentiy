@@ -1435,7 +1435,7 @@ async def get_repeat_conversion(
         conversion_pct — процент конверсии (0..100)
         month_label  — читаемое название периода, напр. «февраль 2026»
     """
-    from datetime import date as _date
+    from datetime import date as _date, timedelta
     import calendar as _cal
 
     pool = get_pool()

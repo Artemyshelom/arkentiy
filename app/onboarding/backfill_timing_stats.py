@@ -76,8 +76,8 @@ class TimingStatsBackfiller:
                     agg = await aggregate_orders_for_daily_stats(branch_name, date_iso)
 
                     existing = await pool.fetchrow(
-                        "SELECT revenue, avg_check, cogs_pct, discount_sum, "
-                        "pickup_count, cash, noncash "
+                        "SELECT orders_count, revenue, avg_check, cogs_pct, discount_sum, "
+                        "sailplay, pickup_count, cash, noncash "
                         "FROM daily_stats "
                         "WHERE tenant_id=$1 AND branch_name=$2 AND date::text = $3",
                         self.tenant_id, branch_name, date_iso,
@@ -90,11 +90,11 @@ class TimingStatsBackfiller:
                         day_rows.append({
                             "branch_name":               branch_name,
                             "date":                      date_iso,
-                            "orders_count":              existing.get("orders_count") or 0,
+                            "orders_count":              existing["orders_count"] or 0,
                             "revenue":                   existing["revenue"],
                             "avg_check":                 existing["avg_check"],
                             "cogs_pct":                  existing["cogs_pct"],
-                            "sailplay":                  0.0,
+                            "sailplay":                  existing["sailplay"] or 0.0,
                             "discount_sum":              existing["discount_sum"],
                             "pickup_count":              existing["pickup_count"],
                             "cash":                      existing["cash"],

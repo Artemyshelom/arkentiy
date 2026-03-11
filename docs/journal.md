@@ -18,6 +18,81 @@
 
 ---
 
+## Сессия 79 — 11 марта 2026 (feat: Станислав — консультант-агент Аркентия) ✅
+
+**Цель:** Запустить второго OpenClaw агента — консультанта `Станислав` для onboarding'а и обучения новых клиентов.
+
+### 1. OpenClaw агент `stanislav` на morf
+
+Создан воркспейс `/opt/morf/workspace-stanislav/` с 7 файлами:
+- `AGENTS.md` — системный промпт, роль, запреты (не выдумывать функции, честность)
+- `SOUL.md` — характер: наставник, операционный опыт, 6 лет в сетях доставки
+- `IDENTITY.md`, `MEMORY.md` (шаблон), `TOOLS.md`
+- `KNOWLEDGE.md`, `NORMS.md` — симлинки на `/opt/morf/workspace/arkentiy/docs/consultant/`
+
+**Ключевая особ:** TOOLS.md содержит:
+- **Stats API** (`stn_1038f90c5f16469444b9a602ce87fed13f33faad1c82`) — может сам проверять цифры для контекста
+- **Exa API** (`5c43a1d4-4d9d-4af4-ae2a-dd7238c4f361`) — веб-поиск по рынку доставки
+
+**Алгоритм:** наставляет по материалам KNOWLEDGE.md; при нужде проверяет конкретный показатель в Stats API; регулярный мониторинг отправляет к Борису (специалист).
+
+### 2. Мультитенант onboarding в Аркентий
+
+**Новый endpoint:**
+- `POST /api/consultant/activate` — подключить чат Станислава к конкретному тенанту  
+  Параметры: `chat_id`, `tenant_id`, `note`
+- `GET /api/consultant/chats` — список активированных чатов
+
+**Новая таблица БД:**
+- `consultant_chats` — лог активаций (chat_id, tenant_id, activated_at, updated_at)
+- Миграция `008_consultant.sql` применена и протестирована
+
+### 3. openclaw.json обновлён
+
+```json
+"agents": {
+  "list": [
+    ...
+    { "id": "stanislav", "name": "Станислав", "workspace": "/opt/morf/workspace-stanislav", 
+      "model": { "primary": "anthropic/claude-haiku-4-5" } }
+  ]
+},
+"bindings": [
+  { "agentId": "stanislav", "match": { "channel": "telegram", "accountId": "stanislav" } }
+],
+"channels.telegram.accounts.stanislav": {
+  "botToken": "BOT_TOKEN_PLACEHOLDER",  // ⚠️ заполнить @BotFather
+  "dmPolicy": "open", "groupPolicy": "open", ...
+}
+```
+
+### 4. Токены выданы
+
+- **Станислав Stats API:** `stn_1038f90c5f16469444b9a602ce87fed13f33faad1c82` (добавлен в `secrets/api_keys.json`)
+- **Админ Аркентия:** `e511afffe963365d5ab443f45c7b421f21c9ba925797425c` (`.env` arkentiy сервер)
+
+### 5. Статус: Ожидание BotFather
+
+**Что осталось:** создать бота через @BotFather и вставить реальный токен в `openclaw.json` → `systemctl restart morf.service` → готово.
+
+**Активация чата:** когда клиент захочет использовать Станислава:
+```bash
+curl -X POST "https://arkenty.ru/api/consultant/activate" \
+  -H "Authorization: Bearer e511afffe963365d5ab443f45c7b421f21c9ba925797425c" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": -100ЧАТ_ID, "tenant_id": "artemiy"}'
+```
+
+### Файлы изменены
+- `app/routers/consultant.py` (новый) — быстрый endpoint для управления
+- `app/migrations/008_consultant.sql` — таблица `consultant_chats`
+- `app/main.py` — регистрация нового router
+- `/opt/morf/workspace-stanislav/*` — полный воркспейс агента (на morf)
+- `/opt/ebidoebi/.env` — ADMIN_API_KEY добавлен
+- `/opt/ebidoebi/secrets/api_keys.json` — токен Станислава
+
+---
+
 ## Сессия 78 — 10 марта 2026 (feat: банковские выписки Томск + рефактор bank_statement мультитенант) ✅
 
 **Цель:** Добавить обработку выписок ИП Сергеева Михаила (Томск-1, Томск-2) и сделать систему масштабируемой для новых тенантов.

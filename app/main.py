@@ -35,6 +35,7 @@ from app.routers.onboarding import router as onboarding_router
 from app.routers.payments import router as payments_router
 from app.routers.auth import router as auth_router
 from app.routers.stats import router as stats_router
+from app.routers.consultant import router as consultant_router
 
 # Импорт задач
 from app.jobs.hourly_stats import job_hourly_stats, job_recalc_yesterday_hourly
@@ -415,6 +416,7 @@ app.include_router(cabinet_router)
 app.include_router(onboarding_router)
 app.include_router(payments_router)
 app.include_router(stats_router)
+app.include_router(consultant_router)
 
 
 # --- Ручные триггеры (для отладки и тестирования) ---

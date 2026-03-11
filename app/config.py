@@ -71,6 +71,13 @@ class Settings(BaseSettings):
 
     # Stats API (внешние AI-агенты: Борис и др.)
     stats_api_keys_file: str = "/app/secrets/api_keys.json"
+
+    # OpenAI (для RAG-индексации и codesearch embeddings)
+    openai_api_key: str = ""
+
+    # Jina AI embeddings (через SOCKS5 прокси Frankfurt)
+    jina_api_key: str = ""
+    jina_proxy_url: str = ""  # socks5://user:pass@72.56.107.85:1080
     debug: bool = False
 
     # Email (Resend)

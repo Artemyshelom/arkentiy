@@ -404,7 +404,7 @@ async def _upsert_daily_stats_from_aggregate(
         for branch in branches:
             name = branch["name"]
             stats = olap_stats.get(name, {})
-            agg = await aggregate_orders_for_daily_stats(name, date_iso)
+            agg = await aggregate_orders_for_daily_stats(name, date_iso, tenant_id)
 
             # Пропускаем только если нет данных ни в OLAP, ни в orders_raw
             if not stats and not agg.get("raw_orders_count"):

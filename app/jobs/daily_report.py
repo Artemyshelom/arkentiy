@@ -221,7 +221,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
         stats = await get_daily_stats(name, date_iso, tenant_id) or {}
 
         # Агрегаты из orders_raw (задержки, времена, взаимедействия со сменой оплаты)
-        agg = await aggregate_orders_for_daily_stats(name, date_iso)
+        agg = await aggregate_orders_for_daily_stats(name, date_iso, tenant_id)
 
         # ФОТ за вчера — если пайплайн отработал, подставляем в блок отчёта
         try:

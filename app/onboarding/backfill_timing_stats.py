@@ -73,7 +73,7 @@ class TimingStatsBackfiller:
 
             for branch_name in branches:
                 try:
-                    agg = await aggregate_orders_for_daily_stats(branch_name, date_iso)
+                    agg = await aggregate_orders_for_daily_stats(branch_name, date_iso, self.tenant_id)
 
                     existing = await pool.fetchrow(
                         "SELECT orders_count, revenue, avg_check, cogs_pct, discount_sum, "

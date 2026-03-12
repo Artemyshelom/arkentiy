@@ -482,7 +482,9 @@ async def get_stats(
     if "stats" not in token_meta.get("modules", []):
         raise HTTPException(status_code=403, detail="Модуль stats не разрешён для этого токена")
 
-    tenant_id: int = token_meta.get("tenant_id", 1)
+    if "tenant_id" not in token_meta:
+        raise HTTPException(status_code=403, detail="No tenant_id in token")
+    tenant_id: int = token_meta["tenant_id"]
 
     if metric == "realtime":
         return _build_realtime(tenant_id, branch, city)

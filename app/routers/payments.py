@@ -545,3 +545,78 @@ async def create_invoice(
         "invoice_number": invoice_number,
         "invoice_url": f"/payment/invoice?invoice_id={invoice_id}",
     }
+
+
+# =====================================================================
+# 7. POST /api/payments/{payment_id}/retry
+# =====================================================================
+
+@router.post("/payments/{payment_id}/retry")
+@limiter.limit("10/minute")
+async def retry_payment(payment_id: str, request: Request):
+    """
+    Повторный платёж без JWT — по payment_id ищет исходный платёж в БД,
+    создаёт новый. Используется со страницы /payment/fail.
+    """
+    settings = get_settings()
+    if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
+        raise HTTPException(503, "Платёжная система временно недоступна")
+
+    pool = await _get_pool()
+    if not pool:
+        raise HTTPException(500, "Database not available")
+
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT p.tenant_id, p.amount, p.description, p.status, t.name as tenant_name
+               FROM payments p
+               JOIN tenants t ON t.id = p.tenant_id
+               WHERE p.id = $1""",
+            payment_id,
+        )
+
+    if not row:
+        raise HTTPException(404, "Платёж не найден")
+    if row["status"] == "succeeded":
+        raise HTTPException(409, "Этот платёж уже был успешно оплачен")
+
+    tenant_id = row["tenant_id"]
+    amount = row["amount"]
+    description = row["description"] or f"Подписка Аркентий — {row['tenant_name']}"
+
+    new_payment_id = str(uuid.uuid4())
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO payments (id, tenant_id, amount, status, payment_method, description)
+               VALUES ($1, $2, $3, 'pending', 'card', $4)""",
+            new_payment_id, tenant_id, amount, description,
+        )
+
+    return_url = f"{settings.yukassa_return_url}/payment/success?payment_id={new_payment_id}"
+    try:
+        yk_payment = await create_payment(
+            amount=amount,
+            description=description,
+            return_url=return_url,
+            metadata={"payment_id": new_payment_id, "tenant_id": str(tenant_id)},
+            save_payment_method=True,
+        )
+    except YukassaError as e:
+        logger.error(f"ЮKassa retry error for tenant {tenant_id}: {e}")
+        raise HTTPException(502, "Ошибка платёжной системы. Попробуйте позже")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE payments SET yukassa_id = $1, updated_at = now() WHERE id = $2",
+            yk_payment["id"], new_payment_id,
+        )
+
+    confirmation_url = yk_payment.get("confirmation", {}).get("confirmation_url")
+    if not confirmation_url:
+        raise HTTPException(502, "Не удалось получить ссылку на оплату")
+
+    return {
+        "payment_id": new_payment_id,
+        "confirmation_url": confirmation_url,
+    }

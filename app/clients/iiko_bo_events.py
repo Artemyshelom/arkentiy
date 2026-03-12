@@ -61,8 +61,8 @@ FULL_RELOAD_INTERVAL = 6  # часов
 # Модульные переменные
 # ---------------------------------------------------------------------------
 
-# Глобальный реестр состояний точек: {branch_name: BranchState}
-_states: dict[str, "BranchState"] = {}
+# Глобальный реестр состояний точек: {(tenant_id, branch_name): BranchState}
+_states: dict[tuple[int, str], "BranchState"] = {}
 _first_poll_done: bool = False
 
 # Кеш сотрудников: {bo_url: {user_id: {name, role, role_class}}}
@@ -869,7 +869,7 @@ async def _full_load(state: BranchState, client: httpx.AsyncClient) -> None:
         f"[{state.branch_name}] Full load: {len(events)} событий, revision={max_revision}"
     )
     from app.db import close_stale_shifts
-    await close_stale_shifts(__import__("datetime").date.today().isoformat())
+    await close_stale_shifts(__import__("datetime").date.today().isoformat(), tenant_id=state.tenant_id)
     await _seed_sessions_from_db(state)
     await _save_to_db(state)
 
@@ -938,23 +938,26 @@ async def poll_all_branches() -> None:
     for branch in branches:
         name = branch["name"]
         bo_url = branch.get("bo_url", "")
+        tid = branch.get("tenant_id", 1)
         if not bo_url:
             continue
-        if name not in _states:
-            _states[name] = BranchState(
+        key = (tid, name)
+        if key not in _states:
+            _states[key] = BranchState(
                 bo_url=bo_url,
                 branch_name=name,
                 bo_login=branch.get("bo_login", ""),
                 bo_password=branch.get("bo_password", ""),
-                tenant_id=branch.get("tenant_id", 1),
+                tenant_id=tid,
             )
 
     async def _poll_branch(branch: dict) -> None:
         name = branch["name"]
         bo_url = branch.get("bo_url", "")
-        if not bo_url or name not in _states:
+        tid = branch.get("tenant_id", 1)
+        if not bo_url or (tid, name) not in _states:
             return
-        state = _states[name]
+        state = _states[(tid, name)]
         async with httpx.AsyncClient(verify=False, timeout=60) as client:
             need_full = (
                 state.revision == 0
@@ -988,11 +991,11 @@ async def job_poll_iiko_events() -> None:
 # Публичный API
 # ---------------------------------------------------------------------------
 
-def get_branch_rt(branch_name: str) -> dict | None:
+def get_branch_rt(branch_name: str, tenant_id: int = 1) -> dict | None:
     """
     Возвращает словарь RT-данных точки или None если данные ещё не загружены.
     """
-    state = _states.get(branch_name)
+    state = _states.get((tenant_id, branch_name))
     if state is None:
         # Вернуть пустой словарь вместо None если статс ещё не загружен
         return {
@@ -1034,12 +1037,12 @@ def get_branch_rt(branch_name: str) -> dict | None:
     }
 
 
-def get_branch_staff(branch_name: str, role: str) -> list[dict] | None:
+def get_branch_staff(branch_name: str, role: str, tenant_id: int = 1) -> list[dict] | None:
     """
     Возвращает список персонала точки по роли ('cook' | 'courier').
     None если данные ещё не загружены.
     """
-    state = _states.get(branch_name)
+    state = _states.get((tenant_id, branch_name))
     if state is None or state.revision == 0:
         return None
 
@@ -1062,12 +1065,12 @@ def get_all_branches_staff(role: str) -> dict[str, list[dict]]:
     Если точка ещё не загружена — возвращает пустой список для точки.
     """
     result = {}
-    for name, state in _states.items():
+    for (tid, name), state in _states.items():
         if state.revision == 0:
             # Вернуть пустой список вместо пропуска
             result[name] = []
             continue
-        staff = get_branch_staff(name, role)
+        staff = get_branch_staff(name, role, tid)
         if staff is not None:
             result[name] = staff
         else:

@@ -103,7 +103,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
     except Exception as e:
         logger.error(f"Ошибка OLAP v2 [{branch['name']}]: {e}")
 
-    rt_data = get_branch_rt(branch["name"])
+    rt_data = get_branch_rt(branch["name"], branch.get("tenant_id", 1))
 
     # Параллельный сбор DB + cash shift вместо двух последовательных await
     async def _get_orders_agg() -> dict:

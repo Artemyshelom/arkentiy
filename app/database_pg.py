@@ -1114,7 +1114,7 @@ async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int
     return result
 
 
-async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> dict:
+async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict:
     """Агрегирует данные из orders_raw для daily_stats."""
     pool = get_pool()
 
@@ -1142,9 +1142,9 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
                      THEN late_minutes END)
                 AS avg_late_min
         FROM orders_raw
-        WHERE branch_name = $1 AND date::text = $2
+        WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
           AND status != 'Отменена'""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
 
     result = dict(row) if row else {}
@@ -1199,11 +1199,11 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
                 END
             END) AS avg_delivery_min
         FROM orders_raw
-        WHERE branch_name = $1 AND date::text = $2
+        WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
           AND status != 'Отменена'
           AND COALESCE(payment_changed, false) = false
           {_EXACT_TIME_FILTER_PG}""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
 
     if time_row:
@@ -1212,10 +1212,10 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     exact_row = await pool.fetchrow(
         f"""SELECT COUNT(*) AS exact_time_count
         FROM orders_raw
-        WHERE branch_name = $1 AND date::text = $2
+        WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
           AND status != 'Отменена'
           AND {_EXACT_TIME_CONDITIONS_PG}""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
 
     if exact_row:
@@ -1224,12 +1224,12 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     dt_rows = await pool.fetch(
         """SELECT discount_type, COUNT(*) as cnt, SUM(COALESCE(discount_sum, 0)) as total
            FROM orders_raw
-           WHERE branch_name = $1 AND date::text = $2
+           WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
              AND discount_type IS NOT NULL AND discount_type != ''
              AND status != 'Отменена'
            GROUP BY discount_type
            ORDER BY total DESC""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
 
     result["discount_types_agg"] = [
@@ -1240,10 +1240,10 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
     staff_rows = await pool.fetch(
         """SELECT role_class, COUNT(DISTINCT employee_id) as cnt
            FROM shifts_raw
-           WHERE branch_name = $1 AND date::text = $2
+           WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
              AND clock_in != clock_out
            GROUP BY role_class""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
     staff = {r["role_class"]: r["cnt"] for r in staff_rows}
     result["cooks_today"] = staff.get("cook", 0)
@@ -1256,7 +1256,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
         """WITH first_orders AS (
                SELECT client_phone, MIN(date) AS first_date
                FROM orders_raw
-               WHERE branch_name = $1
+               WHERE branch_name = $1 AND tenant_id = $3
                  AND client_phone IS NOT NULL AND client_phone != ''
                  AND status != 'Отменена'
                GROUP BY client_phone
@@ -1267,11 +1267,11 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str) -> d
                COALESCE(SUM(o.sum), 0)                                          AS revenue
            FROM orders_raw o
            JOIN first_orders fo ON o.client_phone = fo.client_phone
-           WHERE o.branch_name = $1
+           WHERE o.branch_name = $1 AND o.tenant_id = $3
              AND o.date::text = $2
              AND o.status != 'Отменена'
            GROUP BY ctype""",
-        branch_name, date_iso,
+        branch_name, date_iso, tenant_id,
     )
     result["new_customers"] = 0
     result["new_customers_revenue"] = 0.0
@@ -1840,7 +1840,7 @@ async def get_tracking_summary(since_date: str | None = None, tenant_id: int = 1
     return result
 
 
-async def get_payment_changed_orders(branch_names: list[str], date_iso: str) -> list[dict]:
+async def get_payment_changed_orders(branch_names: list[str], date_iso: str, tenant_id: int) -> list[dict]:
     """Заказы со сменой оплаты за дату по указанным точкам."""
     pool = get_pool()
     rows = await pool.fetch(
@@ -1849,8 +1849,9 @@ async def get_payment_changed_orders(branch_names: list[str], date_iso: str) -> 
            WHERE date::text = $1
              AND COALESCE(payment_changed, false) = true
              AND branch_name = ANY($2)
+             AND tenant_id = $3
            ORDER BY branch_name, planned_time""",
-        date_iso, branch_names,
+        date_iso, branch_names, tenant_id,
     )
     return [dict(r) for r in rows]
 

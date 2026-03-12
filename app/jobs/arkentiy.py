@@ -1329,7 +1329,7 @@ async def _build_branch_report(
         return None
 
     if is_single_day:
-        agg = await aggregate_orders_for_daily_stats(name, date_from)
+        agg = await aggregate_orders_for_daily_stats(name, date_from, _tid)
     else:
         discount_types_raw = ds.get("discount_types") or "[]"
         try:
@@ -1421,7 +1421,7 @@ async def _build_city_aggregate(
                 ds = await get_live_today_stats(name, date_from, tenant_id=_tid)
                 if ds:
                     any_live = True
-            agg = await aggregate_orders_for_daily_stats(name, date_from) if ds else {}
+            agg = await aggregate_orders_for_daily_stats(name, date_from, _tid) if ds else {}
         else:
             ds = await get_period_stats(name, date_from, date_to, tenant_id=_tid)
             agg = {}
@@ -2054,8 +2054,9 @@ async def _handle_payment_changes(chat_id: int, arg: str, city_filter=None) -> N
     )]
 
     try:
+        _tid_pc = _ctx_tenant_id.get()
         from app.db import get_payment_changed_orders
-        rows = await get_payment_changed_orders(branch_names, date_iso)
+        rows = await get_payment_changed_orders(branch_names, date_iso, _tid_pc)
     except Exception as e:
         await _send(chat_id, f"Ошибка: {e}")
         return

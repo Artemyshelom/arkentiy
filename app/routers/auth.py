@@ -35,7 +35,7 @@ class ForgotPasswordRequest(BaseModel):
 
 class ResetPasswordRequest(BaseModel):
     token: str
-    password: str
+    new_password: str
 
 
 # =====================================================================
@@ -156,7 +156,7 @@ async def forgot_password(req: ForgotPasswordRequest, request: Request):
 @limiter.limit("5/hour")
 async def reset_password(req: ResetPasswordRequest, request: Request):
     """Установка нового пароля по токену из письма."""
-    if len(req.password) < 8:
+    if len(req.new_password) < 8:
         raise HTTPException(400, "Пароль должен содержать минимум 8 символов")
 
     pool = await _get_pool()
@@ -182,7 +182,7 @@ async def reset_password(req: ResetPasswordRequest, request: Request):
                    token_version = token_version + 1,
                    updated_at = now()
                WHERE id = $2""",
-            hash_password(req.password), row["id"],
+            hash_password(req.new_password), row["id"],
         )
 
         # Выдаём новый JWT сразу после сброса

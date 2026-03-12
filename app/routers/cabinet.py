@@ -7,6 +7,7 @@ tenant_id берётся из JWT payload, данные изолированы �
 
 import json
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -497,7 +498,7 @@ async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
 
     async with pool.acquire() as conn:
         cred = await conn.fetchrow(
-            "SELECT bo_url, bo_login FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true LIMIT 1",
+            "SELECT bo_url, bo_login, bo_password FROM iiko_credentials WHERE tenant_id = $1 AND is_active = true LIMIT 1",
             tenant_id,
         )
 
@@ -506,12 +507,14 @@ async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
 
     try:
         from app.clients.iiko_auth import get_bo_token
+        t0 = time.monotonic()
         token = await get_bo_token(
             cred["bo_url"],
             bo_login=cred.get("bo_login") or None,
             bo_password=cred.get("bo_password") or None,
         )
-        return {"status": "ok" if token else "error", "response_time_ms": 500}
+        elapsed = round((time.monotonic() - t0) * 1000)
+        return {"status": "ok" if token else "error", "response_time_ms": elapsed}
     except Exception as e:
         return {"status": "error", "error": str(e)[:200]}
 
@@ -544,10 +547,21 @@ async def get_chats(tenant_id: int = Depends(get_tenant_id)):
                 mods = []
         elif not isinstance(mods, list):
             mods = []
+        cities_raw = r["cities_json"]
+        if isinstance(cities_raw, str):
+            try:
+                cities_raw = json.loads(cities_raw)
+            except (json.JSONDecodeError, TypeError):
+                cities_raw = []
+        elif not isinstance(cities_raw, list):
+            cities_raw = []
+        # Fallback: если cities_json ещё пустой (до миграции), берём устаревший city
+        if not cities_raw and r["city"]:
+            cities_raw = [r["city"]]
         chats.append({
             "chat_id": str(r["chat_id"]),
             "name": r["name"],
-            "cities": [r["city"]] if r["city"] else [],
+            "cities": cities_raw,
             "modules": mods,
         })
     return {"chats": chats}
@@ -613,13 +627,17 @@ async def update_chat(chat_id: str, data: ChatUpdate, tenant_id: int = Depends(g
     except ValueError:
         raise HTTPException(400, "Некорректный chat_id")
 
-    city = data.cities[0] if data.cities else None
+    cities_json = json.dumps(data.cities)
+    # Для обратной совместимости также пишем первый город в устаревшую колонку city
+    city_legacy = data.cities[0] if data.cities else None
 
     async with pool.acquire() as conn:
         result = await conn.execute(
-            """UPDATE tenant_chats SET name = $1, modules_json = $2::jsonb, city = $3
-               WHERE tenant_id = $4 AND chat_id = $5 AND is_active = true""",
-            data.name, json.dumps(data.modules), city, tenant_id, chat_id_int,
+            """UPDATE tenant_chats SET name = $1, modules_json = $2::jsonb,
+               city = $3, cities_json = $4::jsonb
+               WHERE tenant_id = $5 AND chat_id = $6 AND is_active = true""",
+            data.name, json.dumps(data.modules), city_legacy, cities_json,
+            tenant_id, chat_id_int,
         )
         if result == "UPDATE 0":
             raise HTTPException(404, "Чат не найден")

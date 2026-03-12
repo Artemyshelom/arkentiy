@@ -62,22 +62,11 @@
       btn.textContent = "Создаём платёж...";
 
       try {
-        // Получаем данные старого платежа
-        const statusResp = await fetch(`/api/payments/${paymentId}/status`);
-        if (!statusResp.ok) throw new Error("not found");
-        const statusData = await statusResp.json();
-
-        // Создаём новый платёж
-        const resp = await fetch("/api/payments/create", {
+        // Повторный платёж без JWT — бэкенд находит данные исходного платежа сам
+        const resp = await fetch(`/api/payments/${paymentId}/retry`, {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            tenant_id: statusData.tenant_id || 0,
-            amount: statusData.amount,
-            description: `Подписка Аркентий — ${statusData.tenant_name}`,
-          }),
         });
-        if (!resp.ok) throw new Error("create failed");
+        if (!resp.ok) throw new Error("retry failed");
         const data = await resp.json();
         window.location.href = data.confirmation_url;
       } catch {

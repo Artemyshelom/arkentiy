@@ -5,7 +5,7 @@
 ```
 Base URL:  https://arkenty.ru/api/stats
 Method:    GET
-Auth:      Authorization: Bearer brs_6f6797a679fddddda251318c4c9cb3a13b385e1ce2674ae1
+Auth:      Authorization: Bearer <TOKEN_FROM_SECRETS>
 ```
 
 Все запросы — GET с параметром `metric` и опциональными фильтрами.

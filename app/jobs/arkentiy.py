@@ -40,7 +40,7 @@ from app.clients.iiko_bo_events import (
 )
 from app.config import get_settings
 from app.db import BACKEND, aggregate_orders_for_daily_stats, get_client_order_count, get_daily_stats, get_exact_time_orders, get_live_today_stats, get_period_stats, log_silence
-from app.database_pg import get_pool
+from app.database_pg import get_pool, get_fot_daily, get_fot_period
 from app.services import access_manager
 from app.jobs.daily_report import _format_branch_report
 from app.utils.formatting import fmt_money as _fmt_money
@@ -1377,6 +1377,17 @@ async def _build_branch_report(
                 ds["discount_sum"] = round(sum(dt["sum"] for dt in _olap_disc), 2)
     except Exception as _e:
         logger.warning(f"[/отчёт] ОЛАП разбивка скидок [{name}]: {_e}")
+
+    # ФОТ — за день или период
+    try:
+        if is_single_day:
+            fot_data = await get_fot_daily(name, date_from, _tid)
+        else:
+            fot_data = await get_fot_period([name], date_from, date_to, _tid)
+        if fot_data:
+            agg["_fot"] = fot_data
+    except Exception as _e:
+        logger.debug(f"get_fot [{name}]: {_e}")
 
     result = _format_branch_report(name, ds, label, agg, is_period=not is_single_day)
     if is_live:

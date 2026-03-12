@@ -9,6 +9,73 @@
 
 ---
 
+## 2026-03-12: ✅ Аудит безопасности и мультитенантности (ПОЛНОЙ РЕАЛИЗОВАН)
+
+**Дата проверки:** 2026-03-10 (Audit 2 с корректировками)  
+**Дата реализации:** 2026-03-12 14:24 MSK  
+**Статус:** ✅ Все 9 пунктов плана выполнены, деплоено на продакшн, 7 чатов мигрировано
+
+### Выявленные баги (9 шт.) и решения
+
+#### **Блок 1 — Брокены flow (4 бага)**
+
+| # | Баг | Решение | Файлы |
+|----|-----|---------|-------|
+| 1.1 | Reset password field mismatch (`password` vs `new_password`) | Переименовано `password` → `new_password` в 3 местах | `app/routers/auth.py` |
+| 1.2 | Payment retry без авт-и (fail.html → POST /api/payments/create без JWT) | Новый endpoint `POST /api/payments/{payment_id}/retry` без JWT — по ID находит payment, воссоздаёт в YooKassa | `app/routers/payments.py` (+75 строк), `web/payment/fail.html` |
+| 1.3 | Cabinet test_iiko: неполный SELECT + фейк-время | SELECT добавлен `bo_password`, добавлен real timing через `time.monotonic()` | `app/routers/cabinet.py` |
+| 1.4 | Chat cities: 1 чат ↔ 1 город, но финансы/маркетинг — многогородские | Новая колонка `cities_json` (JSONB array), миграция + бэкфилл 7 чатов | `app/migrations/012_chat_cities.sql`, `app/routers/cabinet.py` |
+
+#### **Блок 2 — Секреты (1 баг + rotation)**
+
+| # | Баг | Решение | Файлы |
+|----|-----|---------|-------|
+| 2.1 | Boris API token + OpenCLAW token в документации (git) | Все токены заменены на `<REDACTED>` / `<TOKEN_FROM_SECRETS>` | `docs/specs/boris_api_prompt.md`, `docs/journal.md` |
+| 2.2 | Токены нужно ротировать на VPS | Ручная ротация на VPS: новый Boris key в `secrets/api_keys.json`, новый OpenCLAW token в `.env` | VPS `/opt/ebidoebi/` |
+
+#### **Блок 3 — Мультитенантная изоляция (4 бага)**
+
+| # | Баг | Решение | Файлы | Статус |
+|----|-----|---------|-------|--------|
+| 3.1 | `aggregate_orders_for_daily_stats` без `tenant_id` → изолирует перекрёстные данные | Добавлен параметр `tenant_id`, все 6 SQL-запросов теперь `AND tenant_id = $3` | `app/database_pg.py` + 5 callers (daily_report, olap_pipeline, arkentiy ×2, backfill_timing_stats) | ✅ |
+| 3.2 | `get_payment_changed_orders` без `tenant_id` → все платежи видны всем | Добавлен параметр, SQL: `AND tenant_id = $3` | `app/database_pg.py`, `app/jobs/arkentiy.py` | ✅ |
+| 3.3 | `_states` dict по имени branch логируется без tenant_id → data leak между tenants | Индекс изменён с `str` на `tuple[int, str]`, все 8+ мест обновлены | `app/clients/iiko_bo_events.py` (+6 callers: arkentiy job, iiko_status_report, get_branch_rt, get_branch_staff) | ✅ |
+| 3.4 | Stats API fallback: `tenant_id: int = token_meta.get("tenant_id", 1)` → silent fallback | Добавлена проверка: без tenant_id в JWT → 403 Forbidden | `app/routers/stats.py` | ✅ |
+
+### Статистика
+
+- **Файлов изменено:** 17
+- **Новых миграций:** 1 (012_chat_cities.sql)
+- **Новых endpoints:** 1 (POST /api/payments/{payment_id}/retry)
+- **Строк кода добавлено:** ~180
+- **Строк кода удалено/изменено:** ~109
+- **Коммиты:** 1 стандартный (message: "fix: аудит 2026-03-10 — безопасность и мультитенантность")
+
+### Процесс деплоя
+
+```
+14:24:07 — git add -A && git commit
+14:24:15 — git push origin main → GitHub ✅
+14:24:22 — ssh arkentiy git pull                                OK
+14:24:30 — ssh arkentiy docker compose exec postgres psql ... migrations/012_chat_cities.sql
+          ALTER TABLE ✅
+          UPDATE 7 ✅ (7 чатов заполнены cities_json)
+14:24:45 — ssh arkentiy docker compose build --no-cache       OK (pip install, no errors)
+14:25:00 — ssh arkentiy docker compose up -d                  OK
+14:25:10 — docker compose ps                                  
+          ➜ app: Up 15 seconds (healthy) ✅
+          ➜ postgres: Up 24 hours (healthy) ✅
+14:25:15 — Проверка логов                                     
+          ✓ Все 12+ jobs инициализированы
+          ✓ AI polling loop started
+          ✓ No ImportError/ERROR
+          ✓ Application startup complete ✅
+```
+
+**Результат:** Продакшн здров, все баги исправлены, мультитенантность изолирована.
+
+---
+
 ## 2026-03-12: ✅ Fix: late_alerts не отправляет алерт по отменённым заказам (ЗАВЕРШЕНО)
 
 **Проблема:**

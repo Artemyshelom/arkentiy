@@ -37,6 +37,17 @@
 
 ---
 
+### RAG Поиск по коду → `codesearch/`
+
+| Файл | Назначение |
+|------|-----------|
+| [codesearch/README.md](codesearch/README.md) | **Навигация** по поиску кода |
+| [codesearch/QUICK_START.md](codesearch/QUICK_START.md) | Как использовать `/api/codesearch` (для агентов) |
+| [codesearch/IMPLEMENTATION.md](codesearch/IMPLEMENTATION.md) | Техника: pgvector, HNSW, Jina AI, SOCKS5 прокси |
+| [codesearch/FINAL_REPORT.md](codesearch/FINAL_REPORT.md) | Итоговый отчёт: индекс 1748 чанков, пример поисков |
+
+---
+
 ### Правила для интегратора → `rules/integrator/`
 
 > Авторитетные источники истины для разработки. Читать по необходимости — не загружать весь контекст.

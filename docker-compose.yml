@@ -11,6 +11,9 @@ services:
       - ./logs:/app/logs
       - ./secrets:/app/secrets:ro
       - ./web:/app/web
+      - ./docs:/app/docs:ro
+      - ./rules:/app/rules:ro
+      - hf_cache:/root/.cache/huggingface
     environment:
       - TZ=Europe/Moscow
     depends_on:
@@ -29,7 +32,7 @@ services:
         max-file: "5"
 
   postgres:
-    image: mirror.gcr.io/library/postgres:16-alpine
+    image: pgvector/pgvector:pg16
     container_name: ebidoebi-postgres
     restart: unless-stopped
     environment:
@@ -52,3 +55,4 @@ services:
 
 volumes:
   pgdata:
+  hf_cache:

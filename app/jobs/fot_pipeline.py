@@ -201,7 +201,7 @@ async def job_fot_pipeline() -> None:
     yesterday = (datetime.now(timezone(timedelta(hours=3))) - timedelta(days=1)).date()
 
     tenants = await get_active_tenants_with_tokens()
-    tenant_ids = {t["tenant_id"] for t in tenants} if tenants else {1}
+    tenant_ids = {t["id"] for t in tenants} if tenants else {1}
 
     for tenant_id in sorted(tenant_ids):
         try:

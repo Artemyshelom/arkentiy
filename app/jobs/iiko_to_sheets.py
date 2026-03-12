@@ -343,26 +343,6 @@ async def job_export_iiko_to_sheets(tenant_id: int | None = None) -> None:
             if weekly_changed:
                 logger.info(f"Обновлено за {past_date.strftime('%d.%m.%Y')}: {len(weekly_changed)} точек")
 
-    # Итоговое уведомление
-    try:
-        rows_for_notify = await export_day(export_date, branches=branches)
-        total = sum(
-            r[COL_REVENUE] for r in rows_for_notify if isinstance(r[COL_REVENUE], int)
-        )
-        summaries = [
-            f"  {r[COL_BRANCH]}: {r[COL_REVENUE]:,} ₽".replace(",", " ")
-            for r in rows_for_notify if isinstance(r[COL_REVENUE], int)
-        ]
-        lines = [f"✅ <b>Итоги дня {date_display}</b>", ""]
-        lines.extend(summaries)
-        if total:
-            lines += ["", f"<b>Итого:</b> {total:,} ₽".replace(",", " ")]
-        if changed:
-            lines += ["", f"<i>Обновлено точек: {len(changed)}</i>"]
-        await telegram.report("\n".join(lines))
-    except Exception as e:
-        logger.warning(f"Ошибка итогового уведомления: {e}")
-
     await log_job_finish(log_id, "ok", f"Записано: {written}, Обновлено: {len(changed)}")
 
 

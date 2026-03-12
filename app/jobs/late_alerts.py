@@ -17,7 +17,7 @@ from app.clients.iiko_bo_events import (
 )
 from app.config import get_settings
 from app.utils.job_tracker import track_job
-from app.db import get_alert_chats_for_city, get_client_order_count
+from app.db import get_alert_chats_for_city, get_client_order_count, get_order_status_from_db
 
 try:
     from app.db import get_all_branches as _get_all_branches
@@ -178,6 +178,13 @@ async def job_late_alerts() -> None:
 
             key = (branch_name, str(num))
             sent_set, _ = _alerted.get(key, (set(), now_local))
+
+            # Проверяем актуальный статус в БД (только если есть ещё неотправленные пороги)
+            if sent_set < set(ALERT_THRESHOLDS):
+                db_status = await get_order_status_from_db(branch_name, str(num), tenant_id=tenant_id)
+                if db_status in ("Отменена", "Закрыта"):
+                    _alerted[key] = (set(ALERT_THRESHOLDS), now_local)
+                    continue
 
             fresh_start = (datetime.now(tz=timezone.utc) - _startup_time).total_seconds() < 300
 

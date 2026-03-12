@@ -7,14 +7,154 @@
 > **Когда обновлять:** после каждой завершённой технической задачи или деплоя.
 > **Архив старых сессий:** `docs/archive/journal_2025.md`
 
-# Журнал изменений — Интегратор
+---
 
-> Основной журнал по проекту Аркентий. Вести новые записи здесь.
->
-> **Роль файла:** техническая история выполненных работ (что сделали, где, зачем, с каким результатом).
-> **Не хранит:** стратегию и идеи (они в `roadmap.md` и `BACKLOG.md`).
-> **Когда обновлять:** после каждой завершённой технической задачи или деплоя.
-> **Архив старых сессий:** `docs/archive/journal_2025.md`
+## 2026-03-12: ✅ Fix: late_alerts не отправляет алерт по отменённым заказам (ЗАВЕРШЕНО)
+
+**Проблема:**
+`late_alerts` отправлял алерт об опоздании по заказам, которые уже были отменены в iiko. Причина: проверка только in-memory `_states` (обновляется через Events API), без сверки с `orders_raw` в БД.
+
+**Решение:**
+1. Добавлена функция `get_order_status_from_db()` в `app/database_pg.py` — быстрый SELECT по индексируемым полям
+2. В `app/jobs/late_alerts.py`: перед итерацией по пороговам проверяем статус в БД → если `"Отменена"` или `"Закрыта"` — помечаем все пороги как отправленные и пропускаем заказ
+3. Проверка выполняется только если есть ненажатые пороги (оптимизация)
+
+**Результат:** ✅ Алерты больше не отправляются по отменённым заказам. Уровень шума в аналитических чатах ↓
+
+**Файлы:**
+- `app/database_pg.py` — новая функция
+- `app/jobs/late_alerts.py` — логика проверки
+- Коммит: `d2d0c68`
+
+**Деплой:** 
+- ✅ 2026-03-12 10:00–10:06 MSK
+- Бэкап: `database_pg.py.bak.20260312_065952`, `late_alerts.py.bak.20260312_065952`
+- Build: OK (no-cache)
+- Status: All containers healthy, logs clean
+
+---
+
+## 2026-03-11: ✅ Реализация и деплой RAG-поиска кодовой базы (ЗАВЕРШЕНО)
+
+**Выполнено:** Полная реализация семантического поиска по коду и документации. 114 файлов (1748 чанков) индексированы, Jina AI embeddings, SOCKS5-прокси для обхода геоблокировки.
+
+### Проблема (была)
+- OpenAI / Jina AI блокируют (403/451) из России
+- Индексация на VPS невозможна
+- Нужна переемотивация архитектуры
+
+### Решение
+1. **SOCKS5 на Frankfurt VPS (morf)**
+   - xray: добавлен inbound port 1080 с auth
+   - firewall: разрешен только IP arkentiy (5.42.98.2)
+   - proxy URL: `socks5://ebidoebi:T3DwUcPeECK405E6XomK0mwDJzzaAdsn@72.56.107.85:1080`
+
+2. **Jina AI вместо OpenAI/sentence-transformers**
+   - `jina-embeddings-v2-base-code` (768-dim, code-optimized)
+   - Лучше откликается на API, меньше токенов на чанк
+   - Цена оптимальнее OpenAI
+
+3. **Батчинг + Retry логика**
+   - 128 текстов за запрос → 5 попыток с backoff при 429
+   - Индексация ~2.5 минуты на 114 файлов
+
+### Результат ✅
+```
+✅ 114 файлов (75 py + 39 md)
+✅ 1748 чанков (838 py + 910 md)  
+✅ HNSW индекс в pgvector
+✅ GET /api/codesearch работает
+✅ Auth: admin ключ + ключи агентов (Мёрф, Станислав)
+✅ Search <100мс
+✅ Все в Docker, готово к масштабированию
+```
+
+### Файлы (всё на VPS)
+- `app/tools/reindex_code.py` — индексатор с retry-логикой
+- `app/routers/codesearch.py` — HTTP endpoint
+- `app/config.py` — +jina_proxy_url
+- `app/migrations/013_code_chunks.sql` — vector(768), HNSW
+- `requirements.txt` — +pgvector, +socksio, +tiktoken
+- `.env` — +JINA_PROXY_URL
+
+### Документация
+- `docs/codesearch/IMPLEMENTATION.md` — полная инструкция (что, как, диагностика)
+- `docs/rag_search_feedback.md` — обновлено с итогом
+
+---
+
+## Сессия 79 — 11 марта 2026 (feat: Станислав — консультант-агент Аркентия) ✅
+
+**Цель:** Запустить второго OpenClaw агента — консультанта `Станислав` для onboarding'а и обучения новых клиентов.
+
+### 1. OpenClaw агент `stanislav` на morf
+
+Создан воркспейс `/opt/morf/workspace-stanislav/` с 7 файлами:
+- `AGENTS.md` — системный промпт, роль, запреты (не выдумывать функции, честность)
+- `SOUL.md` — характер: наставник, операционный опыт, 6 лет в сетях доставки
+- `IDENTITY.md`, `MEMORY.md` (шаблон), `TOOLS.md`
+- `KNOWLEDGE.md`, `NORMS.md` — симлинки на `/opt/morf/workspace/arkentiy/docs/consultant/`
+
+**Ключевая особ:** TOOLS.md содержит:
+- **Stats API** (`stn_1038f90c5f16469444b9a602ce87fed13f33faad1c82`) — может сам проверять цифры для контекста
+- **Exa API** (`5c43a1d4-4d9d-4af4-ae2a-dd7238c4f361`) — веб-поиск по рынку доставки
+
+**Алгоритм:** наставляет по материалам KNOWLEDGE.md; при нужде проверяет конкретный показатель в Stats API; регулярный мониторинг отправляет к Борису (специалист).
+
+### 2. Мультитенант onboarding в Аркентий
+
+**Новый endpoint:**
+- `POST /api/consultant/activate` — подключить чат Станислава к конкретному тенанту  
+  Параметры: `chat_id`, `tenant_id`, `note`
+- `GET /api/consultant/chats` — список активированных чатов
+
+**Новая таблица БД:**
+- `consultant_chats` — лог активаций (chat_id, tenant_id, activated_at, updated_at)
+- Миграция `008_consultant.sql` применена и протестирована
+
+### 3. openclaw.json обновлён
+
+```json
+"agents": {
+  "list": [
+    ...
+    { "id": "stanislav", "name": "Станислав", "workspace": "/opt/morf/workspace-stanislav", 
+      "model": { "primary": "anthropic/claude-haiku-4-5" } }
+  ]
+},
+"bindings": [
+  { "agentId": "stanislav", "match": { "channel": "telegram", "accountId": "stanislav" } }
+],
+"channels.telegram.accounts.stanislav": {
+  "botToken": "BOT_TOKEN_PLACEHOLDER",  // ⚠️ заполнить @BotFather
+  "dmPolicy": "open", "groupPolicy": "open", ...
+}
+```
+
+### 4. Токены выданы
+
+- **Станислав Stats API:** `stn_1038f90c5f16469444b9a602ce87fed13f33faad1c82` (добавлен в `secrets/api_keys.json`)
+- **Админ Аркентия:** `e511afffe963365d5ab443f45c7b421f21c9ba925797425c` (`.env` arkentiy сервер)
+
+### 5. Статус: Ожидание BotFather
+
+**Что осталось:** создать бота через @BotFather и вставить реальный токен в `openclaw.json` → `systemctl restart morf.service` → готово.
+
+**Активация чата:** когда клиент захочет использовать Станислава:
+```bash
+curl -X POST "https://arkenty.ru/api/consultant/activate" \
+  -H "Authorization: Bearer e511afffe963365d5ab443f45c7b421f21c9ba925797425c" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": -100ЧАТ_ID, "tenant_id": "artemiy"}'
+```
+
+### Файлы изменены
+- `app/routers/consultant.py` (новый) — быстрый endpoint для управления
+- `app/migrations/008_consultant.sql` — таблица `consultant_chats`
+- `app/main.py` — регистрация нового router
+- `/opt/morf/workspace-stanislav/*` — полный воркспейс агента (на morf)
+- `/opt/ebidoebi/.env` — ADMIN_API_KEY добавлен
+- `/opt/ebidoebi/secrets/api_keys.json` — токен Станислава
 
 ---
 

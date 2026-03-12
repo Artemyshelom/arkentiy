@@ -282,6 +282,26 @@ async def get_client_order_count(phone: str, tenant_id: int = 1) -> int:
     return row["cnt"] if row else 0
 
 
+async def get_order_status_from_db(
+    branch_name: str,
+    delivery_num: str,
+    tenant_id: int = 1,
+) -> str | None:
+    """Возвращает текущий статус заказа из orders_raw. None если заказ не найден."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        """
+        SELECT status FROM orders_raw
+        WHERE branch_name = $1
+          AND delivery_num = $2
+          AND tenant_id = $3
+        LIMIT 1
+        """,
+        branch_name, delivery_num, tenant_id,
+    )
+    return row["status"] if row else None
+
+
 # =====================================================================
 # shifts_raw
 # =====================================================================

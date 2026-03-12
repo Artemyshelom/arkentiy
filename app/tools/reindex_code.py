@@ -100,12 +100,13 @@ def extract_module_category(rel_path: str, file_type: str) -> tuple[Optional[str
     if not parts:
         return None, None
 
-    if file_type == "py" and parts[0] == "app" and len(parts) >= 3:
+    first = parts[0]
+    if file_type == "py" and first == "app" and len(parts) >= 3:
         module = parts[1]   # jobs, routers, services, clients, ...
     elif file_type == "md":
-        if parts[0] == "docs" and len(parts) >= 2:
+        if first == "docs" and len(parts) >= 2:
             category = parts[1]     # specs, reference, onboarding, ...
-        elif parts[0] == "rules":
+        elif first == "rules":
             category = "rules"
 
     return module, category

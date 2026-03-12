@@ -9,6 +9,70 @@
 
 ---
 
+## 2026-03-12: ✅ feat: Real-time ФОТ поваров в /статус (employee_rates_cache)
+
+**Задача:** При запросе `/статус` показывать live ФОТ поваров по открытым сменам на момент запроса.
+
+**Решение реализовано:**
+
+### 1. Новая таблица `employee_rates_cache` (миграция 014)
+```sql
+CREATE TABLE IF NOT EXISTS employee_rates_cache (
+    tenant_id     INTEGER NOT NULL DEFAULT 1,
+    branch_name   TEXT NOT NULL,
+    employee_id   TEXT NOT NULL,
+    employee_name TEXT NOT NULL DEFAULT '',
+    rate_per_hour NUMERIC(10,2) NOT NULL DEFAULT 0,
+    cached_at     TIMESTAMP DEFAULT NOW(),
+    PRIMARY KEY (tenant_id, branch_name, employee_id)
+);
+```
+Хранит часовые ставки по сотрудникам (обновляется ежедневно).
+
+### 2. Два новых DB-процесса (`database_pg.py`)
+- `upsert_rates_cache(tenant_id, branch_name, rates: dict[str, Decimal])` — заполнить кеш из iiko salary API
+- `get_realtime_fot(branch_name, tenant_id=1) → Optional[dict]` — считает live ФОТ по открытым сменам:
+  - Находит записи в `shifts_raw` где `clock_out IS NULL`
+  - Считает часы: `(NOW() - clock_in::timestamptz)` в секундах → часы
+  - Джойнит с `employee_rates_cache` для получения ставок
+  - Возвращает `{fot: int, hours: float, cooks: int}` или `None`
+  - Ставки в рублях/час → ФОТ в рублях → % от выручки текущего момента
+
+### 3. Новый джоб: `rates_cache_updater.py` (3:30 МСК)
+Разу в день перед fot_pipeline обновляет кеш ставок из iiko:
+```
+Для каждого tenant → для каждой точки → fetch_salary_map() → upsert_rates_cache()
+```
+Если нет ставок в кеше → ФОТ не считается (но не ломает /статус).
+
+### 4. Интеграция в `iiko_status_report.py`
+- `get_branch_status()`: добавил `get_realtime_fot()` в `asyncio.gather`, результат → `data["rt_fot"]`
+- `format_branch_status()`:
+  - Кассовая смена перемещена под строку `🧾 Чеков` (вместо после COGS)
+  - Смена: `✅ открыта` → `🟢 открыта` (икон ка соответствует схеме)
+  - После `👥 На смене` добавлена строка ФОТ: `💼 ФОТ поваров: ~9.6% от выручки (3 чел · 4.2ч)`
+  - wrap в try/except — не ломает /статус если данных нет
+
+### 5. Расписание
+- **03:30 МСК** — `rates_cache_updater` (обновить ставки перед ФОТ-пайплайном)
+- **04:00 МСК** — `shifts_reconciliation_daily` (пересчитать смены за вчера)
+- **04:30 МСК** — `fot_pipeline` (финальный ФОТ-расчёт за день)
+
+### 📋 Файлы
+- ✅ `app/migrations/014_employee_rates_cache.sql` — новая таблица
+- ✅ `app/database_pg.py` — две функции + импорт Optional
+- ✅ `app/jobs/rates_cache_updater.py` — джоб обновления кеша
+- ✅ `app/jobs/iiko_status_report.py` — интеграция в /статус
+- ✅ `app/main.py` — регистрация джоба 03:30
+
+### 🚀 Деплой
+- Коммит: `f1ee643`
+- Migration 014 applied ✅ на VPS через asyncpg
+- 17 jobs зарегистрировано, все здоровы
+- Проверка: `/статус` принял запрос, живого ФОТ нет (смены закрыты в 20:26), логика работает
+
+---
+
 ## 2026-03-12: ✅ Fix: /отчёт показывает ФОТ поваров за день и период
 
 **Проблема:**

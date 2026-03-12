@@ -63,6 +63,8 @@
 
 ## ✅ Сделано (последние релевантные)
 
+- [x] `realtime_fot_status` — live ФОТ поваров в /статус через employee_rates_cache + rates_cache_updater job (12.03.2026)
+- [x] `shifts_reconciliation` — ежедневная пересверка смен за вчера + еженедельная за неделю (12.03.2026)
 - [x] `t1_data_completeness` — 100% заполняемость T1 с 01.12.2025: cash/noncash (277 строк), new_customers (879), discount_sum (14k заказов), shifts (4024 смены), hourly (в процессе) (09.03.2026)
 - [x] `backfill_shifts_generic` — новый скрипт для исторических смен из iiko schedule API + интеграция в orchestrator как step 4 (09.03.2026)
 - [x] `izhevsk_offboarding` — отключение города из монитора: migration fix, очистка 184 строк из БД, протокол offboarding_city.md (09.03.2026)

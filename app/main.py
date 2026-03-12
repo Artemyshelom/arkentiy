@@ -54,6 +54,7 @@ from app.jobs.cancel_sync import job_cancel_sync  # DEPRECATED: заменён o
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 from app.jobs.fot_pipeline import job_fot_pipeline
+from app.jobs.shifts_reconciliation import job_shifts_reconciliation_daily, job_shifts_reconciliation_weekly
 from app.utils.tenant import run_for_all_tenants
 
 settings = get_settings()
@@ -207,11 +208,22 @@ def register_jobs() -> None:
 
     scheduler.add_job(
         _weekly_report_by_tz,
-        trigger=CronTrigger(day_of_week="mon", hour=6, minute=0),  # пн 06:00 МСК = 10:00 UTC+7
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=30),  # пн 08:30 МСК (после shifts_reconciliation_weekly)
         id="weekly_report",
         name="Еженедельный отчёт → Telegram (по таймзонам)",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # Пересверка смен за прошлую неделю: каждый Пн в 08:00 МСК (до weekly_report в 08:30).
+    # Перезаписывает shifts_raw + пересчитывает fot_daily за 7 дней.
+    scheduler.add_job(
+        job_shifts_reconciliation_weekly,
+        trigger=CronTrigger(day_of_week="mon", hour=8, minute=0),
+        id="shifts_reconciliation_weekly",
+        name="Пересверка смен за неделю → shifts_raw + fot_daily (Пн–Вс)",
+        replace_existing=True,
+        misfire_grace_time=1800,
     )
 
     # DEPRECATED: cancel_sync (~480 запросов/сутки) — заменён olap_pipeline шагом A.
@@ -229,12 +241,23 @@ def register_jobs() -> None:
         misfire_grace_time=3600,
     )
 
-    # ФОТ-пайплайн: ежедневно в 04:00 МСК
+    # Пересверка смен за вчера: 04:00 МСК (до fot_pipeline).
+    # Перезаписывает shifts_raw из schedule API + пересчитывает fot_daily.
+    scheduler.add_job(
+        job_shifts_reconciliation_daily,
+        trigger=CronTrigger(hour=4, minute=0),
+        id="shifts_reconciliation_daily",
+        name="Пересверка смен за вчера → shifts_raw + fot_daily",
+        replace_existing=True,
+        misfire_grace_time=1800,
+    )
+
+    # ФОТ-пайплайн: ежедневно в 04:30 МСК (сдвинут, чтобы shifts_reconciliation успел).
     # Все точки UTC+7 → смены закрыты к 02:00 local = 21:00 МСК накануне.
-    # До daily_report UTC+7 (05:25 МСК) и weekly_report (пн 06:00 МСК).
+    # До daily_report UTC+7 (05:25 МСК).
     scheduler.add_job(
         job_fot_pipeline,
-        trigger=CronTrigger(hour=4, minute=0),
+        trigger=CronTrigger(hour=4, minute=30),
         id="fot_daily",
         name="ФОТ-пайплайн → fot_daily (все тенанты)",
         replace_existing=True,

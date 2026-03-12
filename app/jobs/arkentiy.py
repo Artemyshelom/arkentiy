@@ -624,8 +624,11 @@ def _status_summary_line(data: dict, show_time: bool = False) -> str:
 
     # Строка 2: опоздания + активные заказы
     parts2: list[str] = []
+    cash_closed_no_data = data.get("cash_shift_open") is False and data.get("revenue") is None
     delays = data.get("delays")
-    if delays and delays.get("total_delivered", 0) > 0:
+    if cash_closed_no_data:
+        parts2.append("🔴 Касса закрыта")
+    elif delays and delays.get("total_delivered", 0) > 0:
         late = delays["late_count"]
         total = delays["total_delivered"]
         pct = round(late / total * 100) if total else 0
@@ -679,6 +682,9 @@ def _build_status_summary(results: list[dict]) -> tuple[str, list]:
     row_buf: list[dict] = []
     for data in results:
         name = data["name"]
+        # Умный вариант: не добавляем кнопку если смена закрыта и данных нет — нечего смотреть
+        if data.get("cash_shift_open") is False and data.get("revenue") is None:
+            continue
         row_buf.append({"text": f"📍 {name}", "callback_data": f"stat:branch:{name}"})
         if len(row_buf) == 2:
             keyboard.append(row_buf)

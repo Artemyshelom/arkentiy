@@ -21,6 +21,11 @@ env/
 # Данные приложения
 data/
 logs/*.log
+backups/*/
+
+# Временные файлы и черновики
+.tz/
+*.tmp
 
 # macOS
 .DS_Store

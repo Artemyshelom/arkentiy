@@ -1,104 +1,110 @@
 # Протокол деплоя Аркентия
 
-> Нарушение = поломка продакшена. Живые заказы, живые деньги.
+> Живые заказы, живые деньги. Git — источник истины, VPS всегда тянет из него.
 
-## Рабочий процесс разработки
+## Рабочий процесс
 
 ```
-Cursor (локально) → scp → VPS → git push origin main
+Cursor (локально) → git commit → git push → VPS git pull → docker build
 ```
 
-**Запрещено:** редактировать файлы напрямую на VPS через SSH. Локальная версия = источник истины.
+**Запрещено:** редактировать файлы напрямую на VPS через SSH или заливать через scp минуя git.  
+Если файл изменён — он должен быть в коммите. Это и есть история + возможность отката.
 
-## ШАГ 1 — Разведка
+---
 
-До того как написал хоть одну команду scp:
+## ШАГ 1 — Разведка (только если меняешь существующий файл)
+
+Перед изменением существующего файла — убедиться что локальная версия актуальна:
 
 ```bash
-ssh arkentiy "ls -la /opt/ebidoebi/app/"
-ssh arkentiy "ls -la /opt/ebidoebi/app/clients/"
-ssh arkentiy "ls -la /opt/ebidoebi/app/jobs/"
-ssh arkentiy "cat /opt/ebidoebi/.env"
-ssh arkentiy "cat /opt/ebidoebi/app/main.py"
+git pull origin main
 ```
 
-Спроси себя:
-- Файл уже есть на VPS? Чем отличается от локального?
-- Можно добавить только новые строки, не трогая старые?
-- Локальная версия ≠ VPS-версия. **Всегда.**
-
-## ШАГ 2 — Бэкап каждого файла который будет изменён
+Если есть сомнения что VPS и git разошлись:
 
 ```bash
-# Бэкап
-ssh arkentiy \
-  "cp /opt/ebidoebi/app/X.py /opt/ebidoebi/app/X.py.bak.$(date +%Y%m%d_%H%M%S)"
-
-# Оставить только две последние версии
-ssh arkentiy \
-  "ls -t /opt/ebidoebi/app/X.py.bak.* 2>/dev/null | tail -n +3 | xargs rm -f"
+ssh arkentiy "cd /opt/ebidoebi && git status && git log --oneline -3"
 ```
 
-**Сначала бэкап → потом scp.** Не наоборот.
+---
 
-**Запиши в `docs/Журнал.md`:**
-```
-### YYYY-MM-DD — бэкап перед изменением
-- `app/jobs/xxx.py` → что меняется и зачем
-```
+## ШАГ 2 — Разработка и коммит
 
-## ШАГ 3 — Вшивка, а не замена
-
-| Файл | Как правильно |
-|------|--------------|
-| Новый `.py` модуль | Просто копируй — его раньше не было |
-| `main.py` | Прочитай VPS-версию → добавь только новые строки |
-| `config.py` | Прочитай VPS-версию → добавь только новые поля |
-| `.env` | Дописывай: `cat >> .env`, не перезаписывай целиком |
-| `database.py` | Прочитай VPS-версию → добавь только новые таблицы/функции |
+Пишешь код локально в Cursor. Перед коммитом — проверь что не трогаешь `.env` и не перезаписываешь секреты.
 
 ```bash
-# Правильно: дописать в конец .env
-ssh ... "cat >> /opt/ebidoebi/.env << 'EOF'
-НОВАЯ_ПЕРЕМЕННАЯ=значение
-EOF"
-
-# Правильно: сравнить перед заливкой
-ssh ... "cat /opt/ebidoebi/app/main.py" > /tmp/vps_main.py
-diff /tmp/vps_main.py локальный_main.py
+git add .
+git commit -m "fix: краткое описание что изменилось и зачем"
+git push origin main
 ```
 
-## ШАГ 4 — Проверка после деплоя
+Хороший commit message = замена ручного журнала. Пиши понятно.
+
+---
+
+## ШАГ 3 — Деплой на VPS
 
 ```bash
-sleep 10
-ssh ... "cd /opt/ebidoebi && docker compose ps"                    # healthy?
-ssh ... "cd /opt/ebidoebi && docker compose logs app --tail=20"    # ERROR/ImportError?
+ssh arkentiy "cd /opt/ebidoebi && git pull origin main && docker compose build --no-cache && docker compose up -d"
 ```
 
-Если `Restarting` — немедленный откат:
+**Важно:** `docker compose restart` НЕ применяет изменения кода, только `.env`. Всегда используй `up -d`.
+
+---
+
+## ШАГ 4 — Проверка
+
 ```bash
-ssh ... "cp /opt/ebidoebi/app/X.py.bak.* /opt/ebidoebi/app/X.py"
-ssh ... "cd /opt/ebidoebi && docker compose up -d --build"
+sleep 15
+ssh arkentiy "cd /opt/ebidoebi && docker compose ps"         # всё healthy?
+ssh arkentiy "cd /opt/ebidoebi && docker compose logs app --tail=30"  # нет ERROR/ImportError?
 ```
 
-## Запрещено без явной команды
+Если контейнер в состоянии `Restarting` — немедленный откат:
 
-- Заливать файл на VPS без бэкапа
-- Копировать локальный файл целиком поверх VPS без сравнения
-- Перезаписывать `.env` целиком
-- Считать что локальный файл = VPS-файл
+```bash
+ssh arkentiy "cd /opt/ebidoebi && git revert HEAD --no-edit && git push origin main && docker compose build --no-cache && docker compose up -d"
+```
+
+Или если нужно откатить конкретный файл:
+
+```bash
+ssh arkentiy "cd /opt/ebidoebi && git checkout HEAD~1 -- app/jobs/file.py && docker compose build --no-cache && docker compose up -d"
+```
+
+---
+
+## Правила для .env и секретов
+
+- **Никогда** не перезаписывать `.env` целиком
+- Новые переменные — только дописывать в конец:
+  ```bash
+  ssh arkentiy "cat >> /opt/ebidoebi/.env << 'EOF'
+  НОВАЯ_ПЕРЕМЕННАЯ=значение
+  EOF"
+  ```
+- `.env` не коммитить в git (он в `.gitignore`)
+
+---
+
+## Минорное обновление (хотфикс)
+
+Одна функция, одна строка — тот же процесс, просто быстрее:
+
+```bash
+git commit -m "fix: ..." && git push
+ssh arkentiy "cd /opt/ebidoebi && git pull && docker compose up -d --build"
+# подождать 15 сек, проверить логи
+```
+
+Никаких .bak файлов, никакого журнала вручную. Git помнит всё.
+
+---
+
+## Запрещено
+
+- Деплоить в обход git (scp, прямое редактирование на VPS)
 - Деплоить и уходить — всегда жди `healthy` и проверяй логи
-
-## Команды деплоя
-
-```bash
-# SCP файла на VPS
-scp -i ~/.ssh/cursor_arkentiy_vps app/jobs/new_module.py arkentiy:/opt/ebidoebi/app/jobs/
-
-# Build и запуск
-ssh arkentiy \
-  "cd /opt/ebidoebi && docker compose build --no-cache && docker compose up -d"
-
-# ВАЖНО: docker compose restart НЕ применяет изменения кода, только .env
-```
+- Перезаписывать `.env` целиком
+- Держать на VPS локальные изменения вне git (`git status` должен быть чистым)

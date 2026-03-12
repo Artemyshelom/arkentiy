@@ -13,6 +13,7 @@ import json
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional
 
 import asyncpg
 
@@ -1919,6 +1920,82 @@ async def get_fot_period(
     if not rows:
         return None
     return {r["category"]: float(r["fot_sum"]) for r in rows}
+
+
+# =====================================================================
+# Real-time ФОТ — кеш ставок + расчёт по открытым сменам
+# =====================================================================
+
+async def upsert_rates_cache(
+    tenant_id: int, branch_name: str, rates: dict
+) -> None:
+    """Сохраняет почасовые ставки сотрудников в employee_rates_cache.
+
+    rates: {employee_id: Decimal(rate)} — из fetch_salary_map().
+    """
+    if not rates:
+        return
+    pool = get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for emp_id, rate in rates.items():
+                await conn.execute(
+                    """INSERT INTO employee_rates_cache
+                           (tenant_id, branch_name, employee_id, rate_per_hour, cached_at)
+                       VALUES ($1, $2, $3, $4, now())
+                       ON CONFLICT (tenant_id, branch_name, employee_id) DO UPDATE SET
+                           rate_per_hour = EXCLUDED.rate_per_hour,
+                           cached_at     = now()""",
+                    tenant_id, branch_name, emp_id, float(rate),
+                )
+
+
+async def get_realtime_fot(
+    branch_name: str, tenant_id: int = 1
+) -> Optional[dict]:
+    """Считает накопленный ФОТ поваров по открытым сменам прямо сейчас.
+
+    Открытая смена = clock_out IS NULL в shifts_raw.
+    Часы = NOW() - clock_in::timestamptz (timezone-aware вычитание).
+    Ставка берётся из employee_rates_cache.
+    Возвращает {'fot': int, 'hours': float, 'cooks': int} или None.
+    """
+    pool = get_pool()
+    rows = await pool.fetch(
+        """SELECT
+               s.employee_id,
+               EXTRACT(EPOCH FROM (NOW() - s.clock_in::timestamptz)) / 3600.0 AS hours_now,
+               COALESCE(r.rate_per_hour, 0) AS rate
+           FROM shifts_raw s
+           LEFT JOIN employee_rates_cache r
+               ON r.tenant_id = s.tenant_id
+              AND r.branch_name = s.branch_name
+              AND r.employee_id = s.employee_id
+           WHERE s.tenant_id = $1
+             AND s.branch_name = $2
+             AND s.role_class = 'cook'
+             AND s.clock_out IS NULL
+             AND s.clock_in IS NOT NULL""",
+        tenant_id, branch_name,
+    )
+
+    if not rows:
+        return None
+
+    total_fot = sum(
+        float(r["hours_now"]) * float(r["rate"])
+        for r in rows
+        if float(r["rate"]) > 0 and float(r["hours_now"]) > 0
+    )
+    total_hours = sum(float(r["hours_now"]) for r in rows if float(r["hours_now"]) > 0)
+    cooks = len(rows)
+    avg_hours = round(total_hours / cooks, 1) if cooks else 0
+
+    return {
+        "fot": round(total_fot),
+        "hours": avg_hours,
+        "cooks": cooks,
+    }
 
 
 # =====================================================================

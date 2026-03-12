@@ -54,6 +54,7 @@ from app.jobs.cancel_sync import job_cancel_sync  # DEPRECATED: заменён o
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 from app.jobs.fot_pipeline import job_fot_pipeline
+from app.jobs.rates_cache_updater import job_rates_cache_updater
 from app.jobs.shifts_reconciliation import job_shifts_reconciliation_daily, job_shifts_reconciliation_weekly
 from app.utils.tenant import run_for_all_tenants
 
@@ -239,6 +240,16 @@ def register_jobs() -> None:
         name="Рекуррентный биллинг ЮKassa",
         replace_existing=True,
         misfire_grace_time=3600,
+    )
+
+    # Обновление кеша ставок сотрудников: 03:30 МСК (employee_rates_cache).
+    scheduler.add_job(
+        job_rates_cache_updater,
+        trigger=CronTrigger(hour=3, minute=30),
+        id="rates_cache_updater",
+        name="Обновление кеша ставок → employee_rates_cache",
+        replace_existing=True,
+        misfire_grace_time=1800,
     )
 
     # Пересверка смен за вчера: 04:00 МСК (до fot_pipeline).

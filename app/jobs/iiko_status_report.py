@@ -11,6 +11,7 @@ import asyncio
 import html
 import logging
 from datetime import datetime
+from typing import Optional
 
 import httpx
 
@@ -18,6 +19,7 @@ from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import get_branch_rt
 from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats
 from app.config import get_settings
+from app.database_pg import get_realtime_fot
 from app.db import aggregate_orders_today
 from app.utils.timezone import branch_tz, now_local
 
@@ -113,9 +115,17 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
             logger.warning(f"Ошибка aggregate_orders_today [{branch['name']}]: {e}")
             return {}
 
-    orders_agg, cash_shift_open = await asyncio.gather(
+    async def _get_rt_fot() -> Optional[dict]:
+        try:
+            return await get_realtime_fot(branch["name"], branch.get("tenant_id", 1))
+        except Exception as e:
+            logger.debug(f"get_realtime_fot [{branch['name']}]: {e}")
+            return None
+
+    orders_agg, cash_shift_open, rt_fot = await asyncio.gather(
         _get_orders_agg(),
         get_cash_shift_open(branch, date_iso),
+        _get_rt_fot(),
     )
 
     # Если Events API ещё не загружен (revision=0 после рестарта) — подставляем
@@ -170,6 +180,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
         "avg_delivery_min": rt_data["avg_delivery_min"] if rt_data else None,
         "cash_shift_open": cash_shift_open,
         "db_fallback": db_fallback,
+        "rt_fot": rt_fot,
     }
 
 
@@ -196,6 +207,13 @@ def format_branch_status(data: dict) -> str:
             else "—"
         )
         lines.append(f"🧾 Чеков: {check_str} | Средний чек: {avg_str}")
+
+    # Кассовая смена — сразу после чеков
+    cash_shift_open = data.get("cash_shift_open")
+    if cash_shift_open is False:
+        lines.append("🔴 Кассовая смена закрыта")
+    elif cash_shift_open is True:
+        lines.append("🟢 Кассовая смена открыта")
     lines.append("")
 
     disc = data.get("discount_sum")
@@ -224,15 +242,6 @@ def format_branch_status(data: dict) -> str:
 
     has_rt = data.get("active_orders") is not None
     db_fallback = data.get("db_fallback", False)
-
-    cash_shift_open = data.get("cash_shift_open")
-    if cash_shift_open is False:
-        lines.append("")
-        lines.append("🔴 Кассовая смена закрыта")
-    elif cash_shift_open is True:
-        lines.append("")
-        lines.append("✅ Кассовая смена открыта")
-    # None — не показываем (API недоступен)
 
     delays = data.get("delays")
     if has_rt:
@@ -282,6 +291,16 @@ def format_branch_status(data: dict) -> str:
                 if couriers is not None:
                     parts.append(f"курьеров: {couriers}")
                 lines.append(f"👥 На смене: {', '.join(parts)}")
+
+            # Real-time ФОТ поваров
+            rt_fot = data.get("rt_fot")
+            revenue = data.get("revenue")
+            if rt_fot and rt_fot["fot"] > 0 and revenue and revenue > 0:
+                pct = round(rt_fot["fot"] / revenue * 100, 1)
+                lines.append(
+                    f"💼 ФОТ поваров: ~{pct}% от выручки "
+                    f"({rt_fot['cooks']} чел · {rt_fot['hours']}ч)"
+                )
 
     return "\n".join(lines)
 

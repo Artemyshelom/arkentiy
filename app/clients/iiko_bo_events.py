@@ -70,6 +70,8 @@ _employees_global: dict[str, dict] = {}
 
 # Время последнего full reload: {branch_name: float}
 _last_full_reload: dict[str, float] = {}
+# Дата последнего full reload (UTC+7, бизнес-день): {branch_name: "YYYY-MM-DD"}
+_last_full_reload_date: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -864,6 +866,10 @@ async def _full_load(state: BranchState, client: httpx.AsyncClient) -> None:
     _process_events(state, events)
     state.revision = max_revision
     _last_full_reload[state.branch_name] = time.time()
+    # Сохраняем дату релоада в UTC+7 (для определения смены бизнес-дня)
+    _last_full_reload_date[state.branch_name] = (
+        datetime.now(timezone.utc) + timedelta(hours=7)
+    ).strftime("%Y-%m-%d")
 
     logger.info(
         f"[{state.branch_name}] Full load: {len(events)} событий, revision={max_revision}"
@@ -959,9 +965,14 @@ async def poll_all_branches() -> None:
             return
         state = _states[(tid, name)]
         async with httpx.AsyncClient(verify=False, timeout=60) as client:
+            # Текущая дата бизнес-дня (UTC+7)
+            _today_local = (
+                datetime.now(timezone.utc) + timedelta(hours=7)
+            ).strftime("%Y-%m-%d")
             need_full = (
                 state.revision == 0
                 or (time.time() - _last_full_reload.get(name, 0)) > FULL_RELOAD_INTERVAL * 3600
+                or _last_full_reload_date.get(name) != _today_local  # смена даты → форс
             )
             if need_full:
                 await _safe_full_load(state, client)

@@ -10,7 +10,7 @@ Real-time данные (заказы, смены): app/clients/iiko_bo_events.py
 import asyncio
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
@@ -74,8 +74,14 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
     если передан, HTTP-запрос к iiko BO не делается (оптимизация для пакетных вызовов).
     """
     tz = branch_tz(branch)
-    today = now_local(tz)
-    date_iso = today.strftime("%Y-%m-%d")
+    local_now = now_local(tz)
+    # Ночной режим: до 06:00 местного времени показываем данные за вчера.
+    # Граница 06:00 согласована с _seed_sessions_from_db (iiko_bo_events.py).
+    _NIGHT_GRACE_HOUR = 6
+    if local_now.hour < _NIGHT_GRACE_HOUR:
+        date_iso = (local_now.date() - timedelta(days=1)).isoformat()
+    else:
+        date_iso = local_now.strftime("%Y-%m-%d")
 
     revenue = None
     check_count = None

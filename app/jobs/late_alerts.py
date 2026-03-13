@@ -135,10 +135,10 @@ async def job_late_alerts() -> None:
                    for b in all_branches}
 
     alerts_sent = 0
-    for branch_name, state in _states.items():
+    for (tid, branch_name), state in _states.items():
         info = branch_info.get(branch_name, {})
         city = info.get("city")
-        tenant_id = info.get("tenant_id", 1)
+        tenant_id = info.get("tenant_id", tid)  # fallback на tid из ключа
         if not city:
             continue
         target_chats = await get_alert_chats_for_city(city, tenant_id)
@@ -219,6 +219,8 @@ async def job_late_alerts() -> None:
                 s = d.get("sum")
                 sum_str = f"{int(float(s)):,} ₽".replace(",", " ") if s else "—"
                 courier_line = f"🛵 Курьер: <b>{html.escape(courier)}</b>\n" if courier else ""
+                comment_raw = (d.get("comment") or "").strip()
+                comment_line = f"💬 {html.escape(comment_raw)}\n" if comment_raw else ""
 
                 urgency_icon, urgency_suffix = ALERT_URGENCY.get(threshold, ("🚨", ""))
                 text = (
@@ -231,6 +233,7 @@ async def job_late_alerts() -> None:
                     f"🗺 {address}\n"
                     f"📦 Статус: {h_status}\n"
                     f"{courier_line}"
+                    f"{comment_line}"
                     + (f"\n\n{client_tag}" if client_tag else "")
                 ).strip()
 

@@ -26,13 +26,12 @@ from app.clients.iiko_schedule import fetch_salary_map
 from app.clients import telegram
 from app.database_pg import (
     get_fot_shifts_by_date,
-    get_alert_chats_for_city,
     upsert_fot_daily_batch,
     get_all_branches,
 )
 from app.utils.job_tracker import track_job
 
-logger = logging.getLogger(__name__)
+OWNER_CHAT_ID = "255968113"
 
 # Категории, которые пишем в fot_daily (other пропускаем)
 _FOT_CATEGORIES = frozenset({"cook", "courier", "admin"})
@@ -144,24 +143,27 @@ async def run_fot_pipeline(target_date: date, tenant_id: int, *, notify: bool = 
         agg[branch_name][role_class]["hours_sum"] += hours
         agg[branch_name][role_class]["employees"].add(employee_id)
 
-    # 6. Уведомления о сотрудниках без ставки
-    for branch_name, no_rate_cnt in no_rate_by_branch.items():
-        if no_rate_cnt == 0:
-            continue
-        branch = branch_by_name.get(branch_name)
-        city = branch.get("city", "") if branch else ""
-        msg = (
-            f"⚠️ ФОТ {branch_name}: у <b>{no_rate_cnt}</b> сотр. нет ставки в iiko — "
-            f"данные занижены. Проверь /api/v2/employees/salary"
-        )
-        logger.warning(f"fot_pipeline: {msg}")
-        if notify:
+    # 6. Уведомления о сотрудниках без ставки — только владельцу
+    if notify and no_rate_by_branch:
+        lines = []
+        for branch_name, no_rate_cnt in no_rate_by_branch.items():
+            if no_rate_cnt == 0:
+                continue
+            logger.warning(
+                f"fot_pipeline: ФОТ {branch_name}: у {no_rate_cnt} сотр. нет ставки в iiko"
+            )
+            lines.append(f"• {branch_name}: {no_rate_cnt} сотр.")
+
+        if lines:
+            msg = (
+                "⚠️ ФОТ — нет ставки в iiko\n\n"
+                + "\n".join(lines)
+                + "\n\nПроверь /api/v2/employees/salary"
+            )
             try:
-                alert_chats = await get_alert_chats_for_city(city, tenant_id)
-                for chat_id in alert_chats:
-                    await telegram.send_message(str(chat_id), msg)
+                await telegram.send_message(OWNER_CHAT_ID, msg)
             except Exception as e:
-                logger.error(f"fot_pipeline: уведомление не отправлено {branch_name}: {e}")
+                logger.error(f"fot_pipeline: no_rate уведомление не отправлено: {e}")
 
     # 7. Формируем строки для upsert
     rows: list[dict] = []

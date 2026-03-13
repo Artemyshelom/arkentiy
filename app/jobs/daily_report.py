@@ -61,6 +61,15 @@ def _format_branch_report(
 
     lines.append(f"💰 Выручка: <b>{_fmt_money(revenue)}</b>" if revenue is not None else "💰 Выручка: <b>—</b>")
 
+    payment_types = agg.get("payment_types_agg") or []
+    if payment_types and revenue:
+        for pt in payment_types:
+            if not isinstance(pt, dict) or not pt.get("sum"):
+                continue
+            pt_sum = pt["sum"]
+            pt_pct = round(pt_sum / revenue * 100)
+            lines.append(f"   └ {pt['type']}: {_fmt_money(pt_sum)} ({pt_pct}%)")
+
     checks_str = _fmt_num(check_count)
     avg_str = _fmt_money(avg_check) if avg_check else "—"
     lines.append(f"🧾 Чеков: {checks_str} | Средний чек: {avg_str}")

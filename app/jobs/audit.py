@@ -332,6 +332,53 @@ async def _detect_courier_multicancellation(date_str: str) -> list[dict]:
     return findings
 
 
+async def _detect_discount_and_bonus(date_str: str) -> list[dict]:
+    """Заказы с одновременной скидкой И оплатой бонусами SailPlay."""
+    from app.database_pg import get_pool
+    from app.ctx import _ctx_tenant_id
+    tenant_id = _ctx_tenant_id.get()
+    pool = get_pool()
+    now_iso = datetime.now(timezone.utc).isoformat()
+    branch_to_city = _all_branches_map()
+
+    rows = await pool.fetch(
+        """SELECT branch_name, delivery_num, sum::float AS sum,
+                  discount_type, discount_sum::float AS discount_sum,
+                  client_name, client_phone
+           FROM orders_raw
+           WHERE date::text = $1
+             AND tenant_id = $2
+             AND discount_type IS NOT NULL AND discount_type != ''
+             AND LOWER(payment_type) LIKE '%лояльности%'
+             AND status NOT IN ('Отменена', 'Отменён')
+           ORDER BY branch_name, opened_at""",
+        date_str, tenant_id,
+    )
+    findings = []
+    for r in rows:
+        disc_sum = int(r["discount_sum"] or 0)
+        branch = r["branch_name"]
+        findings.append({
+            "branch_name": branch,
+            "city": branch_to_city.get(branch, ""),
+            "event_type": "discount_and_bonus",
+            "severity": "warning",
+            "description": (
+                f"#{r['delivery_num']} · {r['discount_type']}"
+                + (f" (-{disc_sum} ₽)" if disc_sum else "")
+            ),
+            "meta_json": json.dumps({
+                "delivery_num": r["delivery_num"],
+                "sum": float(r["sum"] or 0),
+                "discount_type": r["discount_type"],
+                "discount_sum": disc_sum,
+                "client_name": r["client_name"] or "",
+            }, ensure_ascii=False),
+            "created_at": now_iso,
+        })
+    return findings
+
+
 async def _generate_audit_for_date(date_str: str) -> list[dict]:
     """
     Полная генерация аудит-событий для указанной даты.
@@ -363,6 +410,12 @@ async def _generate_audit_for_date(date_str: str) -> list[dict]:
         all_findings.extend(storno_findings)
     except Exception as e:
         logger.warning(f"[audit] Ошибка детектора сторно: {e}")
+
+    try:
+        disc_bonus_findings = await _detect_discount_and_bonus(date_str)
+        all_findings.extend(disc_bonus_findings)
+    except Exception as e:
+        logger.warning(f"[audit] Ошибка детектора discount_and_bonus: {e}")
 
     for f in all_findings:
         f["date"] = date_str
@@ -791,6 +844,7 @@ _TYPE_LABEL: dict[str, str] = {
     "manual_discount": "скидка",
     "unclosed_in_transit": "незакрыт",
     "courier_multicancellation": "курьер",
+    "discount_and_bonus": "скидка+бонусы",
 }
 
 
@@ -801,42 +855,52 @@ def _format_digest(date_str: str, all_events: list[dict]) -> str:
         city = e.get("city") or "—"
         by_city.setdefault(city, []).append(e)
 
-    total_crit = sum(1 for e in all_events if e.get("severity") == "critical")
-    total_warn = sum(1 for e in all_events if e.get("severity") == "warning")
-
     lines = [f"📋 <b>Аудит-дайджест — {_date_label(date_str)}</b>", ""]
 
+    def _cancel_word(n: int) -> str:
+        if n == 1:
+            return "отмена"
+        if 2 <= n % 10 <= 4 and n not in range(11, 15):
+            return "отмены"
+        return "отмен"
+
+    def _fast_word(n: int) -> str:
+        return "быстрая" if n == 1 else "быстрых"
+
+    def _early_word(n: int) -> str:
+        return "ранняя" if n == 1 else "ранних"
+
+    any_events = False
     for city in sorted(by_city):
         events = by_city[city]
-        crit = sum(1 for e in events if e.get("severity") == "critical")
-        warn = sum(1 for e in events if e.get("severity") == "warning")
-        if crit == 0 and warn == 0:
-            lines.append(f"✅ {html.escape(city)}")
-        else:
-            badges: list[str] = []
-            if crit:
-                badges.append(f"{crit}🔴")
-            if warn:
-                badges.append(f"{warn}🟡")
-            type_counts: dict[str, int] = {}
-            for e in events:
-                lbl = _TYPE_LABEL.get(e["event_type"], e["event_type"])
-                type_counts[lbl] = type_counts.get(lbl, 0) + 1
-            type_str = ", ".join(f"{cnt}×{lbl}" for lbl, cnt in type_counts.items())
-            lines.append(
-                f"⚠️ <b>{html.escape(city)}</b>: {' '.join(badges)} — {html.escape(type_str)}"
-            )
+        cancels = [e for e in events if e["event_type"] in ("cancellation", "cancellation_with_reason")]
+        cooked = [e for e in cancels if _meta(e).get("cooked")]
+        unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
+        fast = [e for e in events if e["event_type"] == "fast_delivery"]
+        early = [e for e in events if e["event_type"] == "early_closure"]
+        disc_bonus = [e for e in events if e["event_type"] == "discount_and_bonus"]
 
-    lines.append("")
-    if total_crit == 0 and total_warn == 0:
+        parts = []
+        if cancels:
+            cooked_note = f" ({len(cooked)} с готовкой)" if cooked else ""
+            parts.append(f"{len(cancels)} {_cancel_word(len(cancels))}{cooked_note}")
+        if unclosed:
+            parts.append(f"{len(unclosed)} незакрытых в пути")
+        if fast:
+            parts.append(f"{len(fast)} {_fast_word(len(fast))}")
+        if early:
+            parts.append(f"{len(early)} {_early_word(len(early))}")
+        if disc_bonus:
+            parts.append(f"{len(disc_bonus)} скидка+бонусы")
+
+        if parts:
+            any_events = True
+            lines.append(f"⚠️ <b>{html.escape(city)}</b>: {' · '.join(parts)}")
+        else:
+            lines.append(f"✅ {html.escape(city)}")
+
+    if not any_events:
         lines.append("✅ Всё чисто")
-    else:
-        summary: list[str] = []
-        if total_crit:
-            summary.append(f"{total_crit} критических🔴")
-        if total_warn:
-            summary.append(f"{total_warn} предупреждений🟡")
-        lines.append(f"<i>{' · '.join(summary)}</i>")
 
     return "\n".join(lines)
 
@@ -1273,6 +1337,38 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
 # ---------------------------------------------------------------------------
 # Форматировщики v2 — сводка + детали по кнопкам
 # ---------------------------------------------------------------------------
+# Классификация отмен по уровню списания
+# ---------------------------------------------------------------------------
+
+_WRITEOFF_KEYWORDS = ("списание", "списан", "write-off")
+_NO_WRITEOFF_REASONS = (
+    "перенос на другую точку",
+    "дублирование",
+    "тестовый заказ",
+    "ошибка оформления",
+    "маркетинг",
+    "технический",
+)
+
+
+def _classify_cancel(meta: dict) -> str:
+    """
+    Классифицирует отмену по риску списания.
+    Возвращает: 'confirmed_writeoff' | 'cooked_unclear' | 'no_writeoff' | 'not_cooked'
+    """
+    cooked = meta.get("cooked", False)
+    reason = (meta.get("cancel_reason") or "").lower()
+
+    if not cooked:
+        return "not_cooked"
+    if any(kw in reason for kw in _WRITEOFF_KEYWORDS):
+        return "confirmed_writeoff"
+    if any(r in reason for r in _NO_WRITEOFF_REASONS):
+        return "no_writeoff"
+    return "cooked_unclear"
+
+
+# ---------------------------------------------------------------------------
 
 def _meta(e: dict) -> dict:
     """Безопасно парсит meta_json события."""
@@ -1346,13 +1442,20 @@ def _attention_items(events: list[dict]) -> list[str]:
         total_paid = sum(_get_sum(e) for e in paid_cancels)
         items.append(f"{len(paid_cancels)} отмен с оплатой · {_fmt_sum(total_paid)}")
 
-    # Отмены готовых заказов (списание уже прошло)
-    cooked_cancels = [e for e in events
-                     if e["event_type"] in ("cancellation", "cancellation_with_reason")
-                     and _meta(e).get("cooked")]
-    if cooked_cancels:
-        total_cooked = sum(_get_sum(e) for e in cooked_cancels)
-        items.append(f"{len(cooked_cancels)} отмен с готовкой · {_fmt_sum(total_cooked)} (\U0001f373 списания не вернуть)")
+    # Отмены с подтверждённым или неясным списанием — 3 уровня
+    confirmed_wo = [e for e in events
+                    if e["event_type"] in ("cancellation", "cancellation_with_reason")
+                    and _classify_cancel(_meta(e)) == "confirmed_writeoff"]
+    if confirmed_wo:
+        total_wo = sum(_get_sum(e) for e in confirmed_wo)
+        items.append(f"🔴 {len(confirmed_wo)} отмен со списанием · {_fmt_sum(total_wo)}")
+
+    cooked_unclear = [e for e in events
+                      if e["event_type"] in ("cancellation", "cancellation_with_reason")
+                      and _classify_cancel(_meta(e)) == "cooked_unclear"]
+    if cooked_unclear:
+        total_unclear = sum(_get_sum(e) for e in cooked_unclear)
+        items.append(f"⚠️ {len(cooked_unclear)} отмен после начала готовки · {_fmt_sum(total_unclear)} (уточнить списание)")
 
     crit_early = [e for e in events
                   if e["event_type"] == "early_closure" and _get_early_min(e) >= 100]
@@ -1421,6 +1524,7 @@ def _format_report_v2(date_str: str, city: str, events: list[dict]) -> tuple[str
     fast = [e for e in events if e["event_type"] == "fast_delivery"]
     unclosed = [e for e in events if e["event_type"] == "unclosed_in_transit"]
     courier_mc = [e for e in events if e["event_type"] == "courier_multicancellation"]
+    disc_bonus = [e for e in events if e["event_type"] == "discount_and_bonus"]
 
     lines: list[str] = [
         f"🔍 <b>Аудит [{html.escape(city)}] — {_date_label(date_str)}</b>",
@@ -1437,14 +1541,13 @@ def _format_report_v2(date_str: str, city: str, events: list[dict]) -> tuple[str
         for a in attn:
             lines.append(f"• {html.escape(a)}")
 
-    # Сводка по категориям
-    lines.append("\n📊 <b>Итого:</b> " + str(len(events)) + " событий")
-
+    # Сводка по категориям (без строки "Итого: N событий")
+    lines.append("")
     if unclosed:
         lines.append(f"🚨 Незакрытые «В пути»: {len(unclosed)}")
     if cancels:
         total_c = sum(_get_sum(e) for e in cancels)
-        lines.append(f"❌ Отменённые: {len(cancels)} · {_fmt_sum(total_c)}")
+        lines.append(f"❌ Отмены: {len(cancels)} · {_fmt_sum(total_c)}")
     if discounts:
         total_d = sum(
             _meta(e).get("discount_sum", 0) or _meta(e).get("discount_sum", 0)
@@ -1457,6 +1560,8 @@ def _format_report_v2(date_str: str, city: str, events: list[dict]) -> tuple[str
         lines.append(f"🕐 Ранние закрытия: {len(early)}")
     if fast:
         lines.append(f"⚡ Быстрые доставки: {len(fast)}")
+    if disc_bonus:
+        lines.append(f"🎁 Скидка+бонусы: {len(disc_bonus)}")
 
     # Кнопки навигации
     cb_prefix = f"audit_detail:{city}:{date_str}"
@@ -1473,6 +1578,8 @@ def _format_report_v2(date_str: str, city: str, events: list[dict]) -> tuple[str
         buttons.append({"text": "⚡ Быстрые", "callback_data": f"{cb_prefix}:fast"})
     if unclosed:
         buttons.append({"text": "🚨 В пути", "callback_data": f"{cb_prefix}:unclosed"})
+    if disc_bonus:
+        buttons.append({"text": "🎁 Скидка+бонусы", "callback_data": f"{cb_prefix}:discount_bonus"})
 
     # Разбиваем кнопки по 3 в ряд
     keyboard: list[list[dict]] = [buttons[i:i+3] for i in range(0, len(buttons), 3)]
@@ -1496,7 +1603,15 @@ def _format_cancellations_detail(date_str: str, city: str, events: list[dict]) -
             num = m.get("delivery_num", "?")
             s = _get_sum(e)
             reason = (m.get("cancel_reason", "") or "без причины").strip()
-            cooked_lbl = "🍳 готовился" if m.get("cooked") else "без списания"
+            cls = _classify_cancel(m)
+            if cls == "confirmed_writeoff":
+                cooked_lbl = "🔴 списание"
+            elif cls == "cooked_unclear":
+                cooked_lbl = "🍳 готовился (уточнить)"
+            elif cls == "no_writeoff":
+                cooked_lbl = "✅ без списания (перекинули)"
+            else:
+                cooked_lbl = "без списания"
             branch = e.get("branch_name", "")
             tag = f"[{_branch_tag(branch)}] " if branch else ""
             lines.append(f"  {tag}#{num} {_fmt_sum(s)} · {html.escape(reason)} · {cooked_lbl}")
@@ -1726,6 +1841,39 @@ def _format_unclosed_detail(date_str: str, city: str, events: list[dict]) -> tup
     return "\n".join(lines), keyboard
 
 
+def _format_discount_bonus_detail(date_str: str, city: str, events: list[dict]) -> tuple[str, list[list[dict]]]:
+    """Деталь: заказы с одновременной скидкой и оплатой бонусами SailPlay."""
+    db_events = [e for e in events if e["event_type"] == "discount_and_bonus"]
+
+    lines = [f"🎁 <b>Скидка+бонусы [{html.escape(city)}] — {_date_label(date_str)}</b>", ""]
+
+    # Группировка по филиалу
+    by_branch: dict[str, list[dict]] = {}
+    for e in db_events:
+        branch = e.get("branch_name", "")
+        by_branch.setdefault(branch, []).append(e)
+
+    for branch, bevents in sorted(by_branch.items()):
+        tag = _branch_tag(branch)
+        lines.append(f"<b>{html.escape(tag)}</b>")
+        for e in bevents:
+            m = _meta(e)
+            num = m.get("delivery_num", "?")
+            disc_type = html.escape(m.get("discount_type", "") or "")
+            disc_sum = m.get("discount_sum", 0)
+            order_sum = float(m.get("sum", 0) or 0)
+            client = html.escape((m.get("client_name") or "").strip() or "—")
+            disc_part = f" (-{disc_sum} ₽)" if disc_sum else ""
+            lines.append(f"└ #{num} · {client} · {disc_type}{disc_part} · {_fmt_sum(order_sum)}")
+        lines.append("")
+
+    if not db_events:
+        lines.append("Нет данных")
+
+    keyboard = [[{"text": "← Назад", "callback_data": f"audit_summary:{city}:{date_str}"}]]
+    return "\n".join(lines), keyboard
+
+
 async def handle_audit_callback(
     cb_id: str,
     cb_chat_id: int,
@@ -1779,6 +1927,8 @@ async def handle_audit_callback(
             text, keyboard = _format_fast_detail(date_str, city, events_with_unclosed)
         elif detail_type == "unclosed":
             text, keyboard = _format_unclosed_detail(date_str, city, events_with_unclosed)
+        elif detail_type == "discount_bonus":
+            text, keyboard = _format_discount_bonus_detail(date_str, city, events_with_unclosed)
         else:
             return
 

@@ -319,6 +319,8 @@ def get_available_branches(query: str | frozenset | None = None) -> list[dict]:
         branches = get_branches(tenant_id)
         if not branches:
             branches = settings.branches
+        else:
+            branches = [{**b, "tenant_id": tenant_id} for b in branches]
     except Exception:
         branches = settings.branches
 

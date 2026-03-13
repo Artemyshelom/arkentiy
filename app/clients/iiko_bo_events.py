@@ -140,7 +140,7 @@ class BranchState:
     @property
     def avg_cooking_current_min(self) -> int | None:
         """Среднее время (мин) с момента создания для заказов, сейчас готовящихся на кухне."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
         times = [
             (now - t).total_seconds() / 60
             for num, d in self.deliveries.items()
@@ -154,7 +154,7 @@ class BranchState:
     @property
     def avg_wait_current_min(self) -> int | None:
         """Среднее время ожидания курьера для текущих готовых (собранных) заказов."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
         times = [
             (now - t).total_seconds() / 60
             for num, d in self.deliveries.items()
@@ -168,7 +168,7 @@ class BranchState:
     @property
     def avg_delivery_current_min(self) -> int | None:
         """Среднее время в пути для заказов, сейчас едущих к клиентам."""
-        now = datetime.now()
+        now = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=7)
         times = [
             (now - t).total_seconds() / 60
             for d in self.deliveries.values()

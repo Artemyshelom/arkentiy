@@ -919,6 +919,8 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
                 pass
         status_line = f"   Статус: {html.escape(r['status'] or '?')}{stale_note}"
 
+    comment_raw = (r.get("comment") or "").strip()
+    comment_line = f"\n💬 {html.escape(comment_raw)}" if comment_raw else ""
     return (
         f"📍 <b>{html.escape(r['branch_name'])}</b> | #{r['delivery_num']}\n"
         f"{status_line}\n"
@@ -928,6 +930,7 @@ async def _format_order_card(r: dict, client_count: int | None = None) -> str:
         f"   💰 {sum_line}\n"
         f"   ⏱ {_fmt_dt(r['planned_time'])} → {_fmt_dt(r['actual_time'])} | {late_str}\n"
         f"🍱 Состав:\n{items_str}"
+        f"{comment_line}"
     )
 
 
@@ -1191,10 +1194,10 @@ _PERIOD_PATTERNS = [
     # single dates
     r"^\d{4}-\d{2}-\d{2}$",
     r"^\d{2}\.\d{2}\.\d{4}$",
-    r"^\d{2}\.\d{2}$",
+    r"^\d{1,2}\.\d{2}$",
     r"^(вчера|сегодня|today|yesterday)$",
     # ranges
-    r"^\d{2}\.\d{2}-\d{2}\.\d{2}$",
+    r"^\d{1,2}\.\d{2}-\d{1,2}\.\d{2}$",
     r"^\d{2}\.\d{2}\.\d{4}-\d{2}\.\d{2}\.\d{4}$",
     # relative
     r"^\d+д$",
@@ -1239,17 +1242,21 @@ def _parse_period(tokens: list[str]) -> tuple[str, str, str, list[str]]:
     if m:
         iso = f"{m.group(3)}-{m.group(2)}-{m.group(1)}"
         return iso, iso, period_token, filter_tokens
-    m = re.match(r"^(\d{2})\.(\d{2})$", period_token)
+    m = re.match(r"^(\d{1,2})\.(\d{2})$", period_token)
     if m:
-        iso = f"{today.year}-{m.group(2)}-{m.group(1)}"
-        return iso, iso, period_token, filter_tokens
+        day = m.group(1).zfill(2)
+        mon = m.group(2)
+        iso = f"{today.year}-{mon}-{day}"
+        return iso, iso, f"{day}.{mon}", filter_tokens
 
     # --- Range DD.MM-DD.MM ---
-    m = re.match(r"^(\d{2})\.(\d{2})-(\d{2})\.(\d{2})$", period_token)
+    m = re.match(r"^(\d{1,2})\.(\d{2})-(\d{1,2})\.(\d{2})$", period_token)
     if m:
-        f = f"{today.year}-{m.group(2)}-{m.group(1)}"
-        t = f"{today.year}-{m.group(4)}-{m.group(3)}"
-        label = f"{m.group(1)}.{m.group(2)} – {m.group(3)}.{m.group(4)}.{today.year}"
+        d1, m1 = m.group(1).zfill(2), m.group(2)
+        d2, m2 = m.group(3).zfill(2), m.group(4)
+        f = f"{today.year}-{m1}-{d1}"
+        t = f"{today.year}-{m2}-{d2}"
+        label = f"{d1}.{m1} – {d2}.{m2}.{today.year}"
         return f, t, label, filter_tokens
 
     # --- Range DD.MM.YYYY-DD.MM.YYYY ---
@@ -1359,6 +1366,7 @@ async def _build_branch_report(
             "new_customers_revenue":    ds.get("new_customers_revenue") or 0.0,
             "repeat_customers":         ds.get("repeat_customers") or 0,
             "repeat_customers_revenue": ds.get("repeat_customers_revenue") or 0.0,
+            "payment_types_agg": _json.loads(ds.get("payment_types") or "[]") if ds.get("payment_types") else [],
         }
 
     # Обогащаем разбивку скидок через DELIVERIES OLAP (корректный DiscountSum).
@@ -1426,6 +1434,7 @@ async def _build_city_aggregate(
     )
     count = 0
     all_dt: dict[str, dict] = {}
+    all_pt: dict[str, dict] = {}
     any_live = False
     _first_tz = _branch_tz(branches[0]) if branches else settings.default_tz
     today_local = datetime.now(_first_tz).date().isoformat()
@@ -1487,6 +1496,19 @@ async def _build_city_aggregate(
                     all_dt[t]["count"] += dt.get("count", 0)
                     all_dt[t]["sum"] += dt.get("sum", 0)
 
+        pt_src = agg.get("payment_types_agg") if is_single_day else ds.get("payment_types")
+        if isinstance(pt_src, str):
+            try:
+                pt_src = _json.loads(pt_src)
+            except (TypeError, _json.JSONDecodeError):
+                pt_src = []
+        if pt_src and isinstance(pt_src, list):
+            for pt in pt_src:
+                if isinstance(pt, dict):
+                    t = pt.get("type", "?")
+                    all_pt.setdefault(t, {"type": t, "sum": 0})
+                    all_pt[t]["sum"] += pt.get("sum", 0)
+
     if count == 0:
         return None
 
@@ -1516,6 +1538,7 @@ async def _build_city_aggregate(
         "avg_wait_min": totals.get("avg_wait_min"),
         "avg_delivery_min": totals.get("avg_delivery_min"),
         "discount_types_agg": sorted(all_dt.values(), key=lambda x: x["sum"], reverse=True),
+        "payment_types_agg": sorted(all_pt.values(), key=lambda x: x["sum"], reverse=True),
         "cooks_today": totals.get("cooks_today", 0),
         "couriers_today": totals.get("couriers_today", 0),
         "exact_time_count": totals.get("exact_time_count", 0),
@@ -1863,7 +1886,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         r"^\d{4}-\d{2}-\d{2}$",
         r"^\d{2}\.\d{2}\.\d{4}$",
         r"^\d{2}\.\d{2}$",
-        r"^(вчера|yesterday)$",
+        r"^(вчера|yesterday|сегодня|today)$",
     ]
     tokens = arg.strip().split() if arg.strip() else []
     has_date = any(
@@ -1891,7 +1914,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
     )}
 
     results = []
-    for branch_name, state in _states.items():
+    for (tid, branch_name), state in _states.items():
         if branch_name not in branch_names_set:
             continue
         for num, d in list(state.deliveries.items()):
@@ -1920,6 +1943,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
                 "courier": (d.get("courier") or "").strip(),
                 "customer_raw": d.get("customer_raw"),
                 "address": (d.get("delivery_address") or "").strip(),
+                "comment": (d.get("comment") or "").strip(),
             })
 
     results.sort(key=lambda x: -x["overdue_min"])
@@ -1943,6 +1967,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
         courier_part = ""
         if r["status"] == "В пути к клиенту" and r["courier"]:
             courier_part = f"\n  🛵 {html.escape(r['courier'])}"
+        comment_part = f"\n  💬 {html.escape(r['comment'])}" if r.get("comment") else ""
         lines.append(
             f"<b>+{int(r['overdue_min'])} мин</b> | #{r['num']}"
             f" | {html.escape(r['branch'])}\n"
@@ -1950,6 +1975,7 @@ async def _handle_late(chat_id: int, arg: str, city_filter=None) -> None:
             + address_part
             + f"\n  🕐 план: {r['planned_dt'].strftime('%H:%M')} | {status_str}"
             + courier_part
+            + comment_part
         )
 
     await _send(chat_id, "\n\n".join(lines))

@@ -1065,6 +1065,16 @@ _EXACT_TIME_CONDITIONS_PG = """(
 
 _EXACT_TIME_FILTER_PG = f"\n    AND NOT {_EXACT_TIME_CONDITIONS_PG}\n"
 
+_PAY_MAP: dict[str, str] = {
+    "наличные": "Наличные",
+    "безналичный расчет": "Безнал",
+    "безналичный расчёт": "Безнал",
+    "онлайн": "Онлайн",
+    "тинькофф": "Онлайн",
+    "т-банк": "Онлайн",
+    "системы лояльности": "Бонусы",
+}
+
 
 async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int | None = None) -> dict:
     """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + счётчики).
@@ -1237,6 +1247,21 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
         {"type": r["discount_type"], "count": r["cnt"], "sum": round(r["total"] or 0)}
         for r in dt_rows
     ] if dt_rows else []
+
+    pt_rows = await pool.fetch(
+        """SELECT payment_type, COUNT(*) AS cnt, SUM(COALESCE(sum, 0)) AS total
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text = $2 AND tenant_id = $3
+             AND status != 'Отменена'
+             AND payment_type IS NOT NULL AND payment_type != ''
+           GROUP BY payment_type
+           ORDER BY total DESC""",
+        branch_name, date_iso, tenant_id,
+    )
+    result["payment_types_agg"] = [
+        {"type": _PAY_MAP.get(r["payment_type"].lower(), r["payment_type"]), "sum": round(float(r["total"] or 0))}
+        for r in pt_rows
+    ] if pt_rows else []
 
     staff_rows = await pool.fetch(
         """SELECT role_class, COUNT(DISTINCT employee_id) as cnt
@@ -1441,6 +1466,23 @@ async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenan
         branch_name, date_from, date_to,
     )
     result["payment_changed_count"] = pc_row["payment_changed_count"] if pc_row else 0
+
+    pt_rows = await pool.fetch(
+        """SELECT payment_type, COUNT(*) AS cnt, SUM(COALESCE(sum, 0)) AS total
+           FROM orders_raw
+           WHERE branch_name = $1 AND date::text BETWEEN $2 AND $3
+             AND tenant_id = $4
+             AND status != 'Отменена'
+             AND payment_type IS NOT NULL AND payment_type != ''
+           GROUP BY payment_type
+           ORDER BY total DESC""",
+        branch_name, date_from, date_to, tenant_id,
+    )
+    result["payment_types"] = _json.dumps(
+        [{"type": _PAY_MAP.get(r["payment_type"].lower(), r["payment_type"]), "sum": round(float(r["total"] or 0))}
+         for r in pt_rows],
+        ensure_ascii=False,
+    ) if pt_rows else "[]"
 
     return result
 
@@ -1953,10 +1995,10 @@ async def upsert_rates_cache(
 async def get_realtime_fot(
     branch_name: str, tenant_id: int = 1
 ) -> Optional[dict]:
-    """Считает накопленный ФОТ поваров по открытым сменам прямо сейчас.
+    """Считает накопленный ФОТ поваров за сегодня — все смены (включая закрытые).
 
-    Открытая смена = clock_out IS NULL в shifts_raw.
-    Часы = NOW() - clock_in::timestamptz (timezone-aware вычитание).
+    Для активных смен конец = NOW(), для закрытых = clock_out.
+    Смены с аномальной длительностью (>= 24ч) пропускаются.
     Ставка берётся из employee_rates_cache.
     Возвращает {'fot': int, 'hours': float, 'cooks': int} или None.
     """
@@ -1964,7 +2006,7 @@ async def get_realtime_fot(
     rows = await pool.fetch(
         """SELECT
                s.employee_id,
-               EXTRACT(EPOCH FROM (NOW() - s.clock_in::timestamptz)) / 3600.0 AS hours_now,
+               EXTRACT(EPOCH FROM (COALESCE(s.clock_out::timestamptz, NOW()) - s.clock_in::timestamptz)) / 3600.0 AS hours_worked,
                COALESCE(r.rate_per_hour, 0) AS rate
            FROM shifts_raw s
            LEFT JOIN employee_rates_cache r
@@ -1974,21 +2016,25 @@ async def get_realtime_fot(
            WHERE s.tenant_id = $1
              AND s.branch_name = $2
              AND s.role_class = 'cook'
-             AND s.clock_out IS NULL
-             AND s.clock_in IS NOT NULL""",
+             AND s.clock_in IS NOT NULL
+             AND DATE(s.clock_in::timestamptz AT TIME ZONE 'Asia/Krasnoyarsk') = CURRENT_DATE AT TIME ZONE 'Asia/Krasnoyarsk'""",
         tenant_id, branch_name,
     )
 
     if not rows:
         return None
 
+    valid_rows = [r for r in rows if 0 < float(r["hours_worked"]) < 24]
+    if not valid_rows:
+        return None
+
     total_fot = sum(
-        float(r["hours_now"]) * float(r["rate"])
-        for r in rows
-        if float(r["rate"]) > 0 and float(r["hours_now"]) > 0
+        float(r["hours_worked"]) * float(r["rate"])
+        for r in valid_rows
+        if float(r["rate"]) > 0
     )
-    total_hours = sum(float(r["hours_now"]) for r in rows if float(r["hours_now"]) > 0)
-    cooks = len(rows)
+    total_hours = sum(float(r["hours_worked"]) for r in valid_rows)
+    cooks = len(valid_rows)
     avg_hours = round(total_hours / cooks, 1) if cooks else 0
 
     return {

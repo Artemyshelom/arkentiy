@@ -6,5 +6,5 @@ app/ctx.py — ContextVar для мульти-тенантного polling loop.
 """
 from contextvars import ContextVar
 
-ctx_tenant_id: ContextVar[int] = ContextVar("tenant_id", default=1)
+ctx_tenant_id: ContextVar[int | None] = ContextVar("tenant_id", default=None)
 ctx_bot_token: ContextVar[str] = ContextVar("bot_token", default="")

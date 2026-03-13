@@ -207,7 +207,7 @@ def _format_error(city: str, competitor_name: str, url: str) -> str:
 @track_job("competitor_monitor")
 async def job_monitor_competitors() -> None:
     """Еженедельный обход сайтов конкурентов."""
-    log_id = await log_job_start("competitor_monitor")
+    log_id = await log_job_start("competitor_monitor", tenant_id=1)
     logger.info("[Конкуренты] Запуск еженедельного мониторинга")
 
     competitors_by_city = settings.competitors
@@ -234,7 +234,7 @@ async def job_monitor_competitors() -> None:
                 if not new_items:
                     logger.warning(f"[Конкуренты] {name}: 0 позиций — возможно, сайт изменился")
                     snapshot_id = await create_competitor_snapshot(
-                        city, name, url, status="error",
+                        city, name, url, 1, status="error",
                         error_msg="0 позиций после парсинга",
                     )
                     await _send_tg(_format_error(city, name, url))
@@ -243,15 +243,16 @@ async def job_monitor_competitors() -> None:
 
                 # Сохраняем снапшот
                 snapshot_id = await create_competitor_snapshot(
-                    city, name, url, status="ok", items_count=len(new_items),
+                    city, name, url, 1, status="ok", items_count=len(new_items),
                 )
                 await save_competitor_items(
                     snapshot_id, city, name,
                     [item.to_dict() for item in new_items],
+                    tenant_id=1,
                 )
 
                 # Дифф с предыдущим снапшотом
-                old_items = await get_second_last_competitor_items(city, name)
+                old_items = await get_second_last_competitor_items(city, name, tenant_id=1)
 
                 if not old_items:
                     # Первый запуск — просто уведомляем
@@ -278,7 +279,7 @@ async def job_monitor_competitors() -> None:
                 errors.append(name)
                 try:
                     await create_competitor_snapshot(
-                        city, name, url, status="error", error_msg=str(e)[:500],
+                        city, name, url, 1, status="error", error_msg=str(e)[:500],
                     )
                 except Exception:
                     pass

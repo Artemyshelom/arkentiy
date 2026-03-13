@@ -40,7 +40,7 @@
 - [ ] `order_comments` (P2) — добавить комментарии к карточке заказа
 - [ ] `access_management_guide` (P1) — получить инструкцию по управлению доступами (открытие личных чатов с ботом) — для Никиты
 - [ ] `izhevsk_server_debug` (P1) — разобраться с проблемой сервера Ижевска на следующей неделе
-- [ ] `boris_api_regression_audit` (P1) — прошерстить и почистить возможные баги Аркентия после подключения stats API для Бориса: проверить изоляцию tenant_id в /api/stats, убедиться что rate-limit bucket не шарится между тенантами, проверить что _states читается только для своего tenant, не допустить утечки данных Артемия в ответы Бориса
+- [x] `boris_api_regression_audit` (P1) — ~~аудит + фикс изоляции tenant_id после stats API: 2 бага в _states (stats realtime + самовывоз), ctx_tenant_id default=None, audit.py import bug, 60 функций database_pg.py без default, все call sites с явным tenant_id~~ ✅ 13.03.2026
 - [ ] `orders_status_optimization` (P0) — оптимизация получения активных заказов (OLAP vs Events API анализ)
 - [ ] `email_statement_auto` (P0) — автоматический забор выписок с почты + присылка в чат
 - [x] `timezone_support` (P1) — ~~интерфейс `/статус` под разные часовые пояса + адаптация отчётов~~ ✅ 07.03.2026
@@ -55,7 +55,7 @@
 - [x] `events_latency_measure` ✅ — реализовано в сессии 59 (март 2026). Три типа замеров: `[latency]` (новый заказ), `[latency_status]` (смена статуса), `[latency_cooking]` (кухня). Результат: общая задержка ~100s (iikoChain ~70-85s + поллинг ~15s). Данные за 7-8 марта: 24k+ замеров.
 - [ ] `iiko_webhooks` (P2) — интеграция push-нотификаций iikoCloud Transport API (`DeliveryOrderUpdate`). У нас уже есть: ключи API, Transport API клиент (`app/clients/iiko.py`), публичный домен, FastAPI. Нужно: добавить роут `POST /webhooks/iiko`, зарегистрировать URL через `POST /api/1/webhooks/update_settings` для каждой точки. Потенциал: снизить задержку с 30-60с до 1-10с.
 - [x] `stats_api_v1` (P1) — ~~`GET /api/stats` для AI-агентов (Борис): realtime/daily/period метрики, Bearer-токен авторизация, rate limit 60 req/min~~ ✅ 08.03.2026
-- [ ] `tenant_id_default_hardening` (P2) — убрать `tenant_id: int = 1` как дефолт из 50+ функций database_pg.py и изменить `ctx_tenant_id` с `default=1` на `default=None`. Сейчас любой забытый вызов без явного tenant_id молча работает с тенантом 1. Все критичные места уже исправлены (shifts, daily_stats, audit, silence_log, iiko_to_sheets, cabinet JWT). Задача — убрать сам anti-pattern чтобы будущий код ломался явно, а не молча.
+- [x] `tenant_id_default_hardening` (P2) — ~~убрать `tenant_id: int = 1` как дефолт из 60+ функций database_pg.py и изменить `ctx_tenant_id` с `default=1` на `default=None`. Сейчас любой забытый вызов без явного tenant_id молча работает с тенантом 1. Все критичные места уже исправлены (shifts, daily_stats, audit, silence_log, iiko_to_sheets, cabinet JWT). Задача — убрать сам anti-pattern чтобы будущий код ломался явно, а не молча.~~ ✅ 13.03.2026 (выполнено в рамках boris_api_regression_audit)
 - [ ] `llm_recommendations` (P3) — рекомендации по меню/ценам на основе OLAP-данных (выручка по блюдам, динамика продаж); после стабилизации core
 - [ ] `competitor_llm_brief` (P3) — краткие выводы по конкурентам вместо сырой ленты изменений: LLM-саммари дельт цен/меню за неделю
 

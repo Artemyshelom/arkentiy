@@ -43,14 +43,14 @@ async def get_token(city: str) -> str:
     Использует кэш из SQLite, обновляет если истёк.
     Один токен работает для всех городов (одна учётная запись iiko).
     """
-    cached = await get_iiko_token(city)
+    cached = await get_iiko_token(city, tenant_id=1)
     if cached:
         return cached
 
     token = await _get_fresh_token()
     # Сохраняем с запасом -2 мин (токен живёт 15 мин)
     expires_at = datetime.now(timezone.utc) + timedelta(minutes=13)
-    await set_iiko_token(city, token, expires_at)
+    await set_iiko_token(city, token, expires_at, tenant_id=1)
     return token
 
 
@@ -72,7 +72,7 @@ async def _post(endpoint: str, city: str, body: dict, retry: int = 2) -> dict:
                 if response.status_code == 401 and attempt < retry:
                     # Инвалидируем кэш и повторяем
                     logger.warning(f"iiko 401 для {city}, обновляю токен (попытка {attempt+1})")
-                    await set_iiko_token(city, "", datetime.now(timezone.utc))
+                    await set_iiko_token(city, "", datetime.now(timezone.utc), tenant_id=1)
                     await asyncio.sleep(1)
                     continue
                 response.raise_for_status()

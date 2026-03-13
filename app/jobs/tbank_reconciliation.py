@@ -346,6 +346,7 @@ async def process_registry(
                 tbank_confirmed_date=_date_to_iso(tx.transaction_date),
                 tbank_transaction_id=tx.transaction_id,
                 iiko_amount=iiko_amount,
+                tenant_id=1,
             )
 
             if status in ("confirmed", "created_confirmed"):
@@ -380,11 +381,11 @@ async def process_registry(
             "details": branch_details,
         }
 
-    all_pending = await get_pending_payments(since_date=TRACKING_START_DATE)
+    all_pending = await get_pending_payments(since_date=TRACKING_START_DATE, tenant_id=1)
     result.new_pending = len(all_pending)
 
-    overdue = await get_overdue_payments(OVERDUE_DAYS, since_date=TRACKING_START_DATE)
-    tracking = await get_tracking_summary(since_date=TRACKING_START_DATE)
+    overdue = await get_overdue_payments(OVERDUE_DAYS, since_date=TRACKING_START_DATE, tenant_id=1)
+    tracking = await get_tracking_summary(since_date=TRACKING_START_DATE, tenant_id=1)
 
     try:
         await save_tbank_registry_log(
@@ -793,7 +794,7 @@ async def process_payout(
                         "amount": tx.net_amount,
                     })
 
-    delayed = await get_payout_delayed(PAYOUT_DELAY_DAYS, since_date=TRACKING_START_DATE)
+    delayed = await get_payout_delayed(PAYOUT_DELAY_DAYS, since_date=TRACKING_START_DATE, tenant_id=1)
     report = _build_payout_report(sheets, payout_date, confirmed_count, chargeback_list, delayed, not_found_list, total_amount, total_net)
     return {"report": report}
 

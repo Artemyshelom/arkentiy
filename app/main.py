@@ -321,8 +321,8 @@ async def lifespan(app: FastAPI):
     logger.info("SQLite инициализирован")
 
     # Seed .env users/chats into DB if tables are empty (Issue 1a: first-run migration)
-    _existing_users = await get_all_tenant_users()
-    _existing_chats = await get_all_tenant_chats()
+    _existing_users = await get_all_tenant_users(tenant_id=1)
+    _existing_chats = await get_all_tenant_chats(tenant_id=1)
     if not _existing_users and not _existing_chats:
         from app.config import get_settings as _gs
         _s = _gs()
@@ -331,7 +331,7 @@ async def lifespan(app: FastAPI):
 
         # Seed admin
         if _s.telegram_admin_id:
-            await upsert_tenant_user(_s.telegram_admin_id, "Артемий (admin)", _admin_mods, None, role="admin")
+            await upsert_tenant_user(_s.telegram_admin_id, "Артемий (admin)", _admin_mods, None, role="admin", tenant_id=1)
 
         # Seed TELEGRAM_ALLOWED_IDS
         for _raw_id in (_s.telegram_allowed_ids or "").split(","):
@@ -342,9 +342,9 @@ async def lifespan(app: FastAPI):
             if _tid == _s.telegram_admin_id:
                 continue  # уже добавлен
             if _tid < 0:
-                await upsert_tenant_chat(_tid, f"Чат {abs(_tid)}", _default_mods, None)
+                await upsert_tenant_chat(_tid, f"Чат {abs(_tid)}", _default_mods, None, tenant_id=1)
             else:
-                await upsert_tenant_user(_tid, f"User {_tid}", _default_mods, None)
+                await upsert_tenant_user(_tid, f"User {_tid}", _default_mods, None, tenant_id=1)
 
         logger.info("[main] Seed from .env: users/chats added to DB")
 

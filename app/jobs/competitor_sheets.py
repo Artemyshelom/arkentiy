@@ -178,7 +178,7 @@ async def _write_competitor_sheet(
     competitor_name: str,
     city: str,
 ) -> None:
-    items = await get_all_competitor_items_by_snapshot(city, competitor_name)
+    items = await get_all_competitor_items_by_snapshot(city, competitor_name, tenant_id=1)
     if not items:
         logger.warning(f"[Sheets] {competitor_name}: нет данных в БД")
         return
@@ -372,7 +372,7 @@ async def _write_summary_sheet(
     rows: list[list] = [header]
 
     for _, name in competitors:
-        items = await get_all_competitor_items_by_snapshot(city, name)
+        items = await get_all_competitor_items_by_snapshot(city, name, tenant_id=1)
         if not items:
             rows.append([name, 0, "—", "—", "—", "—"])
             continue
@@ -393,7 +393,7 @@ async def _write_summary_sheet(
         else:
             delta_str = "—"
 
-        snap = await get_competitor_last_snapshot(city, name)
+        snap = await get_competitor_last_snapshot(city, name, tenant_id=1)
         snap_date = snap["date"] if snap else "—"
         snap_count = len(dates)
 
@@ -473,7 +473,7 @@ async def _sync_tech_sheet(
             continue
         comp_name = row[0].strip()
 
-        snap = await get_competitor_last_snapshot(city, comp_name)
+        snap = await get_competitor_last_snapshot(city, comp_name, tenant_id=1)
 
         if snap is None:
             # Нет данных в БД — подсвечиваем оранжевым, статус ⚠️
@@ -611,7 +611,7 @@ async def export_all_competitors_to_sheets() -> None:
                 inactive.add((city_name, c["name"]))
 
     # Все конкуренты с данными в БД — исключаем inactive
-    all_db_competitors = await get_competitor_names()
+    all_db_competitors = await get_competitor_names(tenant_id=1)
     db_by_city: dict[str, list[tuple[str, str]]] = defaultdict(list)
     for city, name in all_db_competitors:
         if (city, name) in inactive:

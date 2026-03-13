@@ -157,7 +157,7 @@ def _build_realtime(tenant_id: int, branch_filter: Optional[str], city_filter: O
         if city_filter and city_filter.lower() not in city.lower():
             continue
 
-        state = _states.get(name)
+        state = _states.get((tenant_id, name))
         now_local_b = now_local  # one timezone for all branches (all UTC+7)
 
         active_orders = 0

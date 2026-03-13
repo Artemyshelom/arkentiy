@@ -335,7 +335,7 @@ async def _detect_courier_multicancellation(date_str: str) -> list[dict]:
 async def _detect_discount_and_bonus(date_str: str) -> list[dict]:
     """Заказы с одновременной скидкой И оплатой бонусами SailPlay."""
     from app.database_pg import get_pool
-    from app.ctx import _ctx_tenant_id
+    from app.ctx import ctx_tenant_id as _ctx_tenant_id
     tenant_id = _ctx_tenant_id.get()
     pool = get_pool()
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -950,7 +950,7 @@ async def job_audit_report(utc_offset: int = 7) -> None:
     # Строим карту branch_name → tenant_id для корректной записи событий
     branch_tenant_map: dict[str, int] = {row["branch_name"]: row["tenant_id"] for row in all_iiko_creds}
 
-    await clear_audit_events(date_str)
+    await clear_audit_events(date_str, tenant_id=tenant_id)
 
     all_findings = await _generate_audit_for_date(date_str)
 
@@ -1298,7 +1298,7 @@ async def handle_audit_command(chat_id: int, arg: str, city_filter=None) -> None
             await clear_audit_events(date_str, tenant_id=current_tenant_id)
             await save_audit_events_batch(generated, tenant_id=current_tenant_id)
             logger.info(f"[audit] On-demand: сгенерировано {len(generated)} событий за {date_str}")
-        events = await get_audit_events(date_str, city=city_query, branch_name=branch_filter)
+        events = await get_audit_events(date_str, city=city_query, branch_name=branch_filter, tenant_id=current_tenant_id)
 
     # Live unclosed (всегда свежие, не из кэша)
     unclosed = await _detect_unclosed_in_transit(date_str)

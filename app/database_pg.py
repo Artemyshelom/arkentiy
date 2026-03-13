@@ -75,7 +75,7 @@ async def init_pool_only(database_url: str) -> None:
 # iiko_tokens
 # =====================================================================
 
-async def get_iiko_token(city: str, tenant_id: int = 1) -> str | None:
+async def get_iiko_token(city: str, tenant_id: int) -> str | None:
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT token, expires_at FROM iiko_tokens WHERE tenant_id = $1 AND city = $2",
@@ -88,7 +88,7 @@ async def get_iiko_token(city: str, tenant_id: int = 1) -> str | None:
     return row["token"]
 
 
-async def set_iiko_token(city: str, token: str, expires_at: datetime, tenant_id: int = 1) -> None:
+async def set_iiko_token(city: str, token: str, expires_at: datetime, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         """INSERT INTO iiko_tokens (tenant_id, city, token, expires_at)
@@ -102,7 +102,7 @@ async def set_iiko_token(city: str, token: str, expires_at: datetime, tenant_id:
 # job_logs
 # =====================================================================
 
-async def log_job_start(job_name: str, tenant_id: int = 1) -> int:
+async def log_job_start(job_name: str, tenant_id: int) -> int:
     pool = get_pool()
     row = await pool.fetchrow(
         """INSERT INTO job_logs (tenant_id, job_name, status) VALUES ($1, $2, 'running')
@@ -129,7 +129,7 @@ def hash_stoplist(items: list) -> str:
     return hashlib.md5(serialized.encode()).hexdigest()
 
 
-async def get_stoplist_hash(city: str, tenant_id: int = 1) -> str | None:
+async def get_stoplist_hash(city: str, tenant_id: int) -> str | None:
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT items_hash FROM stoplist_state WHERE tenant_id = $1 AND city = $2",
@@ -138,7 +138,7 @@ async def get_stoplist_hash(city: str, tenant_id: int = 1) -> str | None:
     return row["items_hash"] if row else None
 
 
-async def set_stoplist_hash(city: str, items_hash: str, tenant_id: int = 1) -> None:
+async def set_stoplist_hash(city: str, items_hash: str, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         """INSERT INTO stoplist_state (tenant_id, city, items_hash)
@@ -152,7 +152,7 @@ async def set_stoplist_hash(city: str, items_hash: str, tenant_id: int = 1) -> N
 # report_updates
 # =====================================================================
 
-async def record_data_update(date: str, branch: str, field: str, old_value, new_value, tenant_id: int = 1) -> None:
+async def record_data_update(date: str, branch: str, field: str, old_value, new_value, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         """INSERT INTO report_updates (tenant_id, date, branch, field, old_value, new_value)
@@ -163,7 +163,7 @@ async def record_data_update(date: str, branch: str, field: str, old_value, new_
     )
 
 
-async def get_updates_for_date(date: str, tenant_id: int = 1) -> list[dict]:
+async def get_updates_for_date(date: str, tenant_id: int) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT * FROM report_updates WHERE tenant_id = $1 AND date = $2 ORDER BY recorded_at",
@@ -172,7 +172,7 @@ async def get_updates_for_date(date: str, tenant_id: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def clear_updates_for_date(date: str, tenant_id: int = 1) -> None:
+async def clear_updates_for_date(date: str, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         "DELETE FROM report_updates WHERE tenant_id = $1 AND date = $2",
@@ -188,7 +188,7 @@ async def save_rt_snapshot(
     branch: str, date: str,
     delays_late: int, delays_total: int, delays_avg_min: int,
     cooks_today: int, couriers_today: int,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -204,7 +204,7 @@ async def save_rt_snapshot(
     )
 
 
-async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | None:
+async def get_rt_snapshot(branch: str, date: str, tenant_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
         """SELECT delays_late, delays_total, delays_avg_min, cooks_today, couriers_today
@@ -218,7 +218,7 @@ async def get_rt_snapshot(branch: str, date: str, tenant_id: int = 1) -> dict | 
 # orders_raw
 # =====================================================================
 
-async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
+async def upsert_orders_batch(rows: list[dict], tenant_id: int) -> None:
     if not rows:
         return
     pool = get_pool()
@@ -272,7 +272,7 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int = 1) -> None:
                 )
 
 
-async def get_client_order_count(phone: str, tenant_id: int = 1) -> int:
+async def get_client_order_count(phone: str, tenant_id: int) -> int:
     if not phone:
         return 0
     pool = get_pool()
@@ -286,7 +286,7 @@ async def get_client_order_count(phone: str, tenant_id: int = 1) -> int:
 async def get_order_status_from_db(
     branch_name: str,
     delivery_num: str,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> str | None:
     """Возвращает текущий статус заказа из orders_raw. None если заказ не найден."""
     pool = get_pool()
@@ -307,7 +307,7 @@ async def get_order_status_from_db(
 # shifts_raw
 # =====================================================================
 
-async def upsert_shifts_batch(rows: list[dict], tenant_id: int = 1) -> None:
+async def upsert_shifts_batch(rows: list[dict], tenant_id: int) -> None:
     if not rows:
         return
     pool = get_pool()
@@ -329,7 +329,7 @@ async def upsert_shifts_batch(rows: list[dict], tenant_id: int = 1) -> None:
                 )
 
 
-async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int = 1) -> list[dict]:
+async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """SELECT employee_id, employee_name, role_class, clock_in, clock_out
@@ -340,7 +340,7 @@ async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int = 1) 
     return [dict(r) for r in rows]
 
 
-async def get_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
+async def get_shifts_by_date(date_iso: str, tenant_id: int) -> list[dict]:
     """Смены всех точек за дату. Для Stats API (Борис)."""
     pool = get_pool()
     rows = await pool.fetch(
@@ -352,7 +352,7 @@ async def get_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
     return [dict(r) for r in rows]
 
 
-async def get_fot_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict]:
+async def get_fot_shifts_by_date(date_iso: str, tenant_id: int) -> list[dict]:
     """Смены с employee_id за дату — для расчёта ФОТ."""
     pool = get_pool()
     rows = await pool.fetch(
@@ -365,7 +365,7 @@ async def get_fot_shifts_by_date(date_iso: str, tenant_id: int = 1) -> list[dict
     return [dict(r) for r in rows]
 
 
-async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
+async def close_stale_shifts(today_iso: str, tenant_id: int) -> int:
     pool = get_pool()
     result = await pool.execute(
         "UPDATE shifts_raw SET clock_out = clock_in WHERE tenant_id = $1 AND date < $2 AND clock_out IS NULL",
@@ -378,7 +378,7 @@ async def close_stale_shifts(today_iso: str, tenant_id: int = 1) -> int:
 # daily_stats
 # =====================================================================
 
-async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None:
+async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int) -> None:
     if not rows:
         return
     pool = get_pool()
@@ -436,7 +436,7 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int = 1) -> None
                 )
 
 
-async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -> dict | None:
+async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict | None:
     # #region agent log
     try:
         import pathlib as _pl
@@ -465,9 +465,8 @@ async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -
 # =====================================================================
 
 async def create_competitor_snapshot(
-    city: str, competitor_name: str, url: str,
+    city: str, competitor_name: str, url: str, tenant_id: int,
     status: str = "ok", items_count: int = 0, error_msg: str | None = None,
-    tenant_id: int = 1,
 ) -> int:
     pool = get_pool()
     row = await pool.fetchrow(
@@ -481,7 +480,7 @@ async def create_competitor_snapshot(
 
 async def save_competitor_items(
     snapshot_id: int, city: str, competitor_name: str, items: list[dict],
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> None:
     if not items:
         return
@@ -499,7 +498,7 @@ async def save_competitor_items(
                 )
 
 
-async def get_second_last_competitor_items(city: str, competitor_name: str, tenant_id: int = 1) -> list[dict]:
+async def get_second_last_competitor_items(city: str, competitor_name: str, tenant_id: int) -> list[dict]:
     pool = get_pool()
     snapshot_ids = await pool.fetch(
         """SELECT id FROM competitor_snapshots
@@ -517,7 +516,7 @@ async def get_second_last_competitor_items(city: str, competitor_name: str, tena
     return [dict(r) for r in rows]
 
 
-async def get_competitor_names(tenant_id: int = 1) -> list[tuple[str, str]]:
+async def get_competitor_names(tenant_id: int) -> list[tuple[str, str]]:
     pool = get_pool()
     rows = await pool.fetch(
         """SELECT DISTINCT city, competitor_name FROM competitor_snapshots
@@ -527,7 +526,7 @@ async def get_competitor_names(tenant_id: int = 1) -> list[tuple[str, str]]:
     return [(r["city"], r["competitor_name"]) for r in rows]
 
 
-async def get_all_competitor_items_by_snapshot(city: str, competitor_name: str, tenant_id: int = 1) -> list[dict]:
+async def get_all_competitor_items_by_snapshot(city: str, competitor_name: str, tenant_id: int) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """SELECT i.name, i.price, i.price_old, s.scraped_at::date AS snapshot_date, i.category
@@ -544,7 +543,7 @@ async def get_all_competitor_items_by_snapshot(city: str, competitor_name: str, 
     ]
 
 
-async def get_competitor_last_snapshot(city: str, competitor_name: str, tenant_id: int = 1) -> dict | None:
+async def get_competitor_last_snapshot(city: str, competitor_name: str, tenant_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow(
         """SELECT scraped_at::date AS date, items_count FROM competitor_snapshots
@@ -559,7 +558,7 @@ async def get_competitor_last_snapshot(city: str, competitor_name: str, tenant_i
 # silence_log
 # =====================================================================
 
-async def log_silence(chat_id: int, duration_min: int, user_id: int, tenant_id: int = 1) -> None:
+async def log_silence(chat_id: int, duration_min: int, user_id: int, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         "INSERT INTO silence_log (tenant_id, chat_id, duration_min, user_id) VALUES ($1,$2,$3,$4)",
@@ -571,7 +570,7 @@ async def log_silence(chat_id: int, duration_min: int, user_id: int, tenant_id: 
 # audit_events
 # =====================================================================
 
-async def save_audit_events_batch(events: list[dict], tenant_id: int = 1) -> None:
+async def save_audit_events_batch(events: list[dict], tenant_id: int) -> None:
     if not events:
         return
     pool = get_pool()
@@ -590,7 +589,7 @@ async def save_audit_events_batch(events: list[dict], tenant_id: int = 1) -> Non
                 )
 
 
-async def clear_audit_events(date: str, branch_name: str | None = None, tenant_id: int = 1) -> None:
+async def clear_audit_events(date: str, branch_name: str | None = None, *, tenant_id: int) -> None:
     pool = get_pool()
     if branch_name:
         await pool.execute(
@@ -606,7 +605,7 @@ async def clear_audit_events(date: str, branch_name: str | None = None, tenant_i
 
 async def get_audit_events(
     date: str, city: str | None = None, branch_name: str | None = None,
-    tenant_id: int = 1,
+    *, tenant_id: int,
 ) -> list[dict]:
     pool = get_pool()
     query = "SELECT * FROM audit_events WHERE tenant_id = $1 AND date = $2"
@@ -668,13 +667,13 @@ async def seed_default_tenant() -> None:
     )
 
 
-async def get_tenant(tenant_id: int = 1) -> dict | None:
+async def get_tenant(tenant_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM tenants WHERE id = $1", tenant_id)
     return dict(row) if row else None
 
 
-async def get_tenant_modules(tenant_id: int = 1) -> list[str]:
+async def get_tenant_modules(tenant_id: int) -> list[str]:
     pool = get_pool()
     rows = await pool.fetch(
         "SELECT module FROM tenant_modules WHERE tenant_id = $1 AND enabled = true ORDER BY module",
@@ -683,7 +682,7 @@ async def get_tenant_modules(tenant_id: int = 1) -> list[str]:
     return [r["module"] for r in rows]
 
 
-async def get_subscription(tenant_id: int = 1) -> dict | None:
+async def get_subscription(tenant_id: int) -> dict | None:
     pool = get_pool()
     row = await pool.fetchrow("SELECT * FROM subscriptions WHERE tenant_id = $1", tenant_id)
     return dict(row) if row else None
@@ -701,7 +700,7 @@ async def get_active_tenants_with_tokens() -> list[dict]:
     return [{"id": r["id"], "name": r["name"], "slug": r["slug"], "bot_token": r["bot_token"]} for r in rows]
 
 
-async def get_all_tenant_users(tenant_id: int = 1) -> list[dict]:
+async def get_all_tenant_users(tenant_id: int) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """SELECT user_id, name, role, modules_json, city
@@ -720,7 +719,7 @@ async def get_all_tenant_users(tenant_id: int = 1) -> list[dict]:
     ]
 
 
-async def get_all_tenant_chats(tenant_id: int = 1) -> list[dict]:
+async def get_all_tenant_chats(tenant_id: int) -> list[dict]:
     pool = get_pool()
     rows = await pool.fetch(
         """SELECT chat_id, name, modules_json, city
@@ -741,7 +740,7 @@ async def get_all_tenant_chats(tenant_id: int = 1) -> list[dict]:
 async def upsert_tenant_user(
     user_id: int, name: str,
     modules: list[str] | None = None, city: str | None = None,
-    role: str = "viewer", tenant_id: int = 1,
+    role: str = "viewer", *, tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -758,7 +757,7 @@ async def upsert_tenant_user(
 async def upsert_tenant_chat(
     chat_id: int, name: str,
     modules: list[str] | None = None, city: str | None = None,
-    tenant_id: int = 1,
+    *, tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -772,7 +771,7 @@ async def upsert_tenant_chat(
     )
 
 
-async def delete_tenant_user(user_id: int, tenant_id: int = 1) -> None:
+async def delete_tenant_user(user_id: int, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         "UPDATE tenant_users SET is_active = false WHERE tenant_id = $1 AND user_id = $2",
@@ -780,7 +779,7 @@ async def delete_tenant_user(user_id: int, tenant_id: int = 1) -> None:
     )
 
 
-async def delete_tenant_chat(chat_id: int, tenant_id: int = 1) -> None:
+async def delete_tenant_chat(chat_id: int, tenant_id: int) -> None:
     pool = get_pool()
     await pool.execute(
         "UPDATE tenant_chats SET is_active = false WHERE tenant_id = $1 AND chat_id = $2",
@@ -814,7 +813,7 @@ async def get_module_chats_for_city(module: str, city: str, tenant_id: int | Non
     return result
 
 
-async def get_alert_chats_for_city(city: str, tenant_id: int = 1) -> list[int]:
+async def get_alert_chats_for_city(city: str, tenant_id: int) -> list[int]:
     return await get_module_chats_for_city("late_alerts", city, tenant_id)
 
 
@@ -848,7 +847,7 @@ async def get_tenant_available_modules(tenant_id: int) -> list[str] | None:
         return None
 
 
-async def get_access_config_from_db(tenant_id: int = 1) -> dict:
+async def get_access_config_from_db(tenant_id: int) -> dict:
     users = await get_all_tenant_users(tenant_id)
     chats = await get_all_tenant_chats(tenant_id)
     tenant_cities = await get_tenant_cities(tenant_id)
@@ -885,7 +884,7 @@ async def get_tenant_id_by_admin(user_id: int) -> int | None:
 _branches_cache: dict[int, list[dict]] = {}
 
 
-def get_branches(tenant_id: int = 1) -> list[dict]:
+def get_branches(tenant_id: int) -> list[dict]:
     """Sync — из in-memory cache. Заполняется при init_db."""
     return list(_branches_cache.get(tenant_id, []))
 
@@ -899,7 +898,7 @@ def get_all_branches() -> list[dict]:
     return result
 
 
-async def get_branches_from_db(tenant_id: int = 1) -> list[dict]:
+async def get_branches_from_db(tenant_id: int) -> list[dict]:
     """Async — прямой запрос к БД (для обновления кеша)."""
     pool = get_pool()
     rows = await pool.fetch(
@@ -1319,7 +1318,7 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
     return result
 
 
-async def get_live_today_stats(branch_name: str, date_iso: str, tenant_id: int = 1) -> dict | None:
+async def get_live_today_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict | None:
     """Базовая статистика за сегодня прямо из orders_raw (смена ещё не закрыта)."""
     pool = get_pool()
     row = await pool.fetchrow(
@@ -1343,7 +1342,7 @@ async def get_live_today_stats(branch_name: str, date_iso: str, tenant_id: int =
     return result
 
 
-async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenant_id: int = 1) -> dict | None:
+async def get_period_stats(branch_name: str, date_from: str, date_to: str, tenant_id: int) -> dict | None:
     """Агрегирует daily_stats за период [date_from, date_to] для одной точки."""
     import json as _json
     pool = get_pool()
@@ -1601,7 +1600,7 @@ async def get_exact_time_orders(
 # hourly_stats
 # =====================================================================
 
-async def upsert_hourly_stats(row: dict, tenant_id: int = 1) -> None:
+async def upsert_hourly_stats(row: dict, tenant_id: int) -> None:
     """UPSERT одной строки в hourly_stats."""
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -1648,7 +1647,7 @@ async def get_hourly_stats(
     branch_name: str,
     hour_from: str,
     hour_to: str,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> list[dict]:
     """Возвращает строки hourly_stats за период [hour_from, hour_to) для одной точки.
 
@@ -1692,7 +1691,7 @@ async def save_tbank_registry_log(
     mismatched: int,
     new_pending: int,
     missing_in_iiko: int,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -1710,7 +1709,7 @@ async def upsert_online_payment(
     order_number: str,
     order_date: str,
     iiko_amount: float,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -1733,7 +1732,7 @@ async def confirm_online_payment(
     tbank_confirmed_date: str,
     tbank_transaction_id: str,
     iiko_amount: float | None = None,
-    tenant_id: int = 1,
+    *, tenant_id: int,
 ) -> str:
     pool = get_pool()
     async with pool.acquire() as conn:
@@ -1783,7 +1782,7 @@ async def confirm_payout(
     order_number: str,
     payout_date: str,
     payout_amount: float,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> str:
     pool = get_pool()
     result = await pool.execute(
@@ -1799,7 +1798,7 @@ async def record_chargeback(
     order_number: str,
     chargeback_date: str,
     amount: float,
-    tenant_id: int = 1,
+    tenant_id: int,
 ) -> None:
     pool = get_pool()
     await pool.execute(
@@ -1809,7 +1808,7 @@ async def record_chargeback(
     )
 
 
-async def get_payout_delayed(days: int = 2, since_date: str | None = None, tenant_id: int = 1) -> list[dict]:
+async def get_payout_delayed(days: int = 2, since_date: str | None = None, *, tenant_id: int) -> list[dict]:
     pool = get_pool()
     conditions = [
         "tenant_id = $1",
@@ -1832,7 +1831,7 @@ async def get_payout_delayed(days: int = 2, since_date: str | None = None, tenan
 async def get_pending_payments(
     max_age_days: int | None = None,
     since_date: str | None = None,
-    tenant_id: int = 1,
+    *, tenant_id: int,
 ) -> list[dict]:
     pool = get_pool()
     conditions = ["tenant_id = $1", "status = 'pending'"]
@@ -1849,11 +1848,11 @@ async def get_pending_payments(
     return [dict(r) for r in rows]
 
 
-async def get_overdue_payments(days: int = 4, since_date: str | None = None, tenant_id: int = 1) -> list[dict]:
+async def get_overdue_payments(days: int = 4, since_date: str | None = None, *, tenant_id: int) -> list[dict]:
     return await get_pending_payments(max_age_days=days, since_date=since_date, tenant_id=tenant_id)
 
 
-async def get_tracking_summary(since_date: str | None = None, tenant_id: int = 1) -> dict[str, dict[str, dict]]:
+async def get_tracking_summary(since_date: str | None = None, *, tenant_id: int) -> dict[str, dict[str, dict]]:
     pool = get_pool()
     params: list = [tenant_id]
     where = "tenant_id = $1"
@@ -1903,7 +1902,7 @@ async def get_payment_changed_orders(branch_names: list[str], date_iso: str, ten
 # fot_daily
 # =====================================================================
 
-async def upsert_fot_daily_batch(rows: list[dict], tenant_id: int = 1) -> None:
+async def upsert_fot_daily_batch(rows: list[dict], tenant_id: int) -> None:
     """UPSERT записей ФОТ по точке+дате+категории."""
     if not rows:
         return
@@ -1929,7 +1928,7 @@ async def upsert_fot_daily_batch(rows: list[dict], tenant_id: int = 1) -> None:
 
 
 async def get_fot_daily(
-    branch_name: str, date_iso: str, tenant_id: int = 1
+    branch_name: str, date_iso: str, tenant_id: int
 ) -> dict | None:
     """Возвращает {category: fot_sum} для точки за день. None если нет данных."""
     pool = get_pool()
@@ -1945,7 +1944,7 @@ async def get_fot_daily(
 
 
 async def get_fot_period(
-    branch_names: list[str], date_from: str, date_to: str, tenant_id: int = 1
+    branch_names: list[str], date_from: str, date_to: str, tenant_id: int
 ) -> dict | None:
     """Суммарный ФОТ по категориям для списка точек за период. None если нет данных."""
     if not branch_names:
@@ -1993,7 +1992,7 @@ async def upsert_rates_cache(
 
 
 async def get_realtime_fot(
-    branch_name: str, tenant_id: int = 1
+    branch_name: str, tenant_id: int
 ) -> Optional[dict]:
     """Считает накопленный ФОТ поваров за сегодня — все смены (включая закрытые).
 

@@ -196,7 +196,7 @@ def _format_daily_summary(date_str: str, branches: list[tuple[str, float, int]])
 @track_job("daily_report")
 async def job_send_morning_report(utc_offset: int) -> None:
     """Утренний отчёт. Читает из daily_stats (заполнен пайплайном в 05:00), 0 OLAP-запросов."""
-    log_id = await log_job_start(f"morning_report_utc{utc_offset}")
+    log_id = await log_job_start(f"morning_report_utc{utc_offset}", tenant_id=1)
 
     tz = _branch_tz(utc_offset)
     yesterday = datetime.now(tz) - timedelta(days=1)
@@ -212,7 +212,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
         await log_job_finish(log_id, "ok", f"Нет точек для UTC+{utc_offset}")
         return
 
-    updates = await get_updates_for_date(date_iso)
+    updates = await get_updates_for_date(date_iso, tenant_id=1)
     updates_by_branch: dict[str, list[dict]] = {}
     for u in updates:
         updates_by_branch.setdefault(u["branch"], []).append(u)
@@ -296,7 +296,7 @@ async def job_send_morning_report(utc_offset: int) -> None:
             logger.error(f"Ошибка отправки утреннего отчёта [{name}]: {e}")
 
     try:
-        await clear_updates_for_date(date_iso)
+        await clear_updates_for_date(date_iso, tenant_id=1)
     except Exception as e:
         logger.warning(f"Не удалось очистить report_updates за {date_iso}: {e}")
 

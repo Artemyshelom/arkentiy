@@ -155,7 +155,7 @@ async def job_weekly_report(utc_offset: int) -> None:
     """
     from app.database_pg import get_all_branches, get_module_chats_for_city as _get_chats
 
-    log_id = await log_job_start(f"weekly_report_utc{utc_offset}")
+    log_id = await log_job_start(f"weekly_report_utc{utc_offset}", tenant_id=1)
 
     tz = _branch_tz(utc_offset)
     today = datetime.now(tz).date()

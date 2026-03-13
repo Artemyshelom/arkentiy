@@ -792,12 +792,12 @@ async def _seed_sessions_from_db(state):
         else:
             date_iso = now_local.date().isoformat()
         today_iso = now_local.date().isoformat()
-        shifts = await get_today_shifts(state.branch_name, date_iso)
+        shifts = await get_today_shifts(state.branch_name, date_iso, state.tenant_id)
         is_yesterday_fallback = (date_iso != today_iso)
         if not shifts:
             prev_date = (now_local - timedelta(days=1)).date().isoformat()
             if prev_date != date_iso:
-                shifts = await get_today_shifts(state.branch_name, prev_date)
+                shifts = await get_today_shifts(state.branch_name, prev_date, state.tenant_id)
                 is_yesterday_fallback = True
         if not shifts:
             return

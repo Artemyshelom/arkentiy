@@ -1087,7 +1087,7 @@ async def _handle_search(chat_id: int, query: str, city_filter: str | None = Non
     if len(rows) == 1:
         r = rows[0]
         phone = (r.get("client_phone") or "").strip()
-        cnt = await get_client_order_count(phone) if phone else None
+        cnt = await get_client_order_count(phone, tenant_id=tenant_id) if phone else None
         await _send(chat_id, await _format_order_card(r, client_count=cnt))
         return
 
@@ -2005,7 +2005,7 @@ async def _handle_pickup(chat_id: int, arg: str, city_filter=None) -> None:
     })
 
     results = []
-    for branch_name, state in _states.items():
+    for (tid, branch_name), state in _states.items():
         if branch_name not in branch_names_set:
             continue
         for num, d in list(state.deliveries.items()):
@@ -2377,8 +2377,8 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                 if perms.has("finance"):
                     await _answer_callback(cb_id)
                     from app.db import get_overdue_payments, get_pending_payments
-                    all_pending = await get_pending_payments(since_date=tbank_reconciliation.TRACKING_START_DATE)
-                    overdue = await get_overdue_payments(tbank_reconciliation.OVERDUE_DAYS, since_date=tbank_reconciliation.TRACKING_START_DATE)
+                    all_pending = await get_pending_payments(since_date=tbank_reconciliation.TRACKING_START_DATE, tenant_id=1)
+                    overdue = await get_overdue_payments(tbank_reconciliation.OVERDUE_DAYS, since_date=tbank_reconciliation.TRACKING_START_DATE, tenant_id=1)
 
                     if cb_data == "tbank:branches":
                         text, keyboard = tbank_reconciliation.build_branch_list(all_pending, overdue)
@@ -2484,7 +2484,7 @@ async def poll_analytics_bot(bot_token: str = "", tenant_id: int = 1) -> None:
                         if cached and row_idx < len(cached["rows"]):
                             r = cached["rows"][row_idx]
                             phone = (r.get("client_phone") or "").strip()
-                            cnt = await get_client_order_count(phone) if phone else None
+                            cnt = await get_client_order_count(phone, tenant_id=_ctx_tenant_id.get()) if phone else None
                             card_text = await _format_order_card(r, client_count=cnt)
                             back_label = cached.get("back_label", "← Назад")
                             back_kb = [[{"text": back_label, "callback_data": "srch:back"}]]

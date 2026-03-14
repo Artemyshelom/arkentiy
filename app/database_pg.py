@@ -1136,6 +1136,8 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
                 WHEN pay_breakdown LIKE '%SailPlay%'
                 THEN (pay_breakdown::jsonb->>'SailPlay Бонус')::numeric
             END), 0) AS raw_sailplay,
+            SUM(CASE WHEN is_self_service = false THEN 1 ELSE 0 END) AS raw_delivery_count,
+            SUM(CASE WHEN is_self_service = true  THEN 1 ELSE 0 END) AS raw_pickup_count,
             SUM(CASE WHEN is_late = true AND is_self_service = false 
                      AND COALESCE(payment_changed, false) = false THEN 1 ELSE 0 END)
                 AS late_delivery_count,
@@ -1163,17 +1165,23 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
         f"""SELECT
             AVG(CASE
                 WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                  AND opened_at IS NOT NULL AND opened_at != ''
                   AND sum >= 200
+                  AND COALESCE(NULLIF(service_print_time, ''), NULLIF(opened_at, '')) IS NOT NULL
                 THEN CASE
                     WHEN EXTRACT(EPOCH FROM (
                         TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(
+                            COALESCE(NULLIF(service_print_time, ''), opened_at),
+                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                          )
                     )) / 60
                          BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                         TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(
+                            COALESCE(NULLIF(service_print_time, ''), opened_at),
+                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                          )
                     )) / 60
                 END
             END) AS avg_cooking_min,
@@ -1609,10 +1617,10 @@ async def upsert_hourly_stats(row: dict, tenant_id: int) -> None:
                (tenant_id, branch_name, hour,
                 orders_count, revenue, avg_check,
                 avg_cook_time, avg_courier_wait, avg_delivery_time,
-                late_count, late_percent,
+                late_count, late_percent, completed_count,
                 cooks_on_shift, couriers_on_shift, orders_in_progress,
                 updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
                ON CONFLICT (tenant_id, branch_name, hour) DO UPDATE SET
                  orders_count=EXCLUDED.orders_count,
                  revenue=EXCLUDED.revenue,
@@ -1622,6 +1630,7 @@ async def upsert_hourly_stats(row: dict, tenant_id: int) -> None:
                  avg_delivery_time=EXCLUDED.avg_delivery_time,
                  late_count=EXCLUDED.late_count,
                  late_percent=EXCLUDED.late_percent,
+                 completed_count=EXCLUDED.completed_count,
                  cooks_on_shift=EXCLUDED.cooks_on_shift,
                  couriers_on_shift=EXCLUDED.couriers_on_shift,
                  orders_in_progress=EXCLUDED.orders_in_progress,
@@ -1637,6 +1646,7 @@ async def upsert_hourly_stats(row: dict, tenant_id: int) -> None:
             row.get("avg_delivery_time"),
             row.get("late_count", 0),
             row.get("late_percent", 0.0),
+            row.get("completed_count", 0),
             row.get("cooks_on_shift", 0),
             row.get("couriers_on_shift", 0),
             row.get("orders_in_progress", 0),
@@ -1657,10 +1667,15 @@ async def get_hourly_stats(
     from datetime import datetime as _dt
     dt_from = _dt.fromisoformat(hour_from) if isinstance(hour_from, str) else hour_from
     dt_to   = _dt.fromisoformat(hour_to)   if isinstance(hour_to,   str) else hour_to
+    # Колонка hour — TIMESTAMP (без таймзоны); aware datetime вызовет ошибку
+    if dt_from.tzinfo:
+        dt_from = dt_from.replace(tzinfo=None)
+    if dt_to.tzinfo:
+        dt_to = dt_to.replace(tzinfo=None)
     rows = await pool.fetch(
         """SELECT hour, orders_count, revenue, avg_check,
                   avg_cook_time, avg_courier_wait, avg_delivery_time,
-                  late_count, late_percent,
+                  late_count, late_percent, completed_count,
                   cooks_on_shift, couriers_on_shift, orders_in_progress
            FROM hourly_stats
            WHERE tenant_id = $1
@@ -2016,7 +2031,7 @@ async def get_realtime_fot(
              AND s.branch_name = $2
              AND s.role_class = 'cook'
              AND s.clock_in IS NOT NULL
-             AND DATE(s.clock_in::timestamptz AT TIME ZONE 'Asia/Krasnoyarsk') = CURRENT_DATE AT TIME ZONE 'Asia/Krasnoyarsk'""",
+             AND DATE(s.clock_in::timestamptz AT TIME ZONE 'Asia/Krasnoyarsk') = (NOW() AT TIME ZONE 'Asia/Krasnoyarsk')::date""",
         tenant_id, branch_name,
     )
 

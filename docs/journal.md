@@ -9,6 +9,28 @@
 
 ---
 
+## 2026-03-14: ✅ Fix get_realtime_fot() — ФОТ не показывался в /статус
+
+**Сессия:** Однострочный фикс SQL (5 мин).
+
+### Баг
+Вчерашний фикс "включить закрытые смены" добавил фильтр по дате сегодня:
+```sql
+AND DATE(...) = CURRENT_DATE AT TIME ZONE 'Asia/Krasnoyarsk'
+```
+Правая часть `CURRENT_DATE AT TIME ZONE 'Asia/Krasnoyarsk'` возвращает **timestamptz** (полночь UTC в красноярском времени = вчерашний вечер UTC: `2026-03-13 17:00:00+00`), а не `date`. PostgreSQL при сравнении `date = timestamptz` кастит дату в полночь UTC → получаем `00:00:00+00 ≠ 17:00:00+00` → WHERE никогда не срабатывает → 0 строк → `None`.
+
+### Фикс
+```sql
+AND DATE(...) = (NOW() AT TIME ZONE 'Asia/Krasnoyarsk')::date   -- тип date ✓
+```
+`(NOW() AT TIME ZONE 'Asia/Krasnoyarsk')::date` возвращает именно тип `date` (сегодня в Красноярске). Оба операнда `date` — сравнение корректное.
+
+**Файл:** `app/database_pg.py`, функция `get_realtime_fot()`.
+**Коммит:** `fix: get_realtime_fot — CURRENT_DATE AT TIME ZONE возвращал timestamptz, не date`
+
+---
+
 ## 2026-03-13: ✅ UX аудита — читаемость, честность, новая страница скидка+бонусы
 
 **Сессия:** Рефакторинг интерфейса аудита (3 часа).

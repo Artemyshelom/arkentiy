@@ -43,10 +43,12 @@ class HourlyStatsBackfiller:
         tenant_id: int | None,
         date_from: date,
         date_to: date,
+        full_recalc: bool = False,
     ):
         self.tenant_id = tenant_id  # None = all tenants
         self.date_from = date_from
         self.date_to = date_to
+        self.full_recalc = full_recalc  # True — игнорировать прогресс-файлы, пересчитать всё
         self.pool: asyncpg.Pool | None = None
         self.stats = {"ok": 0, "error": 0}
 
@@ -101,18 +103,34 @@ class HourlyStatsBackfiller:
             """SELECT
                 COUNT(*)                                            AS orders_count,
                 COALESCE(SUM(sum), 0)                              AS revenue,
-                SUM(CASE WHEN is_late = true THEN 1 ELSE 0 END)   AS late_count,
+                COUNT(*) FILTER (
+                    WHERE actual_time IS NOT NULL AND actual_time != ''
+                )                                                  AS completed_count,
+                SUM(CASE
+                    WHEN is_late = true
+                         AND actual_time IS NOT NULL AND actual_time != ''
+                    THEN 1 ELSE 0
+                END)                                               AS late_count,
 
                 AVG(CASE
                     WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                         AND opened_at  IS NOT NULL AND opened_at  != ''
+                         AND COALESCE(
+                             NULLIF(service_print_time, ''),
+                             REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                         ) IS NOT NULL
                          AND EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60 BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60
                 END)                                               AS avg_cook_time,
 
@@ -145,9 +163,9 @@ class HourlyStatsBackfiller:
             FROM orders_raw
             WHERE tenant_id = $1
               AND branch_name = $2
-              AND actual_time IS NOT NULL AND actual_time != ''
-              AND REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp >= $3
-              AND REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp <  $4
+              AND opened_at IS NOT NULL AND opened_at != ''
+              AND REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp >= $3
+              AND REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp <  $4
               AND status = ANY($5)
             """,
             tenant_id, branch_name,
@@ -189,6 +207,7 @@ class HourlyStatsBackfiller:
         )
 
         orders_count = int(order_row["orders_count"] or 0)
+        completed_count = int(order_row["completed_count"] or 0)
         revenue = float(order_row["revenue"] or 0)
         late_count = int(order_row["late_count"] or 0)
 
@@ -204,10 +223,10 @@ class HourlyStatsBackfiller:
                (tenant_id, branch_name, hour,
                 orders_count, revenue, avg_check,
                 avg_cook_time, avg_courier_wait, avg_delivery_time,
-                late_count, late_percent,
+                late_count, late_percent, completed_count,
                 cooks_on_shift, couriers_on_shift, orders_in_progress,
                 updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
                ON CONFLICT (tenant_id, branch_name, hour) DO UPDATE SET
                  orders_count=EXCLUDED.orders_count,
                  revenue=EXCLUDED.revenue,
@@ -217,18 +236,20 @@ class HourlyStatsBackfiller:
                  avg_delivery_time=EXCLUDED.avg_delivery_time,
                  late_count=EXCLUDED.late_count,
                  late_percent=EXCLUDED.late_percent,
+                 completed_count=EXCLUDED.completed_count,
                  cooks_on_shift=EXCLUDED.cooks_on_shift,
                  couriers_on_shift=EXCLUDED.couriers_on_shift,
                  orders_in_progress=EXCLUDED.orders_in_progress,
                  updated_at=now()""",
-            tenant_id, branch_name, hour_start,
+            tenant_id, branch_name, hs,  # hs — naive datetime для TIMESTAMP-колонки
             orders_count, revenue,
             round(revenue / orders_count, 2) if orders_count else 0.0,
             _f(order_row["avg_cook_time"]),
             _f(order_row["avg_courier_wait"]),
             _f(order_row["avg_delivery_time"]),
             late_count,
-            round(late_count / orders_count * 100, 1) if orders_count else 0.0,
+            round(late_count / completed_count * 100, 1) if completed_count else 0.0,
+            completed_count,
             cooks, couriers,
             int(in_progress or 0),
         )
@@ -288,7 +309,7 @@ class HourlyStatsBackfiller:
 
         while current <= end_date:
             date_str = current.isoformat()
-            if date_str in done:
+            if date_str in done and not self.full_recalc:
                 current += timedelta(days=1)
                 continue
 
@@ -332,6 +353,7 @@ async def _main(args: argparse.Namespace) -> None:
         tenant_id=tenant_id,
         date_from=date_from,
         date_to=date_to,
+        full_recalc=args.full_recalc,
     )
     await backfiller.init_db()
     try:
@@ -347,6 +369,12 @@ if __name__ == "__main__":
     parser.add_argument("--tenant-id", type=int, default=None, help="tenant_id (по умолчанию — все)")
     parser.add_argument("--date-from", default="2025-12-01", help="YYYY-MM-DD (включительно)")
     parser.add_argument("--date-to", default=_default_end, help="YYYY-MM-DD (включительно)")
+    parser.add_argument(
+        "--full-recalc",
+        action="store_true",
+        default=False,
+        help="Игнорировать прогресс-файлы и пересчитать весь указанный период заново",
+    )
     _args = parser.parse_args()
 
     asyncio.run(_main(_args))

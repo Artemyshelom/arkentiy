@@ -1,7 +1,7 @@
 """
 Отчёт по текущему состоянию точки через iiko Web BO API.
 
-Метрики (выручка, чеки, COGS, скидки): OLAP v2 через app/clients/iiko_bo_olap_v2.py.
+Метрики (выручка, чеки, COGS, скидки, тайминги): OLAP v2 через app/clients/olap_queries.py.
 Real-time данные (заказы, смены): app/clients/iiko_bo_events.py (event sourcing).
 
 Точки и dept IDs — из /app/secrets/branches.json.
@@ -10,16 +10,16 @@ Real-time данные (заказы, смены): app/clients/iiko_bo_events.py
 import asyncio
 import html
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import httpx
 
 from app.clients.iiko_auth import get_bo_token
 from app.clients.iiko_bo_events import get_branch_rt
-from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats
+from app.clients.olap_queries import get_branch_olap_stats
 from app.config import get_settings
-from app.database_pg import get_realtime_fot
+from app.database_pg import get_daily_stats, get_realtime_fot
 from app.db import aggregate_orders_today
 from app.utils.timezone import branch_tz, now_local
 
@@ -74,8 +74,15 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
     если передан, HTTP-запрос к iiko BO не делается (оптимизация для пакетных вызовов).
     """
     tz = branch_tz(branch)
-    today = now_local(tz)
-    date_iso = today.strftime("%Y-%m-%d")
+    local_now = now_local(tz)
+    # Ночной режим: до 06:00 местного времени показываем данные за вчера.
+    # Граница 06:00 согласована с _seed_sessions_from_db (iiko_bo_events.py).
+    _NIGHT_GRACE_HOUR = 6
+    _is_night_mode = local_now.hour < _NIGHT_GRACE_HOUR
+    if _is_night_mode:
+        date_iso = (local_now.date() - timedelta(days=1)).isoformat()
+    else:
+        date_iso = local_now.strftime("%Y-%m-%d")
 
     revenue = None
     check_count = None
@@ -91,7 +98,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
         else:
             # Fallback: одиночный вызов (например при refresh одной точки)
             all_branches = get_available_branches()
-            olap = await get_branch_olap_stats(today, branches=all_branches)
+            olap = await get_branch_olap_stats(local_now, branches=all_branches)
             branch_olap = olap.get(branch["name"], {})
         revenue = branch_olap.get("revenue_net")
         if revenue is not None:
@@ -104,6 +111,20 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
             avg_check = round(revenue / check_count)
     except Exception as e:
         logger.error(f"Ошибка OLAP v2 [{branch['name']}]: {e}")
+
+    # В ночном режиме OLAP не возвращает данных за вчера — берём выручку и чеки из daily_stats.
+    if _is_night_mode:
+        try:
+            ds = await get_daily_stats(branch["name"], date_iso, branch.get("tenant_id", 1))
+            if ds:
+                if ds.get("revenue") is not None:
+                    revenue = round(ds["revenue"])
+                if ds.get("orders_count") is not None:
+                    check_count = ds["orders_count"]
+                if revenue and check_count:
+                    avg_check = round(revenue / check_count)
+        except Exception as e:
+            logger.warning(f"Ночной режим: ошибка daily_stats [{branch['name']}]: {e}")
 
     rt_data = get_branch_rt(branch["name"], branch.get("tenant_id", 1))
 
@@ -175,9 +196,9 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
         "couriers_on_shift": rt_data["couriers_on_shift"] if rt_data else None,
         "cooks_on_shift": rt_data["cooks_on_shift"] if rt_data else None,
         "delays": rt_data["delays"] if rt_data else None,
-        "avg_cooking_min": rt_data["avg_cooking_min"] if rt_data else None,
-        "avg_wait_min": rt_data["avg_wait_min"] if rt_data else None,
-        "avg_delivery_min": rt_data["avg_delivery_min"] if rt_data else None,
+        "avg_cooking_min": rt_data["avg_cooking_min"] if rt_data else branch_olap.get("avg_cooking_min"),
+        "avg_wait_min": rt_data["avg_wait_min"] if rt_data else branch_olap.get("avg_wait_min"),
+        "avg_delivery_min": rt_data["avg_delivery_min"] if rt_data else branch_olap.get("avg_delivery_min"),
         "cash_shift_open": cash_shift_open,
         "db_fallback": db_fallback,
         "rt_fot": rt_fot,
@@ -239,6 +260,20 @@ def format_branch_status(data: dict) -> str:
     if cogs is not None:
         lines.append("")
         lines.append(f"📦 Себестоимость: {cogs:.1f}%")
+
+    # Среднее время готовки/ожидания/доставки за сегодня (из OLAP или Events API)
+    olap_cook = data.get("avg_cooking_min")
+    olap_wait = data.get("avg_wait_min")
+    olap_deliv = data.get("avg_delivery_min")
+    if olap_cook or olap_wait or olap_deliv:
+        parts = []
+        if olap_cook:
+            parts.append(f"готовка {olap_cook} мин")
+        if olap_wait:
+            parts.append(f"ожидание {olap_wait} мин")
+        if olap_deliv:
+            parts.append(f"доставка {olap_deliv} мин")
+        lines.append(f"📈 Сегодня: {' · '.join(parts)}")
 
     has_rt = data.get("active_orders") is not None
     db_fallback = data.get("db_fallback", False)

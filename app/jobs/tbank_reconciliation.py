@@ -254,7 +254,7 @@ async def process_registry(
     3. Регистрирует/подтверждает оплаты в трекере
     4. Формирует отчёт
     """
-    from app.clients.iiko_bo_olap_v2 import get_online_orders
+    from app.clients.olap_queries import get_online_orders
     from app.db import (
         confirm_online_payment,
         get_overdue_payments,

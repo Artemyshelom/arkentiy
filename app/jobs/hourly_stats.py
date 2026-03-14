@@ -31,26 +31,44 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
 
     async with pool.acquire() as conn:
         # ------------------------------------------------------------------
-        # Заказы, завершённые в этот час (actual_time попадает в [hour_start, hour_end))
-        # Все финальные статусы кроме Отменена, без лишних фильтров — цель: нагрузка
+        # Заказы, принятые в этот час (opened_at попадает в [hour_start, hour_end))
+        # orders_count = все принятые (final status), completed_count = с actual_time
         # ------------------------------------------------------------------
         order_row = await conn.fetchrow(
             """SELECT
                 COUNT(*)                                            AS orders_count,
                 COALESCE(SUM(sum), 0)                              AS revenue,
-                SUM(CASE WHEN is_late = true THEN 1 ELSE 0 END)   AS late_count,
+                COUNT(*) FILTER (
+                    WHERE actual_time IS NOT NULL AND actual_time != ''
+                )                                                  AS completed_count,
+                SUM(CASE
+                    WHEN is_late = true
+                         AND actual_time IS NOT NULL AND actual_time != ''
+                    THEN 1 ELSE 0
+                END)                                               AS late_count,
 
                 -- Тайминги: диапазон 1-120 мин защищает от мусора
+                -- avg_cook_time: от печати сервис-чека до готовности (реальный старт готовки).
+                -- Фолбэк на opened_at если service_print_time отсутствует.
                 AVG(CASE
                     WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                         AND opened_at  IS NOT NULL AND opened_at  != ''
+                         AND COALESCE(
+                             NULLIF(service_print_time, ''),
+                             REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                         ) IS NOT NULL
                          AND EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60 BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60
                 END)                                               AS avg_cook_time,
 
@@ -83,9 +101,9 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
             FROM orders_raw
             WHERE tenant_id = $1
               AND branch_name = $2
-              AND actual_time IS NOT NULL AND actual_time != ''
-              AND REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp >= $3
-              AND REPLACE(SUBSTR(actual_time, 1, 19), 'T', ' ')::timestamp <  $4
+              AND opened_at IS NOT NULL AND opened_at != ''
+              AND REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp >= $3
+              AND REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp <  $4
               AND status = ANY($5)
             """,
             tenant_id, branch_name,
@@ -133,6 +151,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
         )
 
     orders_count = int(order_row["orders_count"] or 0)
+    completed_count = int(order_row["completed_count"] or 0)
     revenue = float(order_row["revenue"] or 0)
     late_count = int(order_row["late_count"] or 0)
 
@@ -143,8 +162,9 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
     await upsert_hourly_stats(
         {
             "branch_name": branch_name,
-            "hour": hour_start,
+            "hour": hour_start.replace(tzinfo=None),  # naive — колонка TIMESTAMP
             "orders_count": orders_count,
+            "completed_count": completed_count,
             "revenue": revenue,
             "avg_check": round(revenue / orders_count, 2) if orders_count else 0.0,
             "avg_cook_time": (
@@ -160,7 +180,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
                 if order_row["avg_delivery_time"] is not None else None
             ),
             "late_count": late_count,
-            "late_percent": round(late_count / orders_count * 100, 1) if orders_count else 0.0,
+            "late_percent": round(late_count / completed_count * 100, 1) if completed_count else 0.0,
             "cooks_on_shift": cooks,
             "couriers_on_shift": couriers,
             "orders_in_progress": int(in_progress or 0),

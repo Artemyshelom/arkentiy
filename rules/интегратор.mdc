@@ -26,10 +26,27 @@ alwaysApply: false
 
 > Подробно: `docs/reference/git_workflow.md`
 
-- История git = источник истины. **Все правки → в git**
-- Фича: локально → commit → push → VPS: `git pull && docker compose up -d --build`
-- Баг на проде: fix на VPS → commit → push → локально: `git pull`
-- **Не оставлять незакоммиченные изменения на VPS**
+### Ветки (обязательно для больших задач)
+
+- **main = прод.** В main напрямую — только мелкие хотфиксы (1-2 файла)
+- **Большие задачи** (рефакторинг, новая фича, несколько файлов) → отдельная ветка
+- Названия: `fix/...`, `feature/...`, `refactor/...`
+- Одна задача = одна ветка. Дофиксы той же задачи — в ту же ветку
+
+### Порядок работы
+
+1. `git checkout main && git pull` — убедиться что main актуален
+2. `git checkout -b fix/my-fix` — создать ветку
+3. Работать, коммитить, пушить в ветку
+4. Готово → `git checkout main && git pull && git merge fix/my-fix && git push`
+5. Деплой: VPS `git pull && docker compose restart`
+
+### Правила
+
+- **Не редактировать файлы напрямую на VPS** — все правки через git
+- **Не оставлять незакоммиченные изменения на VPS** (`git status` = чисто)
+- **Перед мержем** всегда `git pull` в main
+- История git = источник истины
 
 ---
 
@@ -60,7 +77,10 @@ alwaysApply: false
 ### Фаза 3: ДЕПЛОЙ
 > Полный протокол: `rules/integrator/deploy.md`
 
-Минимум: разведка → бэкап → scp дельту → `build --no-cache && up -d` → healthy? → логи
+1. Смержить ветку в main → push
+2. VPS: `git pull && docker compose restart`
+3. Build (`docker compose build --no-cache && up -d`) — только если менял `requirements.txt` или `Dockerfile`
+4. Проверить `docker compose ps` (running) и логи (нет ERROR)
 
 ### Фаза 4: ПОСЛЕ ЗАДАЧИ
 - `docs/journal.md` — что сделано
@@ -149,6 +169,7 @@ app/
 
 > Подробные команды и bash-примеры: `rules/integrator/lessons.md` (секция «Безопасность»)
 
+- [ ] **Ветка:** `git branch` → ты на правильной ветке (не main для больших задач)
 - [ ] **Импорты:** `rg "from app import access" app/` → пусто
 - [ ] **Дубликаты:** `find app -name "access_manager.py"` → только `services/`
 - [ ] **Секреты:** `git diff HEAD~1 | grep -i "token\|password\|secret"` → пусто

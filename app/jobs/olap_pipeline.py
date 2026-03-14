@@ -413,9 +413,18 @@ async def _upsert_daily_stats_from_aggregate(
             rev = float(stats.get("revenue_net") or agg.get("raw_revenue") or 0.0)
             if not stats.get("revenue_net") and rev:
                 logger.warning(f"[pipeline] revenue fallback orders_raw: {name} {date_iso} → {rev}")
+            # orders_count + revenue: из OLAP SALES (все заказы: зал + доставка + самовывоз)
+            # delivery_count, pickup_count — из orders_raw (DELIVERIES API, там есть is_self_service)
             chk = int(stats.get("check_count") or agg.get("raw_orders_count") or 0)
-            if not stats.get("check_count") and chk:
-                logger.warning(f"[pipeline] check_count fallback orders_raw: {name} {date_iso} → {chk}")
+            raw_delivery = int(agg.get("raw_delivery_count") or 0)
+            raw_pickup = int(agg.get("raw_pickup_count") or 0)
+            raw_total = int(agg.get("raw_orders_count") or 0)
+            if chk and raw_total and chk != raw_total:
+                logger.info(
+                    f"[pipeline] orders_count заль/доставка: "
+                    f"{name} {date_iso} OLAP_SALES={chk} orders_raw={raw_total} "
+                    f"(разница {chk - raw_total} = зальные/кассовые)"
+                )
             sailplay_val = float(stats.get("sailplay") or agg.get("raw_sailplay") or 0.0)
             if not stats.get("sailplay") and sailplay_val:
                 logger.warning(f"[pipeline] sailplay fallback orders_raw: {name} {date_iso} → {sailplay_val}")
@@ -438,8 +447,8 @@ async def _upsert_daily_stats_from_aggregate(
                 "sailplay":       sailplay_val,
                 "discount_sum":   stats.get("discount_sum"),
                 "discount_types": discount_types_json,
-                "delivery_count": chk - (stats.get("pickup_count") or 0),
-                "pickup_count":   stats.get("pickup_count") or 0,
+                "delivery_count": raw_delivery,
+                "pickup_count":   raw_pickup,
                 "cash":           stats.get("cash") or 0.0,
                 "noncash":        stats.get("noncash") or 0.0,
                 "late_count":     late_d,
@@ -517,6 +526,7 @@ async def job_olap_pipeline(tenant_id: int = 1) -> None:
     )
 
     # ─── Шаг A: order detail → orders_raw ────────────────────────────────
+    enriched: dict[tuple, dict] = {}
     try:
         rows_a = await fetch_order_detail(date_from, today_iso, branches)
         enriched = _aggregate_order_rows(rows_a, branch_names_set)
@@ -536,16 +546,69 @@ async def job_olap_pipeline(tenant_id: int = 1) -> None:
         logger.error(f"[olap_pipeline] Шаг B (dish detail): {e}", exc_info=True)
         updated_b = 0
 
-    # ─── Шаг C: branch aggregate → daily_stats ───────────────────────────
+    # ─── Агрегация скидок из Step A (замена отдельного C3 DELIVERIES запроса) ─
+    # Query A уже содержит OrderDiscount.Type + DiscountSum per-order.
+    # Группируем по (branch, date) → {discount_type: sum}.
+    discount_by_date_branch: dict[str, dict[str, list[dict]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for (branch, num), data in enriched.items():
+        disc_type = (data.get("discount_type") or "").strip()
+        disc_sum = data.get("discount_sum") or 0
+        if not disc_type or disc_sum <= 0:
+            continue
+        # Извлекаем дату из opened_at
+        opened = data.get("opened_at") or ""
+        if opened and "T" in opened:
+            order_date = opened[:10]
+        else:
+            continue
+        for dt in disc_type.split("; "):
+            dt = dt.strip()
+            if dt:
+                discount_by_date_branch[order_date][branch].append(
+                    {"type": dt, "sum": disc_sum}
+                )
+
+    # ─── Шаг C: branch aggregate → daily_stats (с батчингом по датам) ────
     saved_c = 0
     try:
-        for date_iso in dates_range:
-            next_day = (datetime.strptime(date_iso, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
-            olap_stats = await fetch_branch_aggregate(date_iso, next_day, branches)
-            saved = await _upsert_daily_stats_from_aggregate(
+        next_day_from_last = (datetime.strptime(yesterday_iso, "%Y-%m-%d") + timedelta(days=1)).strftime("%Y-%m-%d")
+        use_date_batching = len(dates_range) > 1
+
+        if use_date_batching:
+            # Один вызов на весь период с group_by_date=True (вместо N вызовов)
+            olap_by_date = await fetch_branch_aggregate(
+                date_from, next_day_from_last, branches,
+                skip_discount_query=True,
+                group_by_date=True,
+            )
+            for date_iso in dates_range:
+                olap_stats = olap_by_date.get(date_iso, {})
+                # Подставляем скидки из Step A
+                for dept, dt_list in discount_by_date_branch.get(date_iso, {}).items():
+                    if dept in olap_stats:
+                        olap_stats[dept]["discount_types"] = dt_list
+                    elif dt_list:
+                        olap_stats[dept] = {"discount_types": dt_list}
+                saved = await _upsert_daily_stats_from_aggregate(
+                    olap_stats, branches, [date_iso], tenant_id
+                )
+                saved_c += saved
+        else:
+            # Один день — без group_by_date (обычный режим, но с skip_discount_query)
+            date_iso = dates_range[0]
+            ext_discounts = {}
+            for dept, dt_list in discount_by_date_branch.get(date_iso, {}).items():
+                ext_discounts[dept] = dt_list
+            olap_stats = await fetch_branch_aggregate(
+                date_iso, next_day_from_last, branches,
+                skip_discount_query=True,
+                external_discount_types=ext_discounts if ext_discounts else None,
+            )
+            saved_c = await _upsert_daily_stats_from_aggregate(
                 olap_stats, branches, [date_iso], tenant_id
             )
-            saved_c += saved
         logger.info(f"[olap_pipeline] C: сохранено daily_stats={saved_c} строк по {len(dates_range)} дням")
     except Exception as e:
         logger.error(f"[olap_pipeline] Шаг C (daily_stats): {e}", exc_info=True)

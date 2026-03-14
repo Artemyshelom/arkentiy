@@ -102,6 +102,7 @@ class Settings(BaseSettings):
     # Приложение
     log_level: str = "INFO"
     database_url: str = ""  # DATABASE_URL env var (postgresql://...)
+    olap_max_concurrent: int = 10  # макс. параллельных OLAP-запросов к iiko
 
     @model_validator(mode="after")
     def validate_critical_secrets(self) -> "Settings":

@@ -591,7 +591,7 @@ async def reconcile_acquiring(
     date_from / date_to в формате DD.MM.YYYY (из 1С выписки).
     Возвращает HTML-строку для Telegram или None если нет данных.
     """
-    from app.clients.iiko_bo_olap_v2 import get_payment_breakdown
+    from app.clients.olap_queries import get_payment_breakdown
 
     iso_from = _dd_mm_yyyy_to_iso(date_from)
     iso_to_raw = _dd_mm_yyyy_to_iso(date_to)

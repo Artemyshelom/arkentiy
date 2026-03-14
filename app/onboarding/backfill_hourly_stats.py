@@ -114,14 +114,23 @@ class HourlyStatsBackfiller:
 
                 AVG(CASE
                     WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                         AND opened_at  IS NOT NULL AND opened_at  != ''
+                         AND COALESCE(
+                             NULLIF(service_print_time, ''),
+                             REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                         ) IS NOT NULL
                          AND EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60 BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60
                 END)                                               AS avg_cook_time,
 

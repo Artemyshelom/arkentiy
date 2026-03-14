@@ -1164,17 +1164,23 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
         f"""SELECT
             AVG(CASE
                 WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                  AND opened_at IS NOT NULL AND opened_at != ''
                   AND sum >= 200
+                  AND COALESCE(NULLIF(service_print_time, ''), NULLIF(opened_at, '')) IS NOT NULL
                 THEN CASE
                     WHEN EXTRACT(EPOCH FROM (
                         TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(
+                            COALESCE(NULLIF(service_print_time, ''), opened_at),
+                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                          )
                     )) / 60
                          BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                         TO_TIMESTAMP(cooked_time, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
-                        - TO_TIMESTAMP(opened_at, 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+                        - TO_TIMESTAMP(
+                            COALESCE(NULLIF(service_print_time, ''), opened_at),
+                            'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'
+                          )
                     )) / 60
                 END
             END) AS avg_cooking_min,

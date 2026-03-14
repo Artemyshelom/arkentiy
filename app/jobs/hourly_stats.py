@@ -48,16 +48,27 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
                 END)                                               AS late_count,
 
                 -- Тайминги: диапазон 1-120 мин защищает от мусора
+                -- avg_cook_time: от печати сервис-чека до готовности (реальный старт готовки).
+                -- Фолбэк на opened_at если service_print_time отсутствует.
                 AVG(CASE
                     WHEN cooked_time IS NOT NULL AND cooked_time != ''
-                         AND opened_at  IS NOT NULL AND opened_at  != ''
+                         AND COALESCE(
+                             NULLIF(service_print_time, ''),
+                             REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                         ) IS NOT NULL
                          AND EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60 BETWEEN 1 AND 120
                     THEN EXTRACT(EPOCH FROM (
                                  cooked_time::timestamp
-                                 - REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')::timestamp
+                                 - COALESCE(
+                                     NULLIF(service_print_time, ''),
+                                     REPLACE(SUBSTR(opened_at, 1, 19), 'T', ' ')
+                                   )::timestamp
                              )) / 60
                 END)                                               AS avg_cook_time,
 

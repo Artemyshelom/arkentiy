@@ -49,7 +49,7 @@ from app.jobs.iiko_status_report import (
     get_available_branches,
     get_branch_status,
 )
-from app.clients.iiko_bo_olap_v2 import get_branch_olap_stats as _get_olap_stats, get_discount_breakdown as _get_discount_breakdown
+from app.clients.olap_queries import get_branch_olap_stats as _get_olap_stats, get_discount_breakdown as _get_discount_breakdown
 from app.utils.timezone import branch_tz as _branch_tz, now_local as _now_local
 from app.jobs.late_alerts import (
     ACTIVE_DELIVERY_STATUSES,

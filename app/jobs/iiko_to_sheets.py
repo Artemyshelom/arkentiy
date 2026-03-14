@@ -24,7 +24,7 @@ from app.clients.google_sheets import (
     read_range,
     write_range,
 )
-from app.clients.iiko_bo_olap_v2 import get_all_branches_stats
+from app.clients.olap_queries import get_all_branches_stats
 from app.config import get_settings
 from app.db import (
     get_branches,

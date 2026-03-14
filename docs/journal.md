@@ -9,6 +9,50 @@
 
 ---
 
+## 2026-03-14: ✅ Деплой boris_api_regression_audit — Мультитенантность + исправления на prod
+
+**Сессия:** Консолидация рефакторинга мультитенантности (refactor/multitenant-audit → main), деплой на VPS, верификация. Всё прошло без ошибок.
+
+### План имплементации
+
+**Этап 1 — 2 критичных бага в _states:**
+- `app/routers/stats.py:160` — `/api/stats?metric=realtime` использовал `_states.get(name)` вместо `_states.get((tenant_id, name))` → всегда 0 заказов
+- `app/jobs/arkentiy.py:2008` — цикл по _states не распаковывал tuple → /опоздания с самовывозом не детектировали поздние пикапы
+- **Фикс:** Изменены ключи с `str` на `tuple[int, str]` везде
+
+**Этап 2 — 60 функций database_pg.py:**
+- **Проблема:** все имели `tenant_id: int = 1` дефолт → любая забытая передача параметра молча работала с tenant_id=1 вместо явного фейла
+- **Решение:** Убрать все =1 дефолты, сделать обязательными; 7 функций получили `*` для keyword-only
+- **Результат:** ошибочный вызов теперь падает с TypeError вместо скрытого бага
+
+**Этап 3 — 12 call sites:**
+- `app/clients/iiko.py`, `daily_report.py`, `weekly_report.py`, `competitor_*.py`, `tbank_*.py`, `arkentiy.py`, `main.py`, `iiko_bo_events.py`
+- Все 12 файлов обновлены: явно передана либо `tenant_id=1` (для tenant_1-only функций типа token auth), либо `tenant_id=state.tenant_id` (для мультитенант контекстов)
+
+**Этап 4 — ctx_tenant_id hardening:**
+- `app/ctx.py` — изменён дефолт с `default=1` на `default=None`
+- **Почему:** Любая забытая `ctx_tenant_id.set()` теперь вызовет явный `AttributeError: 'NoneType' object has no attribute 'get'` вместо молчаливого падения на tenant=1
+
+**Этап 5 — Другие фиксы:**
+- `app/jobs/audit.py:338` — исправлена ошибка импорта `from app.ctx import ctx_tenant_id as _ctx_tenant_id`
+
+### Валидация
+- ✅ Python AST check: 0 syntax errors
+- ✅ Risk assessment: все 14 оставшихся `ctx_tenant_id.get()` защищены try/except или контекстными гарантиями
+- ✅ Git history: 15 файлов, 107 insertions/105 deletions, все изменения на месте
+
+### Деплой на VPS
+- Ветка refactor/multitenant-audit смержена в main
+- `git pull` на arkentiy: fast-forward merge
+- `docker compose restart`: оба контейнера (postgres + app) успешно перезагружены
+- **Проверка логов:** no errors/exceptions found. iiko Events API загружает смены, APScheduler выполняет jobs, Telegram getUpdates работает, health check 200 OK.
+
+**Коммиты:**
+- `2e64082` refactor: мультитенантность - явная передача tenant_id во всех вызовах
+- `b4afd46` Merge remote-tracking branch 'origin/main' into refactor/multitenant-audit
+
+---
+
 ## 2026-03-14: ✅ Fix get_realtime_fot() — ФОТ не показывался в /статус
 
 **Сессия:** Однострочный фикс SQL (5 мин).

@@ -413,9 +413,18 @@ async def _upsert_daily_stats_from_aggregate(
             rev = float(stats.get("revenue_net") or agg.get("raw_revenue") or 0.0)
             if not stats.get("revenue_net") and rev:
                 logger.warning(f"[pipeline] revenue fallback orders_raw: {name} {date_iso} → {rev}")
+            # orders_count + revenue: из OLAP SALES (все заказы: зал + доставка + самовывоз)
+            # delivery_count, pickup_count — из orders_raw (DELIVERIES API, там есть is_self_service)
             chk = int(stats.get("check_count") or agg.get("raw_orders_count") or 0)
-            if not stats.get("check_count") and chk:
-                logger.warning(f"[pipeline] check_count fallback orders_raw: {name} {date_iso} → {chk}")
+            raw_delivery = int(agg.get("raw_delivery_count") or 0)
+            raw_pickup = int(agg.get("raw_pickup_count") or 0)
+            raw_total = int(agg.get("raw_orders_count") or 0)
+            if chk and raw_total and chk != raw_total:
+                logger.info(
+                    f"[pipeline] orders_count заль/доставка: "
+                    f"{name} {date_iso} OLAP_SALES={chk} orders_raw={raw_total} "
+                    f"(разница {chk - raw_total} = зальные/кассовые)"
+                )
             sailplay_val = float(stats.get("sailplay") or agg.get("raw_sailplay") or 0.0)
             if not stats.get("sailplay") and sailplay_val:
                 logger.warning(f"[pipeline] sailplay fallback orders_raw: {name} {date_iso} → {sailplay_val}")
@@ -438,8 +447,8 @@ async def _upsert_daily_stats_from_aggregate(
                 "sailplay":       sailplay_val,
                 "discount_sum":   stats.get("discount_sum"),
                 "discount_types": discount_types_json,
-                "delivery_count": chk - (stats.get("pickup_count") or 0),
-                "pickup_count":   stats.get("pickup_count") or 0,
+                "delivery_count": raw_delivery,
+                "pickup_count":   raw_pickup,
                 "cash":           stats.get("cash") or 0.0,
                 "noncash":        stats.get("noncash") or 0.0,
                 "late_count":     late_d,

@@ -1137,6 +1137,8 @@ async def aggregate_orders_for_daily_stats(branch_name: str, date_iso: str, tena
                 WHEN pay_breakdown LIKE '%SailPlay%'
                 THEN (pay_breakdown::jsonb->>'SailPlay Бонус')::numeric
             END), 0) AS raw_sailplay,
+            SUM(CASE WHEN is_self_service = false THEN 1 ELSE 0 END) AS raw_delivery_count,
+            SUM(CASE WHEN is_self_service = true  THEN 1 ELSE 0 END) AS raw_pickup_count,
             SUM(CASE WHEN is_late = true AND is_self_service = false 
                      AND COALESCE(payment_changed, false) = false THEN 1 ELSE 0 END)
                 AS late_delivery_count,

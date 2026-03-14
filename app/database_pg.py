@@ -2032,7 +2032,7 @@ async def get_realtime_fot(
              AND s.branch_name = $2
              AND s.role_class = 'cook'
              AND s.clock_in IS NOT NULL
-             AND DATE(s.clock_in::timestamptz AT TIME ZONE 'Asia/Krasnoyarsk') = CURRENT_DATE AT TIME ZONE 'Asia/Krasnoyarsk'""",
+             AND DATE(s.clock_in::timestamptz AT TIME ZONE 'Asia/Krasnoyarsk') = (NOW() AT TIME ZONE 'Asia/Krasnoyarsk')::date""",
         tenant_id, branch_name,
     )
 

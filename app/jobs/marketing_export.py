@@ -346,8 +346,8 @@ def build_sql(params: dict) -> tuple[str, list]:
         ph = ",".join("?" * len(tenant_branches))
         tenant_branch_filter = f" AND branch_name IN ({ph})"
         tenant_branch_args = list(tenant_branches)
-        # Prepend tenant_branch_args to cte_args since they're used in WITH clause
-        cte_args = tenant_branch_args + cte_args
+        # Two copies: customer_first AND customer_total each have tenant_branch_filter
+        cte_args = tenant_branch_args + tenant_branch_args + cte_args
     
     cte_parts.append(f"""customer_first AS (
             SELECT client_phone, MIN(date) AS first_order_date

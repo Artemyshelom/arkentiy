@@ -1610,10 +1610,10 @@ async def upsert_hourly_stats(row: dict, tenant_id: int = 1) -> None:
                (tenant_id, branch_name, hour,
                 orders_count, revenue, avg_check,
                 avg_cook_time, avg_courier_wait, avg_delivery_time,
-                late_count, late_percent,
+                late_count, late_percent, completed_count,
                 cooks_on_shift, couriers_on_shift, orders_in_progress,
                 updated_at)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,now())
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
                ON CONFLICT (tenant_id, branch_name, hour) DO UPDATE SET
                  orders_count=EXCLUDED.orders_count,
                  revenue=EXCLUDED.revenue,
@@ -1623,6 +1623,7 @@ async def upsert_hourly_stats(row: dict, tenant_id: int = 1) -> None:
                  avg_delivery_time=EXCLUDED.avg_delivery_time,
                  late_count=EXCLUDED.late_count,
                  late_percent=EXCLUDED.late_percent,
+                 completed_count=EXCLUDED.completed_count,
                  cooks_on_shift=EXCLUDED.cooks_on_shift,
                  couriers_on_shift=EXCLUDED.couriers_on_shift,
                  orders_in_progress=EXCLUDED.orders_in_progress,
@@ -1638,6 +1639,7 @@ async def upsert_hourly_stats(row: dict, tenant_id: int = 1) -> None:
             row.get("avg_delivery_time"),
             row.get("late_count", 0),
             row.get("late_percent", 0.0),
+            row.get("completed_count", 0),
             row.get("cooks_on_shift", 0),
             row.get("couriers_on_shift", 0),
             row.get("orders_in_progress", 0),
@@ -1658,10 +1660,15 @@ async def get_hourly_stats(
     from datetime import datetime as _dt
     dt_from = _dt.fromisoformat(hour_from) if isinstance(hour_from, str) else hour_from
     dt_to   = _dt.fromisoformat(hour_to)   if isinstance(hour_to,   str) else hour_to
+    # Колонка hour — TIMESTAMP (без таймзоны); aware datetime вызовет ошибку
+    if dt_from.tzinfo:
+        dt_from = dt_from.replace(tzinfo=None)
+    if dt_to.tzinfo:
+        dt_to = dt_to.replace(tzinfo=None)
     rows = await pool.fetch(
         """SELECT hour, orders_count, revenue, avg_check,
                   avg_cook_time, avg_courier_wait, avg_delivery_time,
-                  late_count, late_percent,
+                  late_count, late_percent, completed_count,
                   cooks_on_shift, couriers_on_shift, orders_in_progress
            FROM hourly_stats
            WHERE tenant_id = $1

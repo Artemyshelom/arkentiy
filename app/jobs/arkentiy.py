@@ -1212,7 +1212,10 @@ def _parse_period(tokens: list[str]) -> tuple[str, str, str, list[str]]:
     Поддерживает: один день, диапазон DD.MM-DD.MM, Nд, неделя, месяц, название месяца.
     """
     import calendar
-    today = datetime.now(settings.default_tz).date()
+    # Используем МСК (UTC+3) — операторы работают в московском времени.
+    # Ветки в UTC+7, но "вчера" для оператора в 21:14 МСК = 13.03, а не 14.03.
+    _MSK = timezone(timedelta(hours=3))
+    today = datetime.now(_MSK).date()
     period_token = ""
     filter_tokens = []
 

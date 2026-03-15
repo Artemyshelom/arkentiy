@@ -807,6 +807,11 @@ async def get_alert_chats_for_city(city: str, tenant_id: int) -> list[int]:
     return await get_module_chats_for_city("late_alerts", city, tenant_id)
 
 
+async def get_kitchen_monitor_chats(city: str, tenant_id: int) -> list[int]:
+    """Получить чаты модуля kitchen_monitor по городу."""
+    return await get_module_chats_for_city("kitchen_monitor", city, tenant_id)
+
+
 async def get_tenant_cities(tenant_id: int) -> list[str]:
     """Возвращает список уникальных городов тенанта из iiko_credentials."""
     pool = get_pool()

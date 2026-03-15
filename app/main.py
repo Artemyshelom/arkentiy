@@ -54,6 +54,11 @@ from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 from app.jobs.fot_pipeline import job_fot_pipeline
 from app.jobs.rates_cache_updater import job_rates_cache_updater
 from app.jobs.shifts_reconciliation import job_shifts_reconciliation_daily, job_shifts_reconciliation_weekly
+from app.jobs.kitchen_monitor import (
+    job_kitchen_morning_report,
+    job_kitchen_clock_out_alert,
+    job_kitchen_cooking_alert,
+)
 from app.utils.tenant import run_for_all_tenants
 
 settings = get_settings()
@@ -304,6 +309,49 @@ def register_jobs() -> None:
         name="Пересчёт hourly_stats за вчера (после OLAP enrichment)",
         replace_existing=True,
         misfire_grace_time=600,
+    )
+
+    # ── Директор по производству ─────────────────────────────────────────────
+    # Утренний отчёт кухни: :30 каждого часа по TZ (после morning_report в :25)
+    async def _kitchen_morning_report_by_tz():
+        from datetime import datetime as _dt, timezone as _tz, timedelta as _td
+        from app.db import get_all_branches
+        msk_now = _dt.now(_tz(_td(hours=3)))
+        target_offset = 12 - msk_now.hour  # тот же TZ-фильтр что и у morning_report
+        offsets = {b.get("utc_offset", 7) for b in get_all_branches()}
+        if target_offset in offsets:
+            try:
+                await job_kitchen_morning_report(utc_offset=target_offset)
+            except Exception as e:
+                logger.error(f"kitchen_morning_report UTC+{target_offset}: {e}", exc_info=True)
+
+    scheduler.add_job(
+        _kitchen_morning_report_by_tz,
+        trigger=CronTrigger(minute=30),  # каждый час в :30
+        id="kitchen_morning_report",
+        name="Утренний отчёт кухни → Telegram (по таймзонам)",
+        replace_existing=True,
+        misfire_grace_time=600,
+    )
+
+    # Алерт ухода повара 15–21 местного: каждые 10 минут
+    scheduler.add_job(
+        job_kitchen_clock_out_alert,
+        trigger=IntervalTrigger(minutes=10),
+        id="kitchen_clock_out",
+        name="Алерт ухода повара (15–21 местного)",
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+    # Алерт готовки >20 мин за прошлый час: каждый час в :10
+    scheduler.add_job(
+        job_kitchen_cooking_alert,
+        trigger=CronTrigger(minute=10),
+        id="kitchen_cooking_alert",
+        name="Алерт готовки >20 мин (почасовой)",
+        replace_existing=True,
+        misfire_grace_time=300,
     )
 
 

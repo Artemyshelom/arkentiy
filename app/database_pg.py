@@ -437,21 +437,6 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int) -> None:
 
 
 async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict | None:
-    # #region agent log
-    try:
-        import pathlib as _pl
-        import json as _json
-        _log_path = _pl.Path(__file__).resolve().parents[3] / ".cursor" / "debug-3e913f.log"
-        _p = {"sessionId": "3e913f", "location": "database_pg:get_daily_stats", "message": "get_daily_stats called", "data": {"branch_name": branch_name, "date_iso": date_iso, "tenant_id_used": tenant_id}, "hypothesisId": "H1", "timestamp": __import__("time").time() * 1000}
-        with open(_log_path, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(_p, ensure_ascii=False) + "\n")
-    except Exception:
-        try:
-            with open("/tmp/debug-3e913f.log", "a", encoding="utf-8") as _f:
-                _f.write(__import__("json").dumps({"sessionId": "3e913f", "location": "database_pg:get_daily_stats", "data": {"branch_name": branch_name, "tenant_id_used": tenant_id}, "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-    # #endregion
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT * FROM daily_stats WHERE tenant_id = $1 AND branch_name = $2 AND date = $3",

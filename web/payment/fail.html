@@ -52,6 +52,7 @@
     async function retryPayment() {
       const params = new URLSearchParams(window.location.search);
       const paymentId = params.get("payment_id");
+      const token = params.get("token") || "";
       if (!paymentId) {
         window.location.href = "/register.html";
         return;
@@ -62,8 +63,7 @@
       btn.textContent = "Создаём платёж...";
 
       try {
-        // Повторный платёж без JWT — бэкенд находит данные исходного платежа сам
-        const resp = await fetch(`/api/payments/${paymentId}/retry`, {
+        const resp = await fetch(`/api/payments/${paymentId}/retry?token=${encodeURIComponent(token)}`, {
           method: "POST",
         });
         if (!resp.ok) throw new Error("retry failed");

@@ -5,12 +5,15 @@
 """
 
 import hashlib
+import logging
 
 import bcrypt
 import jwt
 from fastapi import Header, HTTPException
 
 from app.config import get_settings
+
+logger = logging.getLogger(__name__)
 
 JWT_ALGO = "HS256"
 
@@ -60,7 +63,8 @@ async def get_tenant_id(authorization: str = Header(None)) -> int:
                         raise HTTPException(401, "Token revoked")
         except HTTPException:
             raise
-        except Exception:
-            pass  # Если БД недоступна — пропускаем проверку версии
+        except Exception as e:
+            logger.warning(f"token_version check failed, denying access: {e}")
+            raise HTTPException(503, "Сервис временно недоступен, попробуйте позже")
 
     return int(tenant_id)

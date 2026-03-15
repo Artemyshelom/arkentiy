@@ -1640,7 +1640,7 @@ async def _handle_exact_orders(chat_id: int, arg: str, city_filter: str | None =
         if len(branches_cfg) == 1:
             branch_name = branches_cfg[0]["name"]
 
-    orders = await get_exact_time_orders(branch_name, date_from, branch_names or None)
+    orders = await get_exact_time_orders(branch_name, date_from, branch_names or None, _ctx_tenant_id.get())
 
     if not orders:
         await _send(chat_id, f"📌 <b>Точных заказов нет</b> за {date_from}")

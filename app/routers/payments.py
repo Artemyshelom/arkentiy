@@ -14,7 +14,10 @@ import logging
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, HTTPException, Request, Depends
+import hashlib as _hashlib
+import hmac as _hmac
+
+from fastapi import APIRouter, HTTPException, Request, Depends, Query
 from pydantic import BaseModel
 from slowapi import Limiter
 from slowapi.util import get_remote_address
@@ -47,12 +50,7 @@ class InvoiceConfirmRequest(BaseModel):
 # Helpers
 # =====================================================================
 
-async def _get_pool():
-    try:
-        from app.database_pg import _pool
-        return _pool
-    except Exception:
-        return None
+from app.database_pg import get_pool_or_none
 
 
 async def _activate_tenant(conn, tenant_id: int, payment_id: str | None = None) -> None:
@@ -125,6 +123,16 @@ def _next_invoice_number(year: int, seq: int) -> str:
     return f"АРК-{year}-{seq:03d}"
 
 
+def _sign_id(object_id: str) -> str:
+    """HMAC-подпись (16 hex) для безопасного доступа к объекту по ID."""
+    secret = get_settings().jwt_secret.encode()
+    return _hmac.new(secret, object_id.encode(), _hashlib.sha256).hexdigest()[:16]
+
+
+def _verify_token(object_id: str, token: str) -> bool:
+    return _hmac.compare_digest(_sign_id(object_id), token)
+
+
 # =====================================================================
 # 1. POST /api/payments/create
 # =====================================================================
@@ -141,7 +149,7 @@ async def api_create_payment(
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
         raise HTTPException(503, "Платёжная система временно недоступна")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -165,7 +173,8 @@ async def api_create_payment(
         )
 
     # Создаём платёж в ЮKassa
-    return_url = f"{settings.yukassa_return_url}/payment/success?payment_id={payment_id}"
+    token = _sign_id(payment_id)
+    return_url = f"{settings.yukassa_return_url}/payment/success?payment_id={payment_id}&token={token}"
     try:
         yk_payment = await create_payment(
             amount=req.amount,
@@ -175,7 +184,7 @@ async def api_create_payment(
             save_payment_method=req.save_payment_method,
         )
     except YukassaError as e:
-        logger.error(f"ЮKassa create error for tenant {req.tenant_id}: {e}")
+        logger.error(f"ЮKassa create error for tenant {tenant_id}: {e}")
         raise HTTPException(502, "Ошибка платёжной системы. Попробуйте позже")
 
     # Сохраняем yukassa_id
@@ -247,7 +256,7 @@ async def payment_webhook(request: Request):
 
     logger.info(f"ЮKassa webhook: event={event_type} payment={yukassa_id}")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -341,9 +350,11 @@ async def payment_webhook(request: Request):
 # =====================================================================
 
 @router.get("/payments/{payment_id}/status")
-async def payment_status(payment_id: str):
+async def payment_status(payment_id: str, token: str = Query("")):
     """Статус платежа для success/fail страниц."""
-    pool = await _get_pool()
+    if not token or not _verify_token(payment_id, token):
+        raise HTTPException(403, "Недействительная ссылка")
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -389,9 +400,11 @@ async def payment_status(payment_id: str):
 # =====================================================================
 
 @router.get("/invoices/{invoice_id}")
-async def get_invoice(invoice_id: str):
+async def get_invoice(invoice_id: str, token: str = Query("")):
     """Детали счёта для страницы /payment/invoice."""
-    pool = await _get_pool()
+    if not token or not _verify_token(invoice_id, token):
+        raise HTTPException(403, "Недействительная ссылка")
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -428,9 +441,11 @@ async def get_invoice(invoice_id: str):
 
 @router.post("/invoices/{invoice_id}/confirm")
 @limiter.limit("5/minute")
-async def confirm_invoice(invoice_id: str, request: Request):
+async def confirm_invoice(invoice_id: str, request: Request, token: str = Query("")):
     """Юрлицо подтверждает оплату счёта (ручная верификация Артемием)."""
-    pool = await _get_pool()
+    if not token or not _verify_token(invoice_id, token):
+        raise HTTPException(403, "Недействительная ссылка")
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -494,7 +509,7 @@ async def create_invoice(
     if not amount:
         raise HTTPException(400, "amount обязателен")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -540,10 +555,11 @@ async def create_invoice(
     except Exception as e:
         logger.warning(f"Не удалось отправить уведомление о новом счёте: {e}")
 
+    invoice_token = _sign_id(invoice_id)
     return {
         "invoice_id": invoice_id,
         "invoice_number": invoice_number,
-        "invoice_url": f"/payment/invoice?invoice_id={invoice_id}",
+        "invoice_url": f"/payment/invoice?invoice_id={invoice_id}&token={invoice_token}",
     }
 
 
@@ -553,16 +569,18 @@ async def create_invoice(
 
 @router.post("/payments/{payment_id}/retry")
 @limiter.limit("10/minute")
-async def retry_payment(payment_id: str, request: Request):
+async def retry_payment(payment_id: str, request: Request, token: str = Query("")):
     """
-    Повторный платёж без JWT — по payment_id ищет исходный платёж в БД,
+    Повторный платёж — по payment_id ищет исходный платёж в БД,
     создаёт новый. Используется со страницы /payment/fail.
     """
+    if not token or not _verify_token(payment_id, token):
+        raise HTTPException(403, "Недействительная ссылка")
     settings = get_settings()
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
         raise HTTPException(503, "Платёжная система временно недоступна")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -593,7 +611,8 @@ async def retry_payment(payment_id: str, request: Request):
             new_payment_id, tenant_id, amount, description,
         )
 
-    return_url = f"{settings.yukassa_return_url}/payment/success?payment_id={new_payment_id}"
+    new_token = _sign_id(new_payment_id)
+    return_url = f"{settings.yukassa_return_url}/payment/success?payment_id={new_payment_id}&token={new_token}"
     try:
         yk_payment = await create_payment(
             amount=amount,

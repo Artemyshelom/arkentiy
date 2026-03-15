@@ -40,6 +40,7 @@
     async function loadInvoice() {
       const params = new URLSearchParams(window.location.search);
       const invoiceId = params.get("invoice_id");
+      const token = params.get("token") || "";
       const el = document.getElementById("invoice-content");
 
       if (!invoiceId) {
@@ -48,7 +49,7 @@
       }
 
       try {
-        const resp = await fetch(`/api/invoices/${invoiceId}`);
+        const resp = await fetch(`/api/invoices/${invoiceId}?token=${encodeURIComponent(token)}`);
         if (!resp.ok) throw new Error("not found");
         const data = await resp.json();
 
@@ -118,11 +119,12 @@
     }
 
     async function confirmPayment(invoiceId) {
+      const token = new URLSearchParams(window.location.search).get("token") || "";
       const btn = document.getElementById("btn-confirm");
       btn.disabled = true;
       btn.textContent = "Отправляем...";
       try {
-        const resp = await fetch(`/api/invoices/${invoiceId}/confirm`, { method: "POST" });
+        const resp = await fetch(`/api/invoices/${invoiceId}/confirm?token=${encodeURIComponent(token)}`, { method: "POST" });
         if (!resp.ok) throw new Error("failed");
         await loadInvoice();
       } catch {

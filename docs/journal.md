@@ -9,6 +9,87 @@
 
 ---
 
+## 2026-03-15: ✅ Миграция hourly_stats.hour → TIMESTAMPTZ (aware UTC)
+
+**Ветка:** `fix/hourly-stats-timestamptz`  
+**Файлы:** `app/utils/timezone.py`, `app/jobs/hourly_stats.py`, `app/onboarding/backfill_hourly_stats.py`, `app/database_pg.py`, `app/routers/stats.py`, `app/migrations/016_hourly_stats_timestamptz.sql`
+
+### Проблема
+
+`hourly_stats.hour` хранил **местное время (UTC+7) как naive TIMESTAMP**. Миграция 009 создала TIMESTAMPTZ, но крон записывал `hour_start.replace(tzinfo=None)` — naive local. Миграция 015 это зафиксировала (`ALTER TYPE → TIMESTAMP`). Для мультитенанта с разными tz — тупик.
+
+### Инвариант (зафиксирован)
+
+- `orders_raw`, `shifts_raw` — текстовые timestamps в **местном времени филиала** (UTC+7)
+- `hourly_stats.hour` — **UTC aware instant (TIMESTAMPTZ)**, начало часа по местному времени, сохранённое как UTC
+- Пример: local 15:00 KSK = UTC 08:00 → хранится `2026-03-08 08:00:00+00`
+
+### Что изменено
+
+| Файл | Изменение |
+|------|----------|
+| `app/utils/timezone.py` | `DEFAULT_TZ`, `utc_hour_to_local_bounds()` |
+| `app/jobs/hourly_stats.py` | `aggregate_hour`: параметр переименован в `hour_utc`, assert aware, WHERE через `utc_hour_to_local_bounds`, запись aware UTC |
+| `app/jobs/hourly_stats.py` | `job_recalc_yesterday_hourly`: итерация по LOCAL calendar day (KSK), не UTC |
+| `app/onboarding/backfill_hourly_stats.py` | Зеркально: `_aggregate_hour`, цикл часов → local→UTC; `server_settings={'timezone': 'UTC'}` в пуле |
+| `app/database_pg.py` | `get_hourly_stats`: input = local day → UTC range; `server_settings={'timezone': 'UTC'}` в обоих пулах |
+| `app/routers/stats.py` | `_build_hourly`: `r["hour"].astimezone(DEFAULT_TZ).isoformat()` для ответа с tz-info |
+| `app/migrations/016_hourly_stats_timestamptz.sql` | `ALTER COLUMN hour TYPE TIMESTAMPTZ USING hour AT TIME ZONE 'Asia/Krasnoyarsk'` |
+
+### Деплой
+
+**Двухфазный** — код и миграция разделены:
+
+1. Фаза 1: деплой кода (`git push` → VPS `git pull && docker compose up -d --build`), подождать 1 час (крон без ошибок)
+2. Фаза 2: бэкап → precheck коллизий → миграция 016 → пересчитать вчера → проверить
+
+Precheck перед ALTER:
+```sql
+SELECT tenant_id, branch_name, hour AT TIME ZONE 'Asia/Krasnoyarsk', COUNT(*)
+FROM hourly_stats GROUP BY 1, 2, 3 HAVING COUNT(*) > 1;
+```
+
+Откат миграции (если что-то пошло не так):
+```sql
+ALTER TABLE hourly_stats ALTER COLUMN hour TYPE TIMESTAMP USING hour AT TIME ZONE 'Asia/Krasnoyarsk';
+```
+
+---
+
+## 2026-03-15: ✅ Security audit — закрыты уязвимости платёжного API
+
+**Ветка:** `fix/security-critical`  
+**Коммиты:** `0e3a533` (код), `27fc25d` (документация)
+
+### Что было найдено (входящие данные от ТЗ + ревью кода)
+
+1. **Debug-блок в продакшн-коде.** Cursor AI внедрил `try/open(log)/except` блок в `database_pg.py:get_daily_stats()` во время отладочной сессии. Функция вызывается сотни раз в сутки — писал на диск при каждом вызове.
+2. **`GET /api/payments/{id}/status` — публичный.** Возвращал `card_last4`, `tenant_name`, `modules` любому, знающему UUID платежа.
+3. **`POST /api/payments/{id}/retry` — публичный.** Любой мог создать новый платёж от чужого UUID.
+4. **`GET /api/invoices/{id}`, `POST /api/invoices/{id}/confirm` — публичные.** Отдавали юрданные (ИНН, название организации) любому знающему invoice_id.
+5. **Баг: `req.tenant_id`** в `api_create_payment` — `PaymentCreateRequest` не имеет этого поля, AttributeError при ошибке ЮKassa → 500.
+6. **`get_tenant_id` fail-open** при недоступной БД — отозванный JWT продолжал работать.
+
+### Что сделано
+
+| Файл | Изменение |
+|------|----------|
+| `app/database_pg.py` | Удалён debug-блок |
+| `app/services/auth.py` | Fail-closed: `except Exception` → `raise HTTPException(503)`; добавлен `logger` |
+| `app/routers/payments.py` | HMAC-хелперы `_sign_id`/`_verify_token`; защищены 4 эндпоинта; токен в `return_url`/`invoice_url`; фикс `req.tenant_id` |
+| `web/payment/success.html` | Передаёт `token` из URL в API |
+| `web/payment/fail.html` | Передаёт `token` в retry-запрос |
+| `web/payment/invoice.html` | Передаёт `token` в get/confirm |
+
+### Решение по invoice — отклонение от ТЗ
+
+ТЗ предлагало JWT (`Depends(get_tenant_id)`) для invoice-эндпоинтов. Отклонено: страница счёта публичная и открывается без аутентификации (бухгалтер не имеет аккаунта). Применен тот же HMAC-подход что и для payments — токен генерируется при создании счёта и кладётся в `invoice_url`.
+
+### Статус
+Ветка готова к мержу в main, деплой пендинг.
+
+---
+
 ## 2026-03-14: ✅ Деплой boris_api_regression_audit — Мультитенантность + исправления на prod
 
 **Сессия:** Консолидация рефакторинга мультитенантности (refactor/multitenant-audit → main), деплой на VPS, верификация. Всё прошло без ошибок.

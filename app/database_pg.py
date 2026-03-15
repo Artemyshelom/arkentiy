@@ -37,7 +37,7 @@ MIGRATION_DIR = Path(__file__).parent / "migrations"
 async def init_db(database_url: str) -> None:
     """Создаёт пул соединений и применяет миграции."""
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10, server_settings={"timezone": "UTC"})
     logger.info("PostgreSQL pool создан")
 
     # Применяем все миграции по порядку
@@ -61,13 +61,18 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+def get_pool_or_none() -> asyncpg.Pool | None:
+    """Возвращает pool или None если не инициализирован."""
+    return _pool
+
+
 async def init_pool_only(database_url: str) -> None:
     """Инициализирует пул соединений без применения миграций.
 
     Используется в backfill-скриптах, где БД уже содержит актуальную схему.
     """
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5, server_settings={"timezone": "UTC"})
     logger.info("PostgreSQL pool создан (без миграций)")
 
 
@@ -437,21 +442,6 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int) -> None:
 
 
 async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict | None:
-    # #region agent log
-    try:
-        import pathlib as _pl
-        import json as _json
-        _log_path = _pl.Path(__file__).resolve().parents[3] / ".cursor" / "debug-3e913f.log"
-        _p = {"sessionId": "3e913f", "location": "database_pg:get_daily_stats", "message": "get_daily_stats called", "data": {"branch_name": branch_name, "date_iso": date_iso, "tenant_id_used": tenant_id}, "hypothesisId": "H1", "timestamp": __import__("time").time() * 1000}
-        with open(_log_path, "a", encoding="utf-8") as _f:
-            _f.write(_json.dumps(_p, ensure_ascii=False) + "\n")
-    except Exception:
-        try:
-            with open("/tmp/debug-3e913f.log", "a", encoding="utf-8") as _f:
-                _f.write(__import__("json").dumps({"sessionId": "3e913f", "location": "database_pg:get_daily_stats", "data": {"branch_name": branch_name, "tenant_id_used": tenant_id}, "hypothesisId": "H1"}, ensure_ascii=False) + "\n")
-        except Exception:
-            pass
-    # #endregion
     pool = get_pool()
     row = await pool.fetchrow(
         "SELECT * FROM daily_stats WHERE tenant_id = $1 AND branch_name = $2 AND date = $3",
@@ -1075,18 +1065,13 @@ _PAY_MAP: dict[str, str] = {
 }
 
 
-async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int | None = None) -> dict:
+async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int) -> dict:
     """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + счётчики).
 
     Примечание: avg-времена (avg_cooking_min и др.) намеренно не считаются —
     send_time/cooked_time/opened_at для сегодняшних заказов всегда NULL
     (заполняются OLAP enrichment только за вчера). RT-времена берутся из Events API.
     """
-    from app.ctx import ctx_tenant_id as _ctx_tenant_id
-
-    if tenant_id is None:
-        tenant_id = _ctx_tenant_id.get()
-
     pool = get_pool()
 
     # Счётчики активных/доставленных — для fallback когда Events API ещё не загружен
@@ -1569,16 +1554,13 @@ async def get_exact_time_orders(
     branch_name: str | None,
     date_iso: str,
     branch_names: list[str] | None = None,
-    tenant_id: int | None = None,
+    tenant_id: int = 0,
 ) -> list[dict]:
     """Возвращает заказы, определённые как 'на точное время' для даты."""
-    from app.ctx import ctx_tenant_id as _ctx_tenant_id
-    
+    if not tenant_id:
+        raise ValueError("tenant_id должен быть передан явно в get_exact_time_orders()")
+
     pool = get_pool()
-    
-    # Если tenant_id не передан, берём из контекста
-    if tenant_id is None:
-        tenant_id = _ctx_tenant_id.get()
     
     conditions = [f"tenant_id = $1", f"date::text = $2", "status != 'Отменена'"]
     params: list = [tenant_id, date_iso]
@@ -1661,17 +1643,19 @@ async def get_hourly_stats(
 ) -> list[dict]:
     """Возвращает строки hourly_stats за период [hour_from, hour_to) для одной точки.
 
-    hour_from / hour_to — ISO-строки: '2026-03-07' или '2026-03-07T09:00:00'.
+    hour_from / hour_to — ISO-строки в LOCAL времени (т..е. бизнес-дата).
+    '2026-03-08' → начало local дня 2026-03-08 (KSK) → UTC 2026-03-07 17:00.
     """
+    from app.utils.timezone import DEFAULT_TZ
     pool = get_pool()
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
     dt_from = _dt.fromisoformat(hour_from) if isinstance(hour_from, str) else hour_from
     dt_to   = _dt.fromisoformat(hour_to)   if isinstance(hour_to,   str) else hour_to
-    # Колонка hour — TIMESTAMP (без таймзоны); aware datetime вызовет ошибку
-    if dt_from.tzinfo:
-        dt_from = dt_from.replace(tzinfo=None)
-    if dt_to.tzinfo:
-        dt_to = dt_to.replace(tzinfo=None)
+    # Input = local calendar boundary → конвертируем в UTC для TIMESTAMPTZ
+    if dt_from.tzinfo is None:
+        dt_from = dt_from.replace(tzinfo=DEFAULT_TZ).astimezone(_tz.utc)
+    if dt_to.tzinfo is None:
+        dt_to = dt_to.replace(tzinfo=DEFAULT_TZ).astimezone(_tz.utc)
     rows = await pool.fetch(
         """SELECT hour, orders_count, revenue, avg_check,
                   avg_cook_time, avg_courier_wait, avg_delivery_time,

@@ -131,7 +131,7 @@ async def get_branch_status(branch: dict, prefetched_olap: dict | None = None) -
     # Параллельный сбор DB + cash shift вместо двух последовательных await
     async def _get_orders_agg() -> dict:
         try:
-            return await aggregate_orders_today(branch["name"], date_iso)
+            return await aggregate_orders_today(branch["name"], date_iso, branch.get("tenant_id", 1))
         except Exception as e:
             logger.warning(f"Ошибка aggregate_orders_today [{branch['name']}]: {e}")
             return {}

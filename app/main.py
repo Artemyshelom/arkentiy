@@ -41,7 +41,6 @@ from app.routers.codesearch import router as codesearch_router
 # Импорт задач
 from app.jobs.hourly_stats import job_hourly_stats, job_recalc_yesterday_hourly
 from app.jobs.iiko_to_sheets import job_export_iiko_to_sheets
-from app.jobs.olap_enrichment import job_olap_enrichment  # DEPRECATED: заменён olap_pipeline
 from app.jobs.olap_pipeline import job_olap_pipeline
 from app.clients.iiko_bo_events import job_poll_iiko_events
 from app.jobs.competitor_monitor import job_monitor_competitors
@@ -50,7 +49,6 @@ from app.jobs.late_alerts import job_late_alerts
 from app.jobs.daily_report import job_send_morning_report
 from app.jobs.weekly_report import job_weekly_report
 from app.jobs.audit import job_audit_report
-from app.jobs.cancel_sync import job_cancel_sync  # DEPRECATED: заменён olap_pipeline шаг A
 from app.jobs.billing import job_recurring_billing
 from app.jobs.subscription_lifecycle import job_trial_expiry, job_payment_grace
 from app.jobs.fot_pipeline import job_fot_pipeline
@@ -112,7 +110,6 @@ def register_jobs() -> None:
         replace_existing=True,
         misfire_grace_time=600,
     )
-    # DEPRECATED: olap_enrichment заменён olap_pipeline; оставлен импорт до полного удаления
 
     # Выгрузка iiko → Google Sheets: 05:26 МСК
     scheduler.add_job(
@@ -227,10 +224,6 @@ def register_jobs() -> None:
         misfire_grace_time=1800,
     )
 
-    # DEPRECATED: cancel_sync (~480 запросов/сутки) — заменён olap_pipeline шагом A.
-    # cancel_reason теперь приходит из DELIVERIES (поле Delivery.CancelCause) ежедневно в 05:00.
-    # Факт отмены в реальном времени — через Events API (status='Отменена', <30 сек.).
-    # scheduler.add_job(run_for_all_tenants(job_cancel_sync), ...)  <- отключено
 
     # Рекуррентный биллинг ЮKassa: ежедневно в 03:00 МСК
     scheduler.add_job(

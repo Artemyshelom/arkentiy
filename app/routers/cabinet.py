@@ -87,12 +87,7 @@ class AccountDeleteRequest(BaseModel):
 # DB pool helper
 # =====================================================================
 
-async def _pool():
-    try:
-        from app.database_pg import _pool as p
-        return p
-    except Exception:
-        return None
+from app.database_pg import get_pool_or_none
 
 
 # =====================================================================
@@ -102,7 +97,7 @@ async def _pool():
 @router.post("/auth/login")
 @limiter.limit("5/15minutes")
 async def login(req: LoginRequest, request: Request):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if pool:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -141,7 +136,7 @@ async def login(req: LoginRequest, request: Request):
 
 @router.get("/overview")
 async def get_overview(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -228,7 +223,7 @@ async def get_overview(tenant_id: int = Depends(get_tenant_id)):
 
 @router.get("/subscription")
 async def get_subscription(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -318,7 +313,7 @@ async def get_subscription(tenant_id: int = Depends(get_tenant_id)):
 
 @router.put("/subscription")
 async def update_subscription(req: SubscriptionUpdate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -401,7 +396,7 @@ async def update_subscription(req: SubscriptionUpdate, tenant_id: int = Depends(
 
 @router.get("/connections")
 async def get_connections(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -468,7 +463,7 @@ async def get_connections(tenant_id: int = Depends(get_tenant_id)):
 
 @router.put("/connections/iiko")
 async def update_iiko(data: IikoUpdate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -492,7 +487,7 @@ async def update_iiko(data: IikoUpdate, tenant_id: int = Depends(get_tenant_id))
 
 @router.post("/connections/iiko/test")
 async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -525,13 +520,13 @@ async def test_iiko(tenant_id: int = Depends(get_tenant_id)):
 
 @router.get("/chats")
 async def get_chats(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            """SELECT chat_id, name, modules_json, city, is_active
+            """SELECT chat_id, name, modules_json, city, cities_json, is_active
                FROM tenant_chats WHERE tenant_id = $1 AND is_active = true
                ORDER BY name""",
             tenant_id,
@@ -573,7 +568,7 @@ async def get_chats(tenant_id: int = Depends(get_tenant_id)):
 
 @router.post("/chats")
 async def create_chat(data: ChatCreate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -618,7 +613,7 @@ async def create_chat(data: ChatCreate, tenant_id: int = Depends(get_tenant_id))
 
 @router.put("/chats/{chat_id}")
 async def update_chat(chat_id: str, data: ChatUpdate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -651,7 +646,7 @@ async def update_chat(chat_id: str, data: ChatUpdate, tenant_id: int = Depends(g
 
 @router.delete("/chats/{chat_id}")
 async def delete_chat(chat_id: str, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -687,7 +682,7 @@ async def delete_chat(chat_id: str, tenant_id: int = Depends(get_tenant_id)):
 
 @router.post("/chats/{chat_id}/test")
 async def test_chat(chat_id: str, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -759,7 +754,7 @@ async def verify_chat(data: ChatVerify, tenant_id: int = Depends(get_tenant_id))
 
 @router.get("/billing")
 async def get_billing(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -807,7 +802,7 @@ async def get_billing(tenant_id: int = Depends(get_tenant_id)):
 
 @router.get("/settings")
 async def get_settings_endpoint(tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -835,7 +830,7 @@ async def get_settings_endpoint(tenant_id: int = Depends(get_tenant_id)):
 
 @router.put("/settings")
 async def update_settings(data: SettingsUpdate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -874,7 +869,7 @@ async def update_password(data: PasswordUpdate, tenant_id: int = Depends(get_ten
     if len(data.new_password) < 8:
         raise HTTPException(400, "Пароль должен быть минимум 8 символов")
 
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -910,7 +905,7 @@ async def update_password(data: PasswordUpdate, tenant_id: int = Depends(get_ten
 
 @router.put("/settings/legal")
 async def update_legal(data: LegalUpdate, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -929,7 +924,7 @@ async def update_legal(data: LegalUpdate, tenant_id: int = Depends(get_tenant_id
 
 @router.delete("/account")
 async def delete_account(data: AccountDeleteRequest, tenant_id: int = Depends(get_tenant_id)):
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -982,7 +977,7 @@ class SubscriptionCancelRequest(BaseModel):
 @router.post("/subscription/cancel")
 async def cancel_subscription(req: SubscriptionCancelRequest, tenant_id: int = Depends(get_tenant_id)):
     """Отмена подписки — активна до конца оплаченного периода."""
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -1073,7 +1068,7 @@ async def change_plan(req: ChangePlanRequest, tenant_id: int = Depends(get_tenan
     if req.new_plan not in PLAN_PRICES:
         raise HTTPException(400, f"Неизвестный план. Доступны: {', '.join(PLAN_PRICES)}")
 
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -1191,7 +1186,7 @@ async def change_payment_method(tenant_id: int = Depends(get_tenant_id)):
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
         raise HTTPException(503, "Платёжная система временно недоступна")
 
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -1241,7 +1236,7 @@ async def change_payment_method(tenant_id: int = Depends(get_tenant_id)):
 @router.get("/subscription/history")
 async def subscription_history(tenant_id: int = Depends(get_tenant_id)):
     """История изменений подписки."""
-    pool = await _pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 

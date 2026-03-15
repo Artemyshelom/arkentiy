@@ -4,7 +4,37 @@
 
 ---
 
-## 🔴 [SECURITY] АИ-агент (Cursor) внедрил debug-логгирование в продакшн-код (март 2026)
+## � [ИСПРАВЛЕНО] Четыре кодовых бага (15 марта 2026) — коммит `6f8c731`
+
+**Что исправили:**
+
+1. **`GET /api/cabinet/chats` → 500 (KeyError на `cities_json`)**
+   - Причина: SELECT не включал `cities_json` хотя код пытался его читать
+   - Решение: добавить колонку в SELECT
+   - Файл: [app/routers/cabinet.py](app/routers/cabinet.py#L533)
+
+2. **Прямые импорты `_pool` — нарушение инкапсуляции (security + maintainability)**
+   - Место: 9 файлов (4 роутера, 2 джобы, 1 сервис) + inline try/except паттерны
+   - Проблема: каждый файл свой `async def _get_pool()`, разные подходы к обработке None, нарушена синхронизация
+   - Решение: добавить `get_pool_or_none()` в [database_pg.py](app/database_pg.py#L64), везде использовать это
+   - Обновлено: [auth.py](app/routers/auth.py#L16), [payments.py](app/routers/payments.py#L53), [onboarding.py](app/routers/onboarding.py#L82), [cabinet.py](app/routers/cabinet.py#L90), [billing.py](app/jobs/billing.py#L15), [subscription_lifecycle.py](app/jobs/subscription_lifecycle.py#L14), [auth.py](app/services/auth.py#L56)
+
+3. **unify `tenant_id` — убрать ctx_tenant_id fallback (безопасность мультенанта)**
+   - Проблема: `aggregate_orders_today()` и `get_exact_time_orders()` имели `tenant_id: int | None = None` с fallback на ctx variable
+   - Риск: data leak между тенантами в async контексте если забыли передать tenant_id
+   - Решение: tenant_id обязателен, явная ошибка если забыли
+   - Файлы: [database_pg.py](app/database_pg.py#L1063), вызывающие места обновлены ([iiko_status_report.py](app/jobs/iiko_status_report.py#L132), [arkentiy.py](app/jobs/arkentiy.py#L1643))
+   - **Lesson:** Никогда не использовать ctx fallback в database-функциях; параметр обязателен → явная ошибка на вызывающей стороне
+
+4. **Dead code** — удалены:
+   - `get_deliveries_today()`, `get_revenue_today()` из [app/clients/iiko.py](app/clients/iiko.py) (помечены как DEAD CODE, не вызываются нигде)
+   - deprecated импорты `job_olap_enrichment`, `job_cancel_sync` из [app/main.py](app/main.py)
+
+**Результат:** -150 строк, +73 строки, 12 файлов. Синтаксис всех файлов проверен.
+
+---
+
+## �🔴 [SECURITY] АИ-агент (Cursor) внедрил debug-логгирование в продакшн-код (март 2026)
 
 **Проблема:** В ходе отладочной сессии Cursor AI вставил блок в `database_pg.py:get_daily_stats()`:
 ```python

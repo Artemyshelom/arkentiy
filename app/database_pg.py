@@ -61,6 +61,11 @@ def get_pool() -> asyncpg.Pool:
     return _pool
 
 
+def get_pool_or_none() -> asyncpg.Pool | None:
+    """Возвращает pool или None если не инициализирован."""
+    return _pool
+
+
 async def init_pool_only(database_url: str) -> None:
     """Инициализирует пул соединений без применения миграций.
 
@@ -1060,18 +1065,13 @@ _PAY_MAP: dict[str, str] = {
 }
 
 
-async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int | None = None) -> dict:
+async def aggregate_orders_today(branch_name: str, date_iso: str, tenant_id: int) -> dict:
     """Быстрый агрегат из orders_raw за сегодня для /статус (скидки + счётчики).
 
     Примечание: avg-времена (avg_cooking_min и др.) намеренно не считаются —
     send_time/cooked_time/opened_at для сегодняшних заказов всегда NULL
     (заполняются OLAP enrichment только за вчера). RT-времена берутся из Events API.
     """
-    from app.ctx import ctx_tenant_id as _ctx_tenant_id
-
-    if tenant_id is None:
-        tenant_id = _ctx_tenant_id.get()
-
     pool = get_pool()
 
     # Счётчики активных/доставленных — для fallback когда Events API ещё не загружен
@@ -1554,16 +1554,13 @@ async def get_exact_time_orders(
     branch_name: str | None,
     date_iso: str,
     branch_names: list[str] | None = None,
-    tenant_id: int | None = None,
+    tenant_id: int = 0,
 ) -> list[dict]:
     """Возвращает заказы, определённые как 'на точное время' для даты."""
-    from app.ctx import ctx_tenant_id as _ctx_tenant_id
-    
+    if not tenant_id:
+        raise ValueError("tenant_id должен быть передан явно в get_exact_time_orders()")
+
     pool = get_pool()
-    
-    # Если tenant_id не передан, берём из контекста
-    if tenant_id is None:
-        tenant_id = _ctx_tenant_id.get()
     
     conditions = [f"tenant_id = $1", f"date::text = $2", "status != 'Отменена'"]
     params: list = [tenant_id, date_iso]

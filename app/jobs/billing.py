@@ -12,6 +12,7 @@ from datetime import datetime
 
 from app.clients.yukassa import create_payment, YukassaError
 from app.config import get_settings
+from app.database_pg import get_pool_or_none
 from app.utils.job_tracker import track_job
 
 logger = logging.getLogger(__name__)
@@ -20,19 +21,15 @@ logger = logging.getLogger(__name__)
 @track_job("recurring_billing")
 async def job_recurring_billing() -> None:
     """Автоматическое продление подписок."""
-    try:
-        from app.database_pg import _pool
-    except Exception:
-        return
-
-    if not _pool:
+    pool = get_pool_or_none()
+    if not pool:
         return
 
     settings = get_settings()
     if not settings.yukassa_shop_id:
         return
 
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         # 1. Обрабатываем истекшие cancel_scheduled
         cancelled = await conn.fetch(
             """SELECT tenant_id, plan FROM subscriptions

@@ -50,12 +50,7 @@ class InvoiceConfirmRequest(BaseModel):
 # Helpers
 # =====================================================================
 
-async def _get_pool():
-    try:
-        from app.database_pg import _pool
-        return _pool
-    except Exception:
-        return None
+from app.database_pg import get_pool_or_none
 
 
 async def _activate_tenant(conn, tenant_id: int, payment_id: str | None = None) -> None:
@@ -154,7 +149,7 @@ async def api_create_payment(
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
         raise HTTPException(503, "Платёжная система временно недоступна")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -261,7 +256,7 @@ async def payment_webhook(request: Request):
 
     logger.info(f"ЮKassa webhook: event={event_type} payment={yukassa_id}")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -359,7 +354,7 @@ async def payment_status(payment_id: str, token: str = Query("")):
     """Статус платежа для success/fail страниц."""
     if not token or not _verify_token(payment_id, token):
         raise HTTPException(403, "Недействительная ссылка")
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -409,7 +404,7 @@ async def get_invoice(invoice_id: str, token: str = Query("")):
     """Детали счёта для страницы /payment/invoice."""
     if not token or not _verify_token(invoice_id, token):
         raise HTTPException(403, "Недействительная ссылка")
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -450,7 +445,7 @@ async def confirm_invoice(invoice_id: str, request: Request, token: str = Query(
     """Юрлицо подтверждает оплату счёта (ручная верификация Артемием)."""
     if not token or not _verify_token(invoice_id, token):
         raise HTTPException(403, "Недействительная ссылка")
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -514,7 +509,7 @@ async def create_invoice(
     if not amount:
         raise HTTPException(400, "amount обязателен")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -585,7 +580,7 @@ async def retry_payment(payment_id: str, request: Request, token: str = Query(""
     if not settings.yukassa_shop_id or not settings.yukassa_secret_key:
         raise HTTPException(503, "Платёжная система временно недоступна")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 

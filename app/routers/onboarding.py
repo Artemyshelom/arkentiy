@@ -79,12 +79,7 @@ class TenantCreateRequest(BaseModel):
 # Helpers
 # =====================================================================
 
-async def _get_pool():
-    try:
-        from app.database_pg import _pool
-        return _pool
-    except Exception:
-        return None
+from app.database_pg import get_pool_or_none
 
 
 def _validate_iiko_url(url: str) -> bool:
@@ -158,7 +153,7 @@ def _calculate_pricing(branches_count: int, cities_count: int, modules: list[str
 @limiter.limit("10/minute")
 async def check_email(req: CheckEmailRequest, request: Request):
     """Проверка уникальности email при регистрации."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if pool:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -313,7 +308,7 @@ async def test_telegram_chat(req: TelegramTestRequest, request: Request):
 @limiter.limit("10/minute")
 async def validate_promo(req: PromoValidateRequest, request: Request):
     """Проверка промокода."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -353,7 +348,7 @@ async def validate_promo(req: PromoValidateRequest, request: Request):
 @limiter.limit("3/minute")
 async def create_tenant(req: TenantCreateRequest, request: Request):
     """Создание тенанта + аккаунта при регистрации."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 

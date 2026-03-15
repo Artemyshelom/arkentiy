@@ -53,9 +53,10 @@ async def get_tenant_id(authorization: str = Header(None)) -> int:
     token_version = payload.get("token_version")
     if token_version is not None:
         try:
-            from app.database_pg import _pool
-            if _pool:
-                async with _pool.acquire() as conn:
+            from app.database_pg import get_pool_or_none
+            pool = get_pool_or_none()
+            if pool:
+                async with pool.acquire() as conn:
                     db_version = await conn.fetchval(
                         "SELECT token_version FROM tenants WHERE id = $1", int(tenant_id)
                     )

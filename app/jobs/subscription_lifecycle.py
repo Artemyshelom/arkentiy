@@ -11,6 +11,8 @@
 import logging
 from datetime import datetime, timedelta
 
+from app.database_pg import get_pool_or_none
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,16 +23,13 @@ async def job_trial_expiry() -> None:
     - За 1 день: последнее предупреждение
     - Истёк: деактивация (status → expired)
     """
-    try:
-        from app.database_pg import _pool
-    except Exception:
-        return
-    if not _pool:
+    pool = get_pool_or_none()
+    if not pool:
         return
 
     now = datetime.utcnow()
 
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         # 1. Предупреждение за 3 дня
         warn_3d = await conn.fetch(
             """SELECT t.id, t.name, t.email, t.contact, t.trial_ends_at
@@ -120,14 +119,11 @@ async def job_payment_grace() -> None:
     - За 3 дня до grace_until: предупреждение
     - grace_until < now(): деактивация
     """
-    try:
-        from app.database_pg import _pool
-    except Exception:
-        return
-    if not _pool:
+    pool = get_pool_or_none()
+    if not pool:
         return
 
-    async with _pool.acquire() as conn:
+    async with pool.acquire() as conn:
         # 1. Новые просрочки: active подписки где billing просрочен и нет grace
         overdue = await conn.fetch(
             """SELECT s.tenant_id, t.name, t.email, s.next_billing_at
@@ -224,11 +220,11 @@ async def job_payment_grace() -> None:
 
 async def _notify_tenant(tenant_id: int, text: str) -> None:
     """Отправить уведомление тенанту в его первый активный чат."""
+    pool = get_pool_or_none()
+    if not pool:
+        return
     try:
-        from app.database_pg import _pool
-        if not _pool:
-            return
-        async with _pool.acquire() as conn:
+        async with pool.acquire() as conn:
             chat = await conn.fetchrow(
                 """SELECT chat_id FROM tenant_chats
                    WHERE tenant_id = $1 AND is_active = true

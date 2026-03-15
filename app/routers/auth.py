@@ -13,20 +13,13 @@ from slowapi.util import get_remote_address
 
 from app.clients.email import send_verification_email, send_reset_email
 from app.services.auth import hash_password, verify_password, _jwt_secret, JWT_ALGO
+from app.database_pg import get_pool_or_none
 import jwt
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 limiter = Limiter(key_func=get_remote_address)
-
-
-async def _get_pool():
-    try:
-        from app.database_pg import _pool
-        return _pool
-    except Exception:
-        return None
 
 
 class ForgotPasswordRequest(BaseModel):
@@ -45,7 +38,7 @@ class ResetPasswordRequest(BaseModel):
 @router.get("/verify-email")
 async def verify_email(token: str):
     """Подтверждение email по токену из письма."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -83,7 +76,7 @@ async def verify_email(token: str):
 @limiter.limit("3/hour")
 async def resend_verification(req: ForgotPasswordRequest, request: Request):
     """Повторная отправка письма подтверждения."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -118,7 +111,7 @@ async def resend_verification(req: ForgotPasswordRequest, request: Request):
 @limiter.limit("3/hour")
 async def forgot_password(req: ForgotPasswordRequest, request: Request):
     """Запрос сброса пароля — отправляет письмо со ссылкой."""
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 
@@ -159,7 +152,7 @@ async def reset_password(req: ResetPasswordRequest, request: Request):
     if len(req.new_password) < 8:
         raise HTTPException(400, "Пароль должен содержать минимум 8 символов")
 
-    pool = await _get_pool()
+    pool = get_pool_or_none()
     if not pool:
         raise HTTPException(500, "Database not available")
 

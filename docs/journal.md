@@ -54,6 +54,34 @@ FROM hourly_stats GROUP BY 1, 2, 3 HAVING COUNT(*) > 1;
 ALTER TABLE hourly_stats ALTER COLUMN hour TYPE TIMESTAMP USING hour AT TIME ZONE 'Asia/Krasnoyarsk';
 ```
 
+### Статус деплоя ✅
+
+**15.03.2026 12:04–12:05 МСК:**
+
+- Ветка `fix/code-bugs` (содержит обе фазы) переключена на VPS
+- Docker build успешен
+- Миграция 016 применилась автоматически при старте (проект применяет `*.sql` по порядку)
+- Крон `job_hourly_stats` в 12:05 UTC отработал без ошибок:
+  ```
+  [hourly_stats] Час 2026-03-15 11:00+00 — обработано 11 точек, ошибок: 0
+  ```
+- 27 567 строк в `hourly_stats`, данные не потеряны
+- Round-trip sanity check: UTC 08:00+00 ↔ local 15:00 KSK ✅
+- Тип колонки: `timestamp with time zone` ✅
+- Ветка смержена в `main`, продакшен обновлён
+
+**Чек-лист завершения:**
+- ✅ Хелпер `utc_hour_to_local_bounds()` в `app/utils/timezone.py`
+- ✅ `aggregate_hour()` — aware UTC, WHERE через хелпер, assert
+- ✅ `job_recalc_yesterday_hourly()` — LOCAL calendar day (KSK)
+- ✅ `backfill` — зеркально, local→UTC
+- ✅ `get_hourly_stats()` — input = local day → UTC range
+- ✅ API ответ с tz-info
+- ✅ Session timezone = UTC (оба пула)
+- ✅ Миграция 016 с precheck и откатом
+- ✅ Документация (`rules/integrator/database.md`)
+- ✅ Деплой фаза 1+2 (обе прошли)
+
 ---
 
 ## 2026-03-15: ✅ Security audit — закрыты уязвимости платёжного API

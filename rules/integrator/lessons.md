@@ -1102,7 +1102,7 @@ systemctl restart morf.service
 
 **SSH-доступ к серверу:**
 - Хост: `72.56.107.85`, алиас `morf`, пользователь `root`
-- Ключ: `/Users/artemii/.ssh/id_ed25519` (с паролем) или `cursor_arkentiy_vps` (без пароля)
+- Ключ: `/Users/artemii/.ssh/id_ed25519` (с паролем)
 - Конфиг OpenClaw: `/root/.openclaw/`
 - Сервис: `morf.service` (systemd)
 - Node: `/root/.nvm/versions/node/v22.22.0/bin/`

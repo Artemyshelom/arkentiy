@@ -23,11 +23,13 @@ import logging
 import re
 import time
 import xml.etree.ElementTree as ET
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 
 import httpx
 
+from app.clients.http_pool import iiko_client as _pool_iiko_client
 from app.clients.iiko_auth import get_bo_token
 from app.config import get_settings
 
@@ -964,7 +966,7 @@ async def poll_all_branches() -> None:
         if not bo_url or (tid, name) not in _states:
             return
         state = _states[(tid, name)]
-        async with httpx.AsyncClient(verify=False, timeout=60) as client:
+        async with nullcontext(_pool_iiko_client) if _pool_iiko_client is not None else httpx.AsyncClient(verify=False, timeout=60) as client:
             # Текущая дата бизнес-дня (UTC+7)
             _today_local = (
                 datetime.now(timezone.utc) + timedelta(hours=7)

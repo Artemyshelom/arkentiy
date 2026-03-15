@@ -7,9 +7,11 @@ Rate limit: 30 сообщений/сек, 20 сообщений/мин в одн
 
 import asyncio
 import logging
+from contextlib import nullcontext
 
 import httpx
 
+from app.clients.http_pool import telegram_client as _pool_client
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -17,6 +19,13 @@ settings = get_settings()
 
 BASE_URL = f"https://api.telegram.org/bot{settings.telegram_bot_token}"
 REQUEST_TIMEOUT = 15.0
+
+
+def _tg_client():
+    """Returns async context manager wrapping the shared client (or a fresh one as fallback)."""
+    if _pool_client is not None:
+        return nullcontext(_pool_client)
+    return httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
 
 
 TG_MAX_LEN = 4096
@@ -84,7 +93,7 @@ async def _send_single(
 ) -> bool:
     for attempt in range(retry):
         try:
-            async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+            async with _tg_client() as client:
                 response = await client.post(
                     f"{BASE_URL}/sendMessage",
                     json={
@@ -147,7 +156,7 @@ async def _send_via_arkentiy(chat_id: str, text: str, disable_notification: bool
         success = False
         for attempt in range(3):
             try:
-                async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+                async with _tg_client() as client:
                     response = await client.post(
                         f"https://api.telegram.org/bot{token}/sendMessage",
                         json={
@@ -213,7 +222,7 @@ async def send_message_with_keyboard(
     last_message_id: int | None = None
 
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        async with _tg_client() as client:
             for i, chunk in enumerate(chunks):
                 is_last = i == len(chunks) - 1
                 payload: dict = {
@@ -264,7 +273,7 @@ async def edit_message_with_keyboard(
     if keyboard:
         payload["reply_markup"] = {"inline_keyboard": keyboard}
     try:
-        async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+        async with _tg_client() as client:
             resp = await client.post(
                 f"https://api.telegram.org/bot{token}/editMessageText",
                 json=payload,

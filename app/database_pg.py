@@ -229,52 +229,56 @@ async def upsert_orders_batch(rows: list[dict], tenant_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for r in rows:
-                await conn.execute(
-                    """INSERT INTO orders_raw
-                       (tenant_id, branch_name, delivery_num, status, courier, sum,
-                        planned_time, actual_time, is_self_service,
-                        date, is_late, late_minutes,
-                        client_name, client_phone, delivery_address, items,
-                        cooked_time, comment, operator, opened_at,
-                        has_problem,
-                        payment_type, source,
-                        cancel_reason, cancellation_details, payment_changed, updated_at)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                               $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,now())
-                       ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
-                         status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
-                         planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
-                         is_self_service=EXCLUDED.is_self_service, date=EXCLUDED.date,
-                         is_late=EXCLUDED.is_late, late_minutes=EXCLUDED.late_minutes,
-                         client_name=EXCLUDED.client_name, client_phone=EXCLUDED.client_phone,
-                         delivery_address=EXCLUDED.delivery_address, items=EXCLUDED.items,
-                         cooked_time=COALESCE(EXCLUDED.cooked_time, orders_raw.cooked_time),
-                         comment=EXCLUDED.comment, operator=EXCLUDED.operator,
-                         opened_at=EXCLUDED.opened_at, has_problem=EXCLUDED.has_problem,
-                         payment_type=EXCLUDED.payment_type,
-                         source=EXCLUDED.source,
-                         cancel_reason=EXCLUDED.cancel_reason, cancellation_details=EXCLUDED.cancellation_details,
-                         payment_changed=EXCLUDED.payment_changed,
-                         updated_at=now()""",
-                    tenant_id,
-                    r.get("branch_name"), r.get("delivery_num"), r.get("status"),
-                    r.get("courier"), float(r.get("sum") or 0),
-                    r.get("planned_time"), r.get("actual_time"),
-                    bool(r.get("is_self_service", False)),
-                    _to_date(r.get("date")),
-                    bool(r.get("is_late", False)),
-                    float(r.get("late_minutes") or 0),
-                    r.get("client_name"), r.get("client_phone"),
-                    r.get("delivery_address"), r.get("items"),
-                    r.get("cooked_time") or None, r.get("comment"), r.get("operator"),
-                    r.get("opened_at"),
-                    bool(r.get("has_problem", False)),
-                    r.get("payment_type"),
-                    r.get("source"),
-                    r.get("cancel_reason"), r.get("cancellation_details") or None,
-                    bool(r.get("payment_changed", False)),
-                )
+            await conn.executemany(
+                """INSERT INTO orders_raw
+                   (tenant_id, branch_name, delivery_num, status, courier, sum,
+                    planned_time, actual_time, is_self_service,
+                    date, is_late, late_minutes,
+                    client_name, client_phone, delivery_address, items,
+                    cooked_time, comment, operator, opened_at,
+                    has_problem,
+                    payment_type, source,
+                    cancel_reason, cancellation_details, payment_changed, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                           $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,now())
+                   ON CONFLICT (tenant_id, branch_name, delivery_num) DO UPDATE SET
+                     status=EXCLUDED.status, courier=EXCLUDED.courier, sum=EXCLUDED.sum,
+                     planned_time=EXCLUDED.planned_time, actual_time=EXCLUDED.actual_time,
+                     is_self_service=EXCLUDED.is_self_service, date=EXCLUDED.date,
+                     is_late=EXCLUDED.is_late, late_minutes=EXCLUDED.late_minutes,
+                     client_name=EXCLUDED.client_name, client_phone=EXCLUDED.client_phone,
+                     delivery_address=EXCLUDED.delivery_address, items=EXCLUDED.items,
+                     cooked_time=COALESCE(EXCLUDED.cooked_time, orders_raw.cooked_time),
+                     comment=EXCLUDED.comment, operator=EXCLUDED.operator,
+                     opened_at=EXCLUDED.opened_at, has_problem=EXCLUDED.has_problem,
+                     payment_type=EXCLUDED.payment_type,
+                     source=EXCLUDED.source,
+                     cancel_reason=EXCLUDED.cancel_reason, cancellation_details=EXCLUDED.cancellation_details,
+                     payment_changed=EXCLUDED.payment_changed,
+                     updated_at=now()""",
+                [
+                    (
+                        tenant_id,
+                        r.get("branch_name"), r.get("delivery_num"), r.get("status"),
+                        r.get("courier"), float(r.get("sum") or 0),
+                        r.get("planned_time"), r.get("actual_time"),
+                        bool(r.get("is_self_service", False)),
+                        _to_date(r.get("date")),
+                        bool(r.get("is_late", False)),
+                        float(r.get("late_minutes") or 0),
+                        r.get("client_name"), r.get("client_phone"),
+                        r.get("delivery_address"), r.get("items"),
+                        r.get("cooked_time") or None, r.get("comment"), r.get("operator"),
+                        r.get("opened_at"),
+                        bool(r.get("has_problem", False)),
+                        r.get("payment_type"),
+                        r.get("source"),
+                        r.get("cancel_reason"), r.get("cancellation_details") or None,
+                        bool(r.get("payment_changed", False)),
+                    )
+                    for r in rows
+                ],
+            )
 
 
 async def get_client_order_count(phone: str, tenant_id: int) -> int:
@@ -318,20 +322,24 @@ async def upsert_shifts_batch(rows: list[dict], tenant_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for r in rows:
-                await conn.execute(
-                    """INSERT INTO shifts_raw
-                       (tenant_id, branch_name, employee_id, employee_name, role_class,
-                        date, clock_in, clock_out, updated_at)
-                       VALUES ($1,$2,$3,$4,$5,$6::date,$7,$8,now())
-                       ON CONFLICT (tenant_id, branch_name, employee_id, clock_in) DO UPDATE SET
-                         employee_name=EXCLUDED.employee_name, role_class=EXCLUDED.role_class,
-                         date=EXCLUDED.date, clock_out=EXCLUDED.clock_out, updated_at=now()""",
-                    tenant_id,
-                    r.get("branch_name"), r.get("employee_id"),
-                    r.get("employee_name"), r.get("role_class"),
-                    _to_date(r.get("date")), r.get("clock_in"), r.get("clock_out"),
-                )
+            await conn.executemany(
+                """INSERT INTO shifts_raw
+                   (tenant_id, branch_name, employee_id, employee_name, role_class,
+                    date, clock_in, clock_out, updated_at)
+                   VALUES ($1,$2,$3,$4,$5,$6::date,$7,$8,now())
+                   ON CONFLICT (tenant_id, branch_name, employee_id, clock_in) DO UPDATE SET
+                     employee_name=EXCLUDED.employee_name, role_class=EXCLUDED.role_class,
+                     date=EXCLUDED.date, clock_out=EXCLUDED.clock_out, updated_at=now()""",
+                [
+                    (
+                        tenant_id,
+                        r.get("branch_name"), r.get("employee_id"),
+                        r.get("employee_name"), r.get("role_class"),
+                        _to_date(r.get("date")), r.get("clock_in"), r.get("clock_out"),
+                    )
+                    for r in rows
+                ],
+            )
 
 
 async def get_today_shifts(branch_name: str, date_iso: str, tenant_id: int) -> list[dict]:
@@ -389,56 +397,60 @@ async def upsert_daily_stats_batch(rows: list[dict], tenant_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for r in rows:
-                await conn.execute(
-                    """INSERT INTO daily_stats
-                       (tenant_id, branch_name, date, orders_count, revenue, avg_check,
-                        cogs_pct, sailplay, discount_sum, discount_types,
-                        delivery_count, pickup_count, late_count, total_delivered,
-                        late_percent, avg_late_min, cooks_count, couriers_count,
-                        late_delivery_count, late_pickup_count,
-                        avg_cooking_min, avg_wait_min, avg_delivery_min, exact_time_count,
-                        cash, noncash,
-                        new_customers, new_customers_revenue,
-                        repeat_customers, repeat_customers_revenue)
-                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
-                       ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
-                         orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
-                         avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
-                         sailplay=EXCLUDED.sailplay, discount_sum=EXCLUDED.discount_sum,
-                         discount_types=EXCLUDED.discount_types,
-                         delivery_count=EXCLUDED.delivery_count, pickup_count=EXCLUDED.pickup_count,
-                         late_count=EXCLUDED.late_count, total_delivered=EXCLUDED.total_delivered,
-                         late_percent=EXCLUDED.late_percent, avg_late_min=EXCLUDED.avg_late_min,
-                         cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
-                         late_delivery_count=EXCLUDED.late_delivery_count,
-                         late_pickup_count=EXCLUDED.late_pickup_count,
-                         avg_cooking_min=EXCLUDED.avg_cooking_min,
-                         avg_wait_min=EXCLUDED.avg_wait_min,
-                         avg_delivery_min=EXCLUDED.avg_delivery_min,
-                         exact_time_count=EXCLUDED.exact_time_count,
-                         cash=EXCLUDED.cash, noncash=EXCLUDED.noncash,
-                         new_customers=EXCLUDED.new_customers,
-                         new_customers_revenue=EXCLUDED.new_customers_revenue,
-                         repeat_customers=EXCLUDED.repeat_customers,
-                         repeat_customers_revenue=EXCLUDED.repeat_customers_revenue,
-                         updated_at=now()""",
-                    tenant_id,
-                    r.get("branch_name"), _to_date(r.get("date")),
-                    r.get("orders_count", 0), r.get("revenue", 0), r.get("avg_check", 0),
-                    r.get("cogs_pct"), r.get("sailplay"), r.get("discount_sum"),
-                    r.get("discount_types"),
-                    r.get("delivery_count", 0), r.get("pickup_count", 0),
-                    r.get("late_count", 0), r.get("total_delivered", 0),
-                    r.get("late_percent", 0), r.get("avg_late_min", 0),
-                    r.get("cooks_count", 0), r.get("couriers_count", 0),
-                    r.get("late_delivery_count", 0), r.get("late_pickup_count", 0),
-                    r.get("avg_cooking_min"), r.get("avg_wait_min"), r.get("avg_delivery_min"),
-                    r.get("exact_time_count", 0),
-                    r.get("cash", 0.0), r.get("noncash", 0.0),
-                    r.get("new_customers", 0), r.get("new_customers_revenue", 0.0),
-                    r.get("repeat_customers", 0), r.get("repeat_customers_revenue", 0.0),
-                )
+            await conn.executemany(
+                """INSERT INTO daily_stats
+                   (tenant_id, branch_name, date, orders_count, revenue, avg_check,
+                    cogs_pct, sailplay, discount_sum, discount_types,
+                    delivery_count, pickup_count, late_count, total_delivered,
+                    late_percent, avg_late_min, cooks_count, couriers_count,
+                    late_delivery_count, late_pickup_count,
+                    avg_cooking_min, avg_wait_min, avg_delivery_min, exact_time_count,
+                    cash, noncash,
+                    new_customers, new_customers_revenue,
+                    repeat_customers, repeat_customers_revenue)
+                   VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30)
+                   ON CONFLICT (tenant_id, branch_name, date) DO UPDATE SET
+                     orders_count=EXCLUDED.orders_count, revenue=EXCLUDED.revenue,
+                     avg_check=EXCLUDED.avg_check, cogs_pct=EXCLUDED.cogs_pct,
+                     sailplay=EXCLUDED.sailplay, discount_sum=EXCLUDED.discount_sum,
+                     discount_types=EXCLUDED.discount_types,
+                     delivery_count=EXCLUDED.delivery_count, pickup_count=EXCLUDED.pickup_count,
+                     late_count=EXCLUDED.late_count, total_delivered=EXCLUDED.total_delivered,
+                     late_percent=EXCLUDED.late_percent, avg_late_min=EXCLUDED.avg_late_min,
+                     cooks_count=EXCLUDED.cooks_count, couriers_count=EXCLUDED.couriers_count,
+                     late_delivery_count=EXCLUDED.late_delivery_count,
+                     late_pickup_count=EXCLUDED.late_pickup_count,
+                     avg_cooking_min=EXCLUDED.avg_cooking_min,
+                     avg_wait_min=EXCLUDED.avg_wait_min,
+                     avg_delivery_min=EXCLUDED.avg_delivery_min,
+                     exact_time_count=EXCLUDED.exact_time_count,
+                     cash=EXCLUDED.cash, noncash=EXCLUDED.noncash,
+                     new_customers=EXCLUDED.new_customers,
+                     new_customers_revenue=EXCLUDED.new_customers_revenue,
+                     repeat_customers=EXCLUDED.repeat_customers,
+                     repeat_customers_revenue=EXCLUDED.repeat_customers_revenue,
+                     updated_at=now()""",
+                [
+                    (
+                        tenant_id,
+                        r.get("branch_name"), _to_date(r.get("date")),
+                        r.get("orders_count", 0), r.get("revenue", 0), r.get("avg_check", 0),
+                        r.get("cogs_pct"), r.get("sailplay"), r.get("discount_sum"),
+                        r.get("discount_types"),
+                        r.get("delivery_count", 0), r.get("pickup_count", 0),
+                        r.get("late_count", 0), r.get("total_delivered", 0),
+                        r.get("late_percent", 0), r.get("avg_late_min", 0),
+                        r.get("cooks_count", 0), r.get("couriers_count", 0),
+                        r.get("late_delivery_count", 0), r.get("late_pickup_count", 0),
+                        r.get("avg_cooking_min"), r.get("avg_wait_min"), r.get("avg_delivery_min"),
+                        r.get("exact_time_count", 0),
+                        r.get("cash", 0.0), r.get("noncash", 0.0),
+                        r.get("new_customers", 0), r.get("new_customers_revenue", 0.0),
+                        r.get("repeat_customers", 0), r.get("repeat_customers_revenue", 0.0),
+                    )
+                    for r in rows
+                ],
+            )
 
 
 async def get_daily_stats(branch_name: str, date_iso: str, tenant_id: int) -> dict | None:
@@ -477,15 +489,19 @@ async def save_competitor_items(
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for item in items:
-                await conn.execute(
-                    """INSERT INTO competitor_menu_items
-                       (snapshot_id, tenant_id, city, competitor_name, category, name, price, price_old, portion)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
-                    snapshot_id, tenant_id, city, competitor_name,
-                    item.get("category"), item["name"], item["price"],
-                    item.get("price_old"), item.get("portion"),
-                )
+            await conn.executemany(
+                """INSERT INTO competitor_menu_items
+                   (snapshot_id, tenant_id, city, competitor_name, category, name, price, price_old, portion)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                [
+                    (
+                        snapshot_id, tenant_id, city, competitor_name,
+                        item.get("category"), item["name"], item["price"],
+                        item.get("price_old"), item.get("portion"),
+                    )
+                    for item in items
+                ],
+            )
 
 
 async def get_second_last_competitor_items(city: str, competitor_name: str, tenant_id: int) -> list[dict]:
@@ -566,17 +582,21 @@ async def save_audit_events_batch(events: list[dict], tenant_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for e in events:
-                await conn.execute(
-                    """INSERT INTO audit_events
-                       (tenant_id, date, branch_name, city, event_type, severity, description, meta_json, created_at)
-                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)""",
-                    tenant_id,
-                    _to_date(e.get("date")), e.get("branch_name"), e.get("city"),
-                    e.get("event_type"), e.get("severity", "warning"),
-                    e.get("description"), e.get("meta_json"),
-                    datetime.fromisoformat((e.get("created_at") or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")),
-                )
+            await conn.executemany(
+                """INSERT INTO audit_events
+                   (tenant_id, date, branch_name, city, event_type, severity, description, meta_json, created_at)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9)""",
+                [
+                    (
+                        tenant_id,
+                        _to_date(e.get("date")), e.get("branch_name"), e.get("city"),
+                        e.get("event_type"), e.get("severity", "warning"),
+                        e.get("description"), e.get("meta_json"),
+                        datetime.fromisoformat((e.get("created_at") or datetime.now(timezone.utc).isoformat()).replace("Z", "+00:00")),
+                    )
+                    for e in events
+                ],
+            )
 
 
 async def clear_audit_events(date: str, branch_name: str | None = None, *, tenant_id: int) -> None:
@@ -1913,22 +1933,26 @@ async def upsert_fot_daily_batch(rows: list[dict], tenant_id: int) -> None:
     pool = get_pool()
     async with pool.acquire() as conn:
         async with conn.transaction():
-            for r in rows:
-                await conn.execute(
-                    """INSERT INTO fot_daily
-                       (tenant_id, branch_name, date, category,
-                        fot_sum, hours_sum, employees_count, employees_no_rate)
-                       VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8)
-                       ON CONFLICT (tenant_id, branch_name, date, category) DO UPDATE SET
-                         fot_sum=EXCLUDED.fot_sum,
-                         hours_sum=EXCLUDED.hours_sum,
-                         employees_count=EXCLUDED.employees_count,
-                         employees_no_rate=EXCLUDED.employees_no_rate,
-                         updated_at=now()""",
-                    tenant_id,
-                    r["branch_name"], _to_date(r["date"]), r["category"],
-                    r["fot_sum"], r["hours_sum"], r["employees_count"], r["employees_no_rate"],
-                )
+            await conn.executemany(
+                """INSERT INTO fot_daily
+                   (tenant_id, branch_name, date, category,
+                    fot_sum, hours_sum, employees_count, employees_no_rate)
+                   VALUES ($1,$2,$3::date,$4,$5,$6,$7,$8)
+                   ON CONFLICT (tenant_id, branch_name, date, category) DO UPDATE SET
+                     fot_sum=EXCLUDED.fot_sum,
+                     hours_sum=EXCLUDED.hours_sum,
+                     employees_count=EXCLUDED.employees_count,
+                     employees_no_rate=EXCLUDED.employees_no_rate,
+                     updated_at=now()""",
+                [
+                    (
+                        tenant_id,
+                        r["branch_name"], _to_date(r["date"]), r["category"],
+                        r["fot_sum"], r["hours_sum"], r["employees_count"], r["employees_no_rate"],
+                    )
+                    for r in rows
+                ],
+            )
 
 
 async def get_fot_daily(

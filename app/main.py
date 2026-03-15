@@ -20,6 +20,7 @@ from slowapi.errors import RateLimitExceeded
 
 from datetime import datetime
 from app.clients import telegram
+from app.clients.http_pool import init_http_clients, close_http_clients
 from app.config import get_settings
 from app.db import (
     init_db, get_access_config_from_db,
@@ -358,6 +359,7 @@ def register_jobs() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Запуск приложения...")
+    await init_http_clients()
     await init_db()
     logger.info("SQLite инициализирован")
 
@@ -446,6 +448,7 @@ async def lifespan(app: FastAPI):
     for task in _polling_tasks:
         task.cancel()
     scheduler.shutdown(wait=False)
+    await close_http_clients()
 
 
 limiter = Limiter(key_func=get_remote_address)

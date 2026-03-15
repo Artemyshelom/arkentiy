@@ -7,15 +7,24 @@ Auth: Basic (shop_id:secret_key)
 
 import logging
 import uuid
+from contextlib import nullcontext
 
 import httpx
 
+from app.clients.http_pool import yukassa_client as _pool_client
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
 BASE_URL = "https://api.yookassa.ru/v3"
 REQUEST_TIMEOUT = 30.0
+
+
+def _yk_client():
+    """Returns async context manager wrapping the shared client (or a fresh one as fallback)."""
+    if _pool_client is not None:
+        return nullcontext(_pool_client)
+    return httpx.AsyncClient(timeout=REQUEST_TIMEOUT)
 
 
 def _auth() -> tuple[str, str]:
@@ -65,7 +74,7 @@ async def create_payment(
 
     idempotence_key = str(uuid.uuid4())
 
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+    async with _yk_client() as client:
         resp = await client.post(
             f"{BASE_URL}/payments",
             json=payload,
@@ -84,7 +93,7 @@ async def create_payment(
 
 async def get_payment(payment_id: str) -> dict:
     """Получает информацию о платеже."""
-    async with httpx.AsyncClient(timeout=REQUEST_TIMEOUT) as client:
+    async with _yk_client() as client:
         resp = await client.get(
             f"{BASE_URL}/payments/{payment_id}",
             auth=_auth(),

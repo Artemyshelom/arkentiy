@@ -14,19 +14,22 @@ from datetime import datetime, timedelta, timezone
 
 from app.db import get_all_branches, get_pool, upsert_hourly_stats
 from app.utils.job_tracker import track_job
+from app.utils.timezone import DEFAULT_TZ, utc_hour_to_local_bounds
 
 logger = logging.getLogger(__name__)
 
 _FINAL_STATUSES = ("Доставлена", "Закрыта")
 
 
-async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime) -> None:
-    """Агрегирует данные за один час для одной точки и сохраняет в hourly_stats."""
-    hour_end = hour_start + timedelta(hours=1)
-    # TEXT::timestamp в SQL даёт naive timestamp, поэтому параметры должны быть naive.
-    # Timezone сохраняется только при записи в hourly_stats.hour (TIMESTAMPTZ).
-    hs = hour_start.replace(tzinfo=None)
-    he = hour_end.replace(tzinfo=None)
+async def aggregate_hour(tenant_id: int, branch_name: str, hour_utc: datetime) -> None:
+    """Агрегирует данные за один час для одной точки и сохраняет в hourly_stats.
+
+    hour_utc: aware UTC datetime (начало часа). Записывается в TIMESTAMPTZ напрямую.
+    WHERE сравнивает с opened_at/clock_in (local naive TEXT) через utc_hour_to_local_bounds.
+    """
+    assert hour_utc.tzinfo is not None, "hour_utc must be timezone-aware (UTC)"
+    # Конвертируем UTC-час в naive local bounds для сравнения с TEXT-timestamps
+    hs, he = utc_hour_to_local_bounds(hour_utc)
     pool = get_pool()
 
     async with pool.acquire() as conn:
@@ -112,7 +115,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
         )
 
         # ------------------------------------------------------------------
-        # Персонал на смене в этот час (пересечение смены с [hour_start, hour_end))
+        # Персонал на смене в этот час (пересечение смены с [hour_utc, hour_utc+1))
         # ------------------------------------------------------------------
         shift_rows = await conn.fetch(
             """SELECT role_class
@@ -162,7 +165,7 @@ async def aggregate_hour(tenant_id: int, branch_name: str, hour_start: datetime)
     await upsert_hourly_stats(
         {
             "branch_name": branch_name,
-            "hour": hour_start.replace(tzinfo=None),  # naive — колонка TIMESTAMP
+            "hour": hour_utc,  # aware UTC → TIMESTAMPTZ
             "orders_count": orders_count,
             "completed_count": completed_count,
             "revenue": revenue,
@@ -216,21 +219,23 @@ async def job_hourly_stats() -> None:
             errors += 1
 
     logger.info(
-        f"[hourly_stats] Час {hour_start.strftime('%Y-%m-%d %H:00')} UTC — "
+        f"[hourly_stats] Час {hour_start.strftime('%Y-%m-%d %H:00+00')} — "
         f"обработано {processed} точек, ошибок: {errors}"
     )
 
 
 @track_job("hourly_stats_recalc_yesterday")
 async def job_recalc_yesterday_hourly() -> None:
-    """Пересчитывает все 24 часа вчерашнего дня (UTC).
+    """Пересчитывает все 24 часа вчерашнего LOCAL дня (Asia/Krasnoyarsk).
 
     Запускается в 06:35 МСК — после OLAP enrichment (05:26 МСК), который заполняет
     тайминги (cooked_time, opened_at, etc.) за вчера. Без этого avg_cook_time и др.
     будут NULL весь день.
+
+    ВАЖНО: итерация по LOCAL calendar day (не UTC), чтобы покрыть все часы рабочего дня.
     """
-    now_utc = datetime.now(timezone.utc)
-    yesterday = (now_utc - timedelta(days=1)).date()
+    now_local = datetime.now(DEFAULT_TZ)
+    yesterday_local = (now_local - timedelta(days=1)).date()
 
     branches = get_all_branches()
     if not branches:
@@ -241,22 +246,24 @@ async def job_recalc_yesterday_hourly() -> None:
     errors = 0
     for b in branches:
         for h in range(24):
-            hour_start = datetime(
-                yesterday.year, yesterday.month, yesterday.day, h, 0, 0,
-                tzinfo=timezone.utc,
+            # Строим aware local datetime → конвертируем в UTC для записи в TIMESTAMPTZ
+            local_hour = datetime(
+                yesterday_local.year, yesterday_local.month, yesterday_local.day,
+                h, 0, 0, tzinfo=DEFAULT_TZ,
             )
+            hour_utc = local_hour.astimezone(timezone.utc)
             try:
-                await aggregate_hour(b["tenant_id"], b["name"], hour_start)
+                await aggregate_hour(b["tenant_id"], b["name"], hour_utc)
                 processed += 1
             except Exception as e:
                 logger.error(
                     f"[hourly_stats_recalc] Ошибка {b['name']} (tenant={b['tenant_id']}) "
-                    f"за {hour_start.isoformat()}: {e}",
+                    f"за {hour_utc.isoformat()}: {e}",
                     exc_info=True,
                 )
                 errors += 1
 
     logger.info(
-        f"[hourly_stats_recalc] Пересчёт {yesterday} UTC — "
+        f"[hourly_stats_recalc] Пересчёт {yesterday_local} (local) — "
         f"обработано {processed} точек×часов, ошибок: {errors}"
     )

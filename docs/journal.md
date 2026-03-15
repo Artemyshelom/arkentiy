@@ -9,6 +9,53 @@
 
 ---
 
+## 2026-03-15: ✅ Миграция hourly_stats.hour → TIMESTAMPTZ (aware UTC)
+
+**Ветка:** `fix/hourly-stats-timestamptz`  
+**Файлы:** `app/utils/timezone.py`, `app/jobs/hourly_stats.py`, `app/onboarding/backfill_hourly_stats.py`, `app/database_pg.py`, `app/routers/stats.py`, `app/migrations/016_hourly_stats_timestamptz.sql`
+
+### Проблема
+
+`hourly_stats.hour` хранил **местное время (UTC+7) как naive TIMESTAMP**. Миграция 009 создала TIMESTAMPTZ, но крон записывал `hour_start.replace(tzinfo=None)` — naive local. Миграция 015 это зафиксировала (`ALTER TYPE → TIMESTAMP`). Для мультитенанта с разными tz — тупик.
+
+### Инвариант (зафиксирован)
+
+- `orders_raw`, `shifts_raw` — текстовые timestamps в **местном времени филиала** (UTC+7)
+- `hourly_stats.hour` — **UTC aware instant (TIMESTAMPTZ)**, начало часа по местному времени, сохранённое как UTC
+- Пример: local 15:00 KSK = UTC 08:00 → хранится `2026-03-08 08:00:00+00`
+
+### Что изменено
+
+| Файл | Изменение |
+|------|----------|
+| `app/utils/timezone.py` | `DEFAULT_TZ`, `utc_hour_to_local_bounds()` |
+| `app/jobs/hourly_stats.py` | `aggregate_hour`: параметр переименован в `hour_utc`, assert aware, WHERE через `utc_hour_to_local_bounds`, запись aware UTC |
+| `app/jobs/hourly_stats.py` | `job_recalc_yesterday_hourly`: итерация по LOCAL calendar day (KSK), не UTC |
+| `app/onboarding/backfill_hourly_stats.py` | Зеркально: `_aggregate_hour`, цикл часов → local→UTC; `server_settings={'timezone': 'UTC'}` в пуле |
+| `app/database_pg.py` | `get_hourly_stats`: input = local day → UTC range; `server_settings={'timezone': 'UTC'}` в обоих пулах |
+| `app/routers/stats.py` | `_build_hourly`: `r["hour"].astimezone(DEFAULT_TZ).isoformat()` для ответа с tz-info |
+| `app/migrations/016_hourly_stats_timestamptz.sql` | `ALTER COLUMN hour TYPE TIMESTAMPTZ USING hour AT TIME ZONE 'Asia/Krasnoyarsk'` |
+
+### Деплой
+
+**Двухфазный** — код и миграция разделены:
+
+1. Фаза 1: деплой кода (`git push` → VPS `git pull && docker compose up -d --build`), подождать 1 час (крон без ошибок)
+2. Фаза 2: бэкап → precheck коллизий → миграция 016 → пересчитать вчера → проверить
+
+Precheck перед ALTER:
+```sql
+SELECT tenant_id, branch_name, hour AT TIME ZONE 'Asia/Krasnoyarsk', COUNT(*)
+FROM hourly_stats GROUP BY 1, 2, 3 HAVING COUNT(*) > 1;
+```
+
+Откат миграции (если что-то пошло не так):
+```sql
+ALTER TABLE hourly_stats ALTER COLUMN hour TYPE TIMESTAMP USING hour AT TIME ZONE 'Asia/Krasnoyarsk';
+```
+
+---
+
 ## 2026-03-15: ✅ Security audit — закрыты уязвимости платёжного API
 
 **Ветка:** `fix/security-critical`  

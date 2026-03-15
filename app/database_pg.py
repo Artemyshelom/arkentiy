@@ -37,7 +37,7 @@ MIGRATION_DIR = Path(__file__).parent / "migrations"
 async def init_db(database_url: str) -> None:
     """Создаёт пул соединений и применяет миграции."""
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10)
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=10, server_settings={"timezone": "UTC"})
     logger.info("PostgreSQL pool создан")
 
     # Применяем все миграции по порядку
@@ -72,7 +72,7 @@ async def init_pool_only(database_url: str) -> None:
     Используется в backfill-скриптах, где БД уже содержит актуальную схему.
     """
     global _pool
-    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5)
+    _pool = await asyncpg.create_pool(database_url, min_size=2, max_size=5, server_settings={"timezone": "UTC"})
     logger.info("PostgreSQL pool создан (без миграций)")
 
 
@@ -1643,17 +1643,19 @@ async def get_hourly_stats(
 ) -> list[dict]:
     """Возвращает строки hourly_stats за период [hour_from, hour_to) для одной точки.
 
-    hour_from / hour_to — ISO-строки: '2026-03-07' или '2026-03-07T09:00:00'.
+    hour_from / hour_to — ISO-строки в LOCAL времени (т..е. бизнес-дата).
+    '2026-03-08' → начало local дня 2026-03-08 (KSK) → UTC 2026-03-07 17:00.
     """
+    from app.utils.timezone import DEFAULT_TZ
     pool = get_pool()
-    from datetime import datetime as _dt
+    from datetime import datetime as _dt, timezone as _tz
     dt_from = _dt.fromisoformat(hour_from) if isinstance(hour_from, str) else hour_from
     dt_to   = _dt.fromisoformat(hour_to)   if isinstance(hour_to,   str) else hour_to
-    # Колонка hour — TIMESTAMP (без таймзоны); aware datetime вызовет ошибку
-    if dt_from.tzinfo:
-        dt_from = dt_from.replace(tzinfo=None)
-    if dt_to.tzinfo:
-        dt_to = dt_to.replace(tzinfo=None)
+    # Input = local calendar boundary → конвертируем в UTC для TIMESTAMPTZ
+    if dt_from.tzinfo is None:
+        dt_from = dt_from.replace(tzinfo=DEFAULT_TZ).astimezone(_tz.utc)
+    if dt_to.tzinfo is None:
+        dt_to = dt_to.replace(tzinfo=DEFAULT_TZ).astimezone(_tz.utc)
     rows = await pool.fetch(
         """SELECT hour, orders_count, revenue, avg_check,
                   avg_cook_time, avg_courier_wait, avg_delivery_time,

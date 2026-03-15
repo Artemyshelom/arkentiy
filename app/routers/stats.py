@@ -27,6 +27,7 @@ from app.ctx import ctx_tenant_id
 from app.database_pg import get_daily_stats, get_hourly_stats, get_period_stats, get_shifts_by_date
 from app.jobs.iiko_status_report import get_available_branches
 from app.jobs.late_alerts import ACTIVE_DELIVERY_STATUSES, LATE_MAX_MIN, LOCAL_UTC_OFFSET
+from app.utils.timezone import DEFAULT_TZ
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -361,7 +362,9 @@ async def _build_hourly(
         hours_out = []
         for r in rows:
             h = r["hour"]
-            # Normalize to ISO string regardless of how asyncpg returns it
+            # hour — TIMESTAMPTZ (aware UTC) → конвертируем в local для ответа
+            if hasattr(h, "astimezone"):
+                h = h.astimezone(DEFAULT_TZ)
             hour_str = h.isoformat() if hasattr(h, "isoformat") else str(h)
             cnt = int(r["orders_count"] or 0)
             rev = float(r["revenue"] or 0)

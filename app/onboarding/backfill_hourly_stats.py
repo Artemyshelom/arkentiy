@@ -25,6 +25,8 @@ from pathlib import Path
 
 import asyncpg
 
+from app.utils.timezone import DEFAULT_TZ, utc_hour_to_local_bounds
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
@@ -61,6 +63,7 @@ class HourlyStatsBackfiller:
             os.getenv("DATABASE_URL", "postgresql://localhost/arkentiy"),
             min_size=2,
             max_size=5,
+            server_settings={"timezone": "UTC"},
         )
 
     async def close_db(self) -> None:
@@ -91,13 +94,15 @@ class HourlyStatsBackfiller:
     # ------------------------------------------------------------------
 
     async def _aggregate_hour(
-        self, conn: asyncpg.Connection, tenant_id: int, branch_name: str, hour_start: datetime
+        self, conn: asyncpg.Connection, tenant_id: int, branch_name: str, hour_utc: datetime
     ) -> None:
-        """Агрегирует один час для одной точки и делает UPSERT в hourly_stats."""
-        hour_end = hour_start + timedelta(hours=1)
-        # TEXT::timestamp даёт naive timestamp — параметры должны быть naive.
-        hs = hour_start.replace(tzinfo=None)
-        he = hour_end.replace(tzinfo=None)
+        """Агрегирует один час для одной точки и делает UPSERT в hourly_stats.
+
+        hour_utc: aware UTC datetime. WHERE сравнивает через naive local bounds.
+        """
+        assert hour_utc.tzinfo is not None, "hour_utc must be timezone-aware (UTC)"
+        # Найвные local границы для сравнения с opened_at / clock_in (TEXT local)
+        hs, he = utc_hour_to_local_bounds(hour_utc)
 
         order_row = await conn.fetchrow(
             """SELECT
@@ -241,7 +246,7 @@ class HourlyStatsBackfiller:
                  couriers_on_shift=EXCLUDED.couriers_on_shift,
                  orders_in_progress=EXCLUDED.orders_in_progress,
                  updated_at=now()""",
-            tenant_id, branch_name, hs,  # hs — naive datetime для TIMESTAMP-колонки
+            tenant_id, branch_name, hour_utc,  # aware UTC → TIMESTAMPTZ
             orders_count, revenue,
             round(revenue / orders_count, 2) if orders_count else 0.0,
             _f(order_row["avg_cook_time"]),
@@ -319,16 +324,18 @@ class HourlyStatsBackfiller:
             async with self.pool.acquire() as conn:
                 for branch in branches:
                     for h in range(24):
-                        hour_start = datetime(
+                        # Строим aware local datetime → конвертируем в UTC (как в job_recalc)
+                        local_hour = datetime(
                             current.year, current.month, current.day, h, 0, 0,
-                            tzinfo=timezone.utc,
+                            tzinfo=DEFAULT_TZ,
                         )
+                        hour_utc = local_hour.astimezone(timezone.utc)
                         try:
-                            await self._aggregate_hour(conn, tenant_id, branch, hour_start)
+                            await self._aggregate_hour(conn, tenant_id, branch, hour_utc)
                             self.stats["ok"] += 1
                         except Exception as e:
                             logger.error(
-                                f"[tenant={tenant_id}] {branch} {hour_start.isoformat()}: {e}"
+                                f"[tenant={tenant_id}] {branch} {hour_utc.isoformat()}: {e}"
                             )
                             self.stats["error"] += 1
                             day_errors += 1

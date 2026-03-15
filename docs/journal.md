@@ -9,6 +9,40 @@
 
 ---
 
+## 2026-03-15: ✅ Security audit — закрыты уязвимости платёжного API
+
+**Ветка:** `fix/security-critical`  
+**Коммиты:** `0e3a533` (код), `27fc25d` (документация)
+
+### Что было найдено (входящие данные от ТЗ + ревью кода)
+
+1. **Debug-блок в продакшн-коде.** Cursor AI внедрил `try/open(log)/except` блок в `database_pg.py:get_daily_stats()` во время отладочной сессии. Функция вызывается сотни раз в сутки — писал на диск при каждом вызове.
+2. **`GET /api/payments/{id}/status` — публичный.** Возвращал `card_last4`, `tenant_name`, `modules` любому, знающему UUID платежа.
+3. **`POST /api/payments/{id}/retry` — публичный.** Любой мог создать новый платёж от чужого UUID.
+4. **`GET /api/invoices/{id}`, `POST /api/invoices/{id}/confirm` — публичные.** Отдавали юрданные (ИНН, название организации) любому знающему invoice_id.
+5. **Баг: `req.tenant_id`** в `api_create_payment` — `PaymentCreateRequest` не имеет этого поля, AttributeError при ошибке ЮKassa → 500.
+6. **`get_tenant_id` fail-open** при недоступной БД — отозванный JWT продолжал работать.
+
+### Что сделано
+
+| Файл | Изменение |
+|------|----------|
+| `app/database_pg.py` | Удалён debug-блок |
+| `app/services/auth.py` | Fail-closed: `except Exception` → `raise HTTPException(503)`; добавлен `logger` |
+| `app/routers/payments.py` | HMAC-хелперы `_sign_id`/`_verify_token`; защищены 4 эндпоинта; токен в `return_url`/`invoice_url`; фикс `req.tenant_id` |
+| `web/payment/success.html` | Передаёт `token` из URL в API |
+| `web/payment/fail.html` | Передаёт `token` в retry-запрос |
+| `web/payment/invoice.html` | Передаёт `token` в get/confirm |
+
+### Решение по invoice — отклонение от ТЗ
+
+ТЗ предлагало JWT (`Depends(get_tenant_id)`) для invoice-эндпоинтов. Отклонено: страница счёта публичная и открывается без аутентификации (бухгалтер не имеет аккаунта). Применен тот же HMAC-подход что и для payments — токен генерируется при создании счёта и кладётся в `invoice_url`.
+
+### Статус
+Ветка готова к мержу в main, деплой пендинг.
+
+---
+
 ## 2026-03-14: ✅ Деплой boris_api_regression_audit — Мультитенантность + исправления на prod
 
 **Сессия:** Консолидация рефакторинга мультитенантности (refactor/multitenant-audit → main), деплой на VPS, верификация. Всё прошло без ошибок.

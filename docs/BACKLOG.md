@@ -31,6 +31,7 @@
 ## 🟡 В работе
 
 - [ ] `deploy_stability` (P0) — единый чеклист деплоя + контроль отката по инцидентам
+- [ ] `security_critical_deploy` (P0) — смержить и задеплоить ветку `fix/security-critical` (HMAC-токены payment/invoice, fail-closed auth, debug-log cleanup)
 
 ## 📋 Готово к разработке
 

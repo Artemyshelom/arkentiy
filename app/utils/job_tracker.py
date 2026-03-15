@@ -27,6 +27,7 @@ JOB_REGISTRY: dict[str, str] = {
     "late_alerts":        "Алерты опозданий",
     "cancel_sync":        "Синхронизация отмен",
     "recurring_billing":  "Биллинг SaaS",
+    "fot_daily":          "ФОТ-пайплайн",
 }
 
 # LIKE-паттерны для поиска в job_logs.
@@ -40,6 +41,7 @@ _JOB_PATTERNS: dict[str, list[str]] = {
     "late_alerts":        ["late_alerts%"],
     "cancel_sync":        ["cancel_sync%"],
     "recurring_billing":  ["recurring_billing%"],
+    "fot_daily":          ["fot_daily%"],
 }
 
 

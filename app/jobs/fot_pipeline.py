@@ -35,6 +35,7 @@ OWNER_CHAT_ID = "255968113"
 
 # Категории, которые пишем в fot_daily (other пропускаем)
 _FOT_CATEGORIES = frozenset({"cook", "courier", "admin"})
+logger = logging.getLogger(__name__)
 
 
 def _calc_hours(clock_in: str | None, clock_out: str | None) -> float:

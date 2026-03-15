@@ -9,6 +9,85 @@
 
 ---
 
+## 2026-03-15: ✅ Оптимизация производительности DB + HTTP
+
+**Ветка:** `feat/performance-batch-httpx`  
+**Файлы:** `app/database_pg.py`, `app/clients/http_pool.py`, `app/main.py`, `app/clients/telegram.py`, `app/clients/iiko_bo_events.py`, `app/clients/yukassa.py`
+
+### Проблема
+
+1. **Batch UPSERT** — функции вроде `upsert_orders_batch()` вызывали `conn.execute()` поштучно для каждой строки. При полной загрузке (full_reload каждые 6 часов): сотни заказов × 9 точек = тысячи отдельных round-trip запросов в БД.
+2. **httpx client pooling** — каждый запрос к Telegram, iiko, ЮKassa создавал новый `AsyncClient` → новое TCP-соединение → новый TLS handshake. Telegram: каждые 2 мин алерты. iiko Events API: каждые 30 сек polling.
+
+### Решение
+
+#### 1. asyncpg `executemany()` (batch UPSERT)
+
+Заменил `for r in rows: await conn.execute(...)` на `await conn.executemany(...)`:
+
+| Функция | Параметров | Типичные объёмы |
+|---------|----------|---------|
+| `upsert_orders_batch` | 26 | сотни заказов |
+| `upsert_shifts_batch` | 8 | десятки смен |
+| `upsert_daily_stats_batch` | 30 | единицы точек |
+| `upsert_fot_daily_batch` | 8 | единицы категорий |
+| `save_competitor_items` | 9 | тысячи товаров |
+| `save_audit_events_batch` | 9 | десятки событий |
+
+**Результат:** один SQL pipeline вместо N, one round-trip вместо N round-trips → 3-10x ускорение batch-команд.
+
+#### 2. Глобальные httpx клиенты
+
+Создал `app/clients/http_pool.py`:
+```python
+telegram_client = httpx.AsyncClient(timeout=15.0)
+iiko_client = httpx.AsyncClient(verify=False, timeout=60.0)
+yukassa_client = httpx.AsyncClient(timeout=30.0)
+```
+
+Инициализация в `main.py` lifespan → `init_http_clients()` на старте, `close_http_clients()` на stop.
+
+**Паттерн безопасного использования** — `nullcontext` + fallback на свежий клиент (для тестов/первого запуска):
+
+```python
+from contextlib import nullcontext
+def _tg_client():
+    return nullcontext(_pool_client) if _pool_client is not None else httpx.AsyncClient(...)
+async with _tg_client() as client:
+    response = await client.post(...)
+```
+
+**Результат:** переиспользование одного TCP-соединения (keep-alive) вместо создания нового на каждый запрос. Избегаем TLS handshake overhead, снижаем latency запросов на ~50-200мс, уменьшаем CPU на сервере.
+
+### Файлы изменено
+
+| Файл | Строк | Изменение |
+|------|-------|----------|
+| `app/clients/telegram.py` | +17 | Добавил `_tg_client()` helper, заменил 4 места на shared client |
+| `app/clients/iiko_bo_events.py` | +4 | Import, `_poll_branch` использует shared iiko_client (каждые 30с) |
+| `app/clients/yukassa.py` | +13 | `_yk_client()` helper, обе функции переведены на shared client |
+| `app/clients/http_pool.py` | +33 | Новый файл с глобальными клиентами |
+| `app/main.py` | +51 | Import, init/close вызовы в lifespan |
+| `app/database_pg.py` | -153/+321 | Все 6 batch функций на `executemany` (общий прирост из-за листа параметров) |
+
+### Деплой
+
+**15.03.2026 22:13 МСК:**
+- Мерж `feat/performance-batch-httpx` в main ✓
+- VPS: `git pull && docker compose restart` ✓
+- Контейнеры healthy ✓
+- Логи: httpx requests work (Telegram, iiko auth, employees), нет ошибок ✓
+
+### Метрики до/после
+
+Оценка из ТЗ:
+- **Batch UPSERT:** 3-10x ускорение batch-операций (один pipeline вместо N)
+- **httpx pooling:** экономия на TLS handshake, keep-alive соединения, ~50-200мс savings per request, CPU дешевле на сервере
+
+Full reload происходит раз в 6 часов, поэтому общее воздействие небольшое, но база чище и готова к масштабированию.
+
+---
+
 ## 2026-03-15: ✅ Миграция hourly_stats.hour → TIMESTAMPTZ (aware UTC)
 
 **Ветка:** `fix/hourly-stats-timestamptz`  
